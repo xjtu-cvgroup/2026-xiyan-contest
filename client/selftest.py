@@ -656,6 +656,82 @@ def test_horse_economy():
     return ok
 
 
+def test_watchdog():
+    """看门狗 + 人手账本兜底：字段缺失/看不到卡也不能冻死。"""
+    ok = True
+    with open(os.path.join(DOC_DIR, "start消息.json"), encoding="utf-8") as f:
+        start = json.load(f)["msg_data"]
+    with open(os.path.join(DOC_DIR, "inquire消息.json"), encoding="utf-8") as f:
+        inquire = json.load(f)["msg_data"]
+
+    def frozen_inquire(round_no, guard_visible, squad_field):
+        d = json.loads(json.dumps(inquire))
+        d["round"] = round_no
+        d["contests"], d["tasks"] = [], []
+        for p in d["players"]:
+            if p["playerId"] == 1001:
+                p.update(state="MOVING", currentNodeId="S09", nextNodeId="S10",
+                         routeEdgeId="E05", edgeProgressMs=6000, edgeTotalMs=55200,
+                         currentProcess=None, buffs=[], resources={},
+                         freshness=90.0, goodFruit=96, badFruit=0)
+                if squad_field is None:
+                    p.pop("squadAvailable", None)   # 平台字段缺失场景
+                else:
+                    p["squadAvailable"] = squad_field
+        for n in d["nodes"]:
+            n["hasObstacle"] = False
+            n["resourceStock"] = {}
+            n["guard"] = ({"ownerTeamId": "BLUE", "defense": 6, "active": True}
+                          if (guard_visible and n["nodeId"] == "S10") else None)
+        return d
+
+    # 1) squadAvailable 字段缺失时：本地账本兜底，冻结仍派削弱
+    gs = GameState(1001)
+    gs.on_start(start)
+    st = PlannerStrategy()
+    gs.on_inquire(frozen_inquire(320, guard_visible=True, squad_field=None))
+    a = st.decide(gs)
+    ok &= check("账本: 字段缺失仍派削弱",
+                any(x["action"] == "SQUAD_WEAKEN" and x["targetNodeId"] == "S10"
+                    for x in a),
+                json.dumps(a, ensure_ascii=False))
+
+    # 2) 看不到敌卡的冻结：8 帧停滞后看门狗改道
+    gs2 = GameState(1001)
+    gs2.on_start(start)
+    st2 = PlannerStrategy()
+    moved = None
+    for i in range(12):
+        gs2.on_inquire(frozen_inquire(320 + i, guard_visible=False, squad_field=6))
+        a = st2.decide(gs2)
+        mv = [x for x in a if x["action"] == "MOVE"]
+        # 排除自动补的续走 MOVE(目标 S10)——看门狗改道目标一定不是 S10
+        mv = [x for x in mv if x["targetNodeId"] != "S10"]
+        if mv:
+            moved = (i, mv[0])
+            break
+    ok &= check("看门狗: 停滞后改道离开冻结边",
+                moved is not None and moved[1]["targetNodeId"] != "S10",
+                str(moved))
+
+    # 3) 正常推进时看门狗不动作
+    gs3 = GameState(1001)
+    gs3.on_start(start)
+    st3 = PlannerStrategy()
+    fired = False
+    for i in range(12):
+        d = frozen_inquire(320 + i, guard_visible=False, squad_field=6)
+        for p in d["players"]:
+            if p["playerId"] == 1001:
+                p["edgeProgressMs"] = 6000 + i * 1000   # 每帧在走
+        gs3.on_inquire(d)
+        a = st3.decide(gs3)
+        if any(x["action"] == "MOVE" and x["targetNodeId"] != "S10" for x in a):
+            fired = True
+    ok &= check("看门狗: 正常推进不误触发", not fired)
+    return ok
+
+
 def main():
     ok = test_codec()
     ok &= test_state_and_strategy()
@@ -665,6 +741,7 @@ def main():
     ok &= test_edge_block()
     ok &= test_p0_audit()
     ok &= test_horse_economy()
+    ok &= test_watchdog()
     print()
     print("ALL PASS" if ok else "SOME FAILED")
     sys.exit(0 if ok else 1)

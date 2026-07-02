@@ -167,6 +167,8 @@ class PlannerStrategy(BaselineStrategy):
     MIN_GOOD_RESERVE = 5        # 攻坚投入好果时保留的底仓（交付要求好果 > 0）
     WEAKEN_RESEND_GAP = 12      # 同一设卡的削弱重发间隔（落地延迟 ~3-5 帧）
 
+    STALL_FRAMES = 8            # 移动进度停滞判定帧数（看门狗）
+
     def __init__(self, logger=None):
         super().__init__(logger)
         self.planner = TaskPlanner(logger)
@@ -175,6 +177,8 @@ class PlannerStrategy(BaselineStrategy):
         self._weaken_sent = {}  # nodeId -> 派出帧（削弱敌卡）
         self._weaken_target = None       # 本帧主车队让 squad_action 去削弱的目标
         self._last_forced_node = None    # 上次强制通行到达节点（规则禁止重复）
+        self._squad_spent = 0            # 本地人手账本（服务端字段缺失时兜底）
+        self._stall = (None, None, 0)    # (edgeId, progressMs, 连续停滞帧数)
 
     # ---------- 每帧入口 ----------
 
@@ -219,6 +223,17 @@ class PlannerStrategy(BaselineStrategy):
     def _absorb_feedback(self, state):
         super()._absorb_feedback(state)
         self._weaken_target = None
+
+        # 移动进度停滞检测：MOVING 且 (edge, progress) 连续 N 帧不变
+        me = state.me
+        edge, prog = me.get("routeEdgeId"), me.get("edgeProgressMs")
+        if edge and me.get("state") == P.ST_MOVING:
+            last_edge, last_prog, n = self._stall
+            self._stall = (edge, prog,
+                           n + 1 if (edge, prog) == (last_edge, last_prog) else 0)
+        else:
+            self._stall = (None, None, 0)
+
         for e in state.my_events("FORCED_PASS_END"):
             p = e.get("payload") or {}
             node = p.get("nodeId") or p.get("targetNodeId")
@@ -253,9 +268,20 @@ class PlannerStrategy(BaselineStrategy):
             # 边上主车队不能攻坚/强通（状态限制），但小分队动作不受限 -> 持续削弱。
             nxt = me.get("nextNodeId")
             if nxt and state.enemy_guard(nxt):
-                if state.phase != P.PHASE_RUSH and (me.get("squadAvailable") or 0) >= 2:
+                if state.phase != P.PHASE_RUSH and self._squad_avail(state) >= 2:
                     self._weaken_target = nxt  # squad_action 本帧发 SQUAD_WEAKEN
                 return None
+            # 看门狗兜底：进度停滞 >=8 帧但看不到敌卡（数据异常/未知阻挡），
+            # 改道走本段起点的其他相邻节点，放弃当前进度总好过冻死到终场
+            if self._stall[2] >= self.STALL_FRAMES:
+                alt = self._reroute_from_edge(state, me, nxt)
+                if alt:
+                    if self.log:
+                        self.log.warning("stall watchdog: frozen %d frames on %s, "
+                                         "reroute to %s", self._stall[2],
+                                         me.get("routeEdgeId"), alt)
+                    self._stall = (None, None, 0)
+                    return P.a_move(alt)
             # 移动中只能用马类资源：没有移动增益就顺手上马（不耽误本帧推进）。
             # 马匹经济：T06 类任务要消耗整匹马，留足预留量才骑（详见 planner）
             res = me.get("resources") or {}
@@ -362,7 +388,7 @@ class PlannerStrategy(BaselineStrategy):
         # 2) 果品不够破：派小分队削弱（-2/次），主车队本帧等待
         #    截止吃紧(slack<0)时跳过，直接走强制通行
         if plan.slack > 0 and state.phase != P.PHASE_RUSH \
-                and (me.get("squadAvailable") or 0) >= 2:
+                and self._squad_avail(state) >= 2:
             if state.round - self._weaken_sent.get(target, -999) >= self.WEAKEN_RESEND_GAP:
                 self._weaken_target = target  # squad_action 本帧发 SQUAD_WEAKEN
             return P.a_wait()
@@ -428,11 +454,18 @@ class PlannerStrategy(BaselineStrategy):
     # 标记只活 45 帧：只探 SCOUT_MAX_ETA 帧内能赶到的目标；宫门验核最早
     # ~390 帧才开放，355 帧前派去宫门的标记必然过期（实测一局浪费 6/8 人手）。
 
+    def _squad_avail(self, state):
+        """可用人手：服务端字段优先，缺失时用本地账本（初始 8）兜底。"""
+        v = state.me.get("squadAvailable")
+        if v is not None:
+            return v
+        return max(0, 8 - self._squad_spent)
+
     def squad_action(self, state, plan):
         if state.phase == P.PHASE_RUSH:
             return None  # 冲刺阶段禁止新派小分队
         me = state.me
-        avail = me.get("squadAvailable") or 0
+        avail = self._squad_avail(state)
         if avail <= 0:
             return None
 
@@ -441,6 +474,7 @@ class PlannerStrategy(BaselineStrategy):
             t = self._weaken_target
             self._weaken_sent[t] = state.round
             self._weaken_target = None
+            self._squad_spent += 2
             return P.a_squad_weaken(t)
 
         cur = me.get("currentNodeId") or me.get("nextNodeId")
@@ -462,8 +496,27 @@ class PlannerStrategy(BaselineStrategy):
             if not path or eta > self.SCOUT_MAX_ETA:
                 continue  # 太远：标记会在我们到达前过期
             self._scout_sent[t] = state.round
+            self._squad_spent += 1
             return P.a_squad_scout(t)
         return None
+
+    def _reroute_from_edge(self, state, me, blocked_next):
+        """路线边上改道：从本段起点的其他合法相邻节点中，选一条仍能到
+        目标（宫门/终点）的最快替代路；没有可行替代返回 None。"""
+        seg_start = me.get("currentNodeId")
+        if not seg_start:
+            return None
+        target = state.terminal_node if me.get("verified") else state.gate_node
+        penalty = self.planner._penalty_fn(state)
+        speed = state.my_speed()
+        best = None
+        for nb, _ in state.graph.neighbors(seg_start):
+            if nb == blocked_next or state.is_blocked(nb):
+                continue
+            eta, path = state.graph.shortest_path(nb, target, speed, penalty)
+            if path and (best is None or eta < best[1]):
+                best = (nb, eta)
+        return best[0] if best else None
 
     # ---------- 窗口 ----------
 
