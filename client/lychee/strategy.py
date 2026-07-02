@@ -177,6 +177,15 @@ class PlannerStrategy(BaselineStrategy):
     GUARD_ROUTE_TOLERANCE = 15  # 判断该节点是否在对手高效路线上的容差（帧）
     GUARD_RETRY_GAP = 40        # 同一节点设卡重试间隔
 
+    # ---- 防中边陷阱（V3.5）----
+    # 设卡必须站在节点上：对手占着/将先到我们的下一跳时，上边就可能被掐点
+    # 冻结（实测连环两次：S10 花 6 人手解冻，S11 无人手可用冻到终场未交付）。
+    # 它离开该节点后就永远无法在那里设卡 —— 等它走，留卡就站在节点上攻坚拆。
+    TRAP_GUARD_FRAMES = 4       # 设卡读条帧数（对手到点后需要的成卡时间）
+    TRAP_WAIT_MAX = 30          # 防对手赖着不走的对峙上限（帧）
+    # 注意：不设"截止吃紧就赌一把"的例外 —— slack 越紧冻结越致命
+    # （等待成本 10~30 帧 vs 冻结成本 180+ 帧），对峙上限已兜底防赖
+
     def __init__(self, logger=None):
         super().__init__(logger)
         self.planner = TaskPlanner(logger)
@@ -188,6 +197,7 @@ class PlannerStrategy(BaselineStrategy):
         self._squad_spent = 0            # 本地人手账本（服务端字段缺失时兜底）
         self._stall = (None, None, 0)    # (edgeId, progressMs, 连续停滞帧数)
         self._guard_sent = {}            # nodeId -> 设卡提交帧（防重试风暴）
+        self._trap_wait = (None, 0)      # (等待的目标节点, 连续等待帧数)
 
     # ---------- 每帧入口 ----------
 
@@ -384,6 +394,8 @@ class PlannerStrategy(BaselineStrategy):
             # 对手正在下一跳读条设卡：此时上边会在半路被冻结（边上不能攻坚），
             # 等 1~4 帧卡成型后站在节点上攻坚拆掉再走，代价小一个数量级
             return P.a_wait()
+        if self._mid_edge_trap_risk(state, cur, nxt, plan):
+            return P.a_wait()  # 防中边陷阱：等对手离开我们的下一跳再上边
         return P.a_move(nxt)
 
     # ---------- 主动设卡（V3）----------
@@ -530,6 +542,46 @@ class PlannerStrategy(BaselineStrategy):
         proc = state.opp.get("currentProcess") or {}
         return proc.get("targetNodeId") == node_id and \
             (proc.get("action") or proc.get("type")) == "SET_GUARD"
+
+    def _mid_edge_trap_risk(self, state, cur, nxt, plan):
+        """对手占着/将先我们到达下一跳节点 → 上边有被掐点冻结的风险。
+
+        规则依据：SET_GUARD 目标必须是其当前节点。对手离开该节点后就永远
+        不能再在那里设卡；等待期间它若留卡，我们站在节点上攻坚拆（2好果+
+        坏果瞬拆）远比中边冻结（6人手削弱 / 180帧风化）便宜。
+        """
+        def give_up():
+            self._trap_wait = (None, 0)
+            return False
+
+        opp = state.opp
+        if not opp or opp.get("delivered") or opp.get("retired"):
+            return give_up()
+
+        opp_cur = opp.get("currentNodeId")
+        opp_next = opp.get("nextNodeId")
+        risk = False
+        if not opp.get("routeEdgeId") and opp_cur == nxt:
+            risk = True        # 它正站在我们的下一跳上
+        elif opp_next == nxt:
+            # 它正赶往我们的下一跳：若它先到且来得及成卡（4帧），同样危险
+            opp_eta = self.planner._opp_eta(state, nxt)
+            edge = state.graph.edge_between(cur, nxt)
+            our_eta = state.graph.edge_frames(edge, state.my_speed()) if edge else 0
+            risk = opp_eta + self.TRAP_GUARD_FRAMES < our_eta
+
+        if not risk:
+            return give_up()
+        # 防赖着不走的对峙：同一节点连续等待超过上限就硬闯
+        node, n = self._trap_wait
+        n = n + 1 if node == nxt else 1
+        self._trap_wait = (nxt, n)
+        if n > self.TRAP_WAIT_MAX:
+            if self.log:
+                self.log.info("trap standoff at %s exceeded %d frames, pushing",
+                              nxt, self.TRAP_WAIT_MAX)
+            return False
+        return True
 
     # ---------- 小分队：给任务点 / 宫门提前打探路标记（读条 -3 帧） ----------
     # 标记只活 45 帧：只探 SCOUT_MAX_ETA 帧内能赶到的目标；宫门验核最早
