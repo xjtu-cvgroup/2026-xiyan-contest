@@ -15,8 +15,9 @@ import time
 from lychee_basic_client.config import Config
 from lychee.log import get_logger
 from lychee.session import StrategySession
+from lychee.version import BUILD_VERSION
 
-VERSION = "1.0"
+VERSION = BUILD_VERSION
 
 
 def _parse_player_id(raw):
@@ -73,6 +74,7 @@ def connect_with_retry(host, port, log, retries=30, delay=1.0):
 def main():
     config = parse_cli(sys.argv[1:])
     log = get_logger(config.player_id)
+    log.info("=== lychee client BUILD %s ===", BUILD_VERSION)
     sock = connect_with_retry(config.host, config.port, log)
     log.info("connected to %s:%s as player %s (%s)",
              config.host, config.port, config.player_id, config.player_name)

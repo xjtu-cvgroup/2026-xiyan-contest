@@ -55,7 +55,7 @@ def main():
                     rel = os.path.relpath(os.path.join(root, fn), HERE)
                     add_file(zf, rel, fn.endswith(".sh"))
 
-    # 自检：start.sh 在根目录、LF、可执行位
+    # 自检：start.sh 在根目录、LF、可执行位；并打印构建版本防止打旧包
     with zipfile.ZipFile(OUT) as zf:
         names = zf.namelist()
         assert "start.sh" in names, "start.sh 必须在 ZIP 根目录"
@@ -63,7 +63,12 @@ def main():
         assert b"\r" not in data, "start.sh 仍含 CR，LF 归一化失败"
         mode = (zf.getinfo("start.sh").external_attr >> 16) & 0o777
         assert mode == 0o755, f"start.sh 权限异常: {oct(mode)}"
+        ver = "UNKNOWN"
+        for line in zf.read("lychee/version.py").decode("utf-8").splitlines():
+            if line.startswith("BUILD_VERSION"):
+                ver = line.split("=", 1)[1].strip().strip('"')
         print(f"\n自检通过: start.sh 位于根目录 / LF / 权限 {oct(mode)}")
+        print(f"*** 构建版本: {ver} ***  (对局日志开头应出现同样版本号)")
         print(f"打包完成: {OUT}  ({len(names)} 个文件)")
     return 0
 
