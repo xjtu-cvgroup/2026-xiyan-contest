@@ -1,0 +1,5 @@
+# 脚本换行符锁定：Windows checkout 也保持 LF（Linux 平台 bash 依赖）
+*.sh text eol=lf
+*.py text eol=lf
+# Windows 批处理保持 CRLF
+*.bat text eol=crlf

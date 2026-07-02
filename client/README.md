@@ -45,8 +45,11 @@ python3 -m unittest discover -s tests
 ./start.sh 1001 127.0.0.1 30000                 # 平台位置参数（任务书 10.2）
 python3 main.py --host 127.0.0.1 --port 30000 --player-id 1001   # 官方命名参数
 
-# 打包提交
-./package.sh    # 生成 dist/gameclient.zip，start.sh 在 ZIP 根目录
+# 打包提交（跨平台，核心逻辑在 package.py）
+./package.sh     # macOS / Linux
+package.bat      # Windows（双击或命令行）
+# 生成 dist/gameclient.zip：start.sh 在 ZIP 根目录，
+# 自动强制 LF 换行 + 写入 0755 可执行位（Windows 原生压缩两者都会丢）
 ```
 
 Windows 调测包接入：把本目录拷到调测包，把 `调测\client\start.bat` 里的

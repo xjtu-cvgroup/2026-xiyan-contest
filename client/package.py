@@ -1,0 +1,72 @@
+#!/usr/bin/env python3
+"""打包提交用 ZIP（跨平台，Windows/macOS/Linux 均可）。
+
+任务书 10.1 要求：ZIP 根目录直接包含可执行的 start.sh。
+Windows 打包的两个坑，这里都处理：
+  1. start.sh 若带 CRLF，Linux 平台 bash 直接起不来 —— 强制归一化为 LF；
+  2. Windows 原生压缩不保存 Unix 可执行位 —— 直接在 zip 条目里写入 0755。
+"""
+import os
+import sys
+import zipfile
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+OUT = os.path.join(HERE, "dist", "gameclient.zip")
+
+# (打包路径, 是否脚本[LF+755])
+INCLUDE_FILES = [
+    ("start.sh", True),
+    ("main.py", False),
+    ("README.md", False),
+]
+INCLUDE_DIRS = ["lychee", "lychee_basic_client"]
+
+EXEC_ATTR = 0o755 << 16      # zip external_attr 的 Unix 权限位
+NORM_ATTR = 0o644 << 16
+
+
+def add_file(zf, rel_path, is_script):
+    src = os.path.join(HERE, rel_path)
+    with open(src, "rb") as f:
+        data = f.read()
+    if is_script:
+        data = data.replace(b"\r\n", b"\n").replace(b"\r", b"\n")  # 强制 LF
+    info = zipfile.ZipInfo(rel_path.replace(os.sep, "/"))
+    info.external_attr = EXEC_ATTR if is_script else NORM_ATTR
+    info.compress_type = zipfile.ZIP_DEFLATED
+    zf.writestr(info, data)
+    print(f"  + {rel_path}{'  (LF, 755)' if is_script else ''}")
+
+
+def main():
+    os.makedirs(os.path.dirname(OUT), exist_ok=True)
+    if os.path.exists(OUT):
+        os.remove(OUT)
+
+    with zipfile.ZipFile(OUT, "w", zipfile.ZIP_DEFLATED) as zf:
+        for rel, is_script in INCLUDE_FILES:
+            add_file(zf, rel, is_script)
+        for d in INCLUDE_DIRS:
+            for root, dirs, files in os.walk(os.path.join(HERE, d)):
+                dirs[:] = [x for x in dirs if x != "__pycache__"]
+                for fn in sorted(files):
+                    if fn.endswith(".pyc"):
+                        continue
+                    rel = os.path.relpath(os.path.join(root, fn), HERE)
+                    add_file(zf, rel, fn.endswith(".sh"))
+
+    # 自检：start.sh 在根目录、LF、可执行位
+    with zipfile.ZipFile(OUT) as zf:
+        names = zf.namelist()
+        assert "start.sh" in names, "start.sh 必须在 ZIP 根目录"
+        data = zf.read("start.sh")
+        assert b"\r" not in data, "start.sh 仍含 CR，LF 归一化失败"
+        mode = (zf.getinfo("start.sh").external_attr >> 16) & 0o777
+        assert mode == 0o755, f"start.sh 权限异常: {oct(mode)}"
+        print(f"\n自检通过: start.sh 位于根目录 / LF / 权限 {oct(mode)}")
+        print(f"打包完成: {OUT}  ({len(names)} 个文件)")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
