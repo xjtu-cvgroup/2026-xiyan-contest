@@ -285,7 +285,8 @@ def test_planner():
     gs = make_state(task_score=130)
     plan = PlannerStrategy().planner.plan(gs)
     # T_003 就在脚下（绕路 0 帧 + 3 帧读条），封顶后仍可能为正收益; 只验证不崩溃且可解释
-    ok &= check("规划: 高基础分下有明确决策", plan.kind in ("task", "deliver"), repr(plan))
+    ok &= check("规划: 高基础分下有明确决策",
+                plan.kind in ("task", "deliver", "resource"), repr(plan))
 
     # ---- 场景4: 无移动增益时出牌应为可负担的有效牌（混合策略，非恒定） ----
     gs = make_state(contests=True)
@@ -593,7 +594,8 @@ def test_p0_audit():
                  "ownerPlayerId": 0, "protectionPlayerId": 0}]
     st = PlannerStrategy()
     plan = st.planner.plan(gs)
-    ok &= check("任务前置: 无马不接 T06", plan.kind == "deliver", repr(plan))
+    # 无马时不能把 T06 当任务目标（先领马属 resource 计划，是合理前置动作）
+    ok &= check("任务前置: 无马不接 T06", plan.kind != "task", repr(plan))
     # 有马则接（就在脚下，净收益为正）
     for p in gs.players.values():
         if p["playerId"] == 1001:
@@ -896,6 +898,82 @@ def test_corridor():
     return ok
 
 
+def test_ice_hunt():
+    """V3.2 冰鉴猎手回归（败局13：水路竞速零冰鉴，75:91 鲜度输 27 分）。"""
+    ok = True
+    with open(os.path.join(DOC_DIR, "start消息.json"), encoding="utf-8") as f:
+        start = json.load(f)["msg_data"]
+    with open(os.path.join(DOC_DIR, "inquire消息.json"), encoding="utf-8") as f:
+        inquire = json.load(f)["msg_data"]
+
+    def gs_ice(my_pos="S02", opp_pos="S02", my_ice=0, round_no=48,
+               ice_nodes=("S03", "S07")):
+        gs = GameState(1001)
+        gs.on_start(start)
+        d = json.loads(json.dumps(inquire))
+        d["round"] = round_no
+        d["contests"], d["tasks"] = [], []
+        d["weather"] = {"active": [], "forecast": []}
+        for p in d["players"]:
+            if p["playerId"] == 1001:
+                p.update(state="IDLE", currentNodeId=my_pos, nextNodeId=None,
+                         routeEdgeId=None, currentProcess=None, buffs=[],
+                         resources={"ICE_BOX": my_ice} if my_ice else {},
+                         freshness=95.0, goodFruit=95, badFruit=0, taskScore=60)
+            else:
+                p.update(state="IDLE", currentNodeId=opp_pos, nextNodeId=None,
+                         routeEdgeId=None, currentProcess=None,
+                         delivered=False, retired=False)
+        for n in d["nodes"]:
+            n["hasObstacle"] = False
+            n["guard"] = None
+            n["resourceStock"] = ({"ICE_BOX": 1} if n["nodeId"] in ice_nodes else {})
+            n.pop("processType", None)
+            n["processRound"] = 0
+        gs.on_inquire(d)
+        return gs
+
+    # 1) 双方同在 S02 起跑：S03 有冰 → 规划资源目标，走官道抢冰（放弃纯水路）
+    gs = gs_ice()
+    st = PlannerStrategy()
+    plan = st.planner.plan(gs)
+    ok &= check("冰猎: 同位起跑规划抢 S03 冰",
+                plan.kind == "resource" and plan.position == "S03"
+                and plan.resource == "ICE_BOX", repr(plan))
+    a = st.main_action(gs, plan)
+    ok &= check("冰猎: 官道向 S03 进发",
+                a and a["action"] == "MOVE" and a["targetNodeId"] == "S03", str(a))
+
+    # 2) 对手已在 S03（会被扫空）→ 放弃抢冰走水路
+    gs = gs_ice(opp_pos="S03")
+    st = PlannerStrategy()
+    plan = st.planner.plan(gs)
+    a = st.main_action(gs, plan)
+    ok &= check("冰猎: 对手先到放弃抢冰",
+                a and a["action"] == "MOVE" and a["targetNodeId"] == "S04",
+                f"{plan!r} -> {a}")
+
+    # 3) 到位领取
+    gs = gs_ice(my_pos="S03", opp_pos="S01")
+    st = PlannerStrategy()
+    plan = st.planner.plan(gs)
+    a = st.main_action(gs, plan)
+    ok &= check("冰猎: 到位 CLAIM_RESOURCE",
+                a and a["action"] == "CLAIM_RESOURCE"
+                and a["resourceType"] == "ICE_BOX", f"{plan!r} -> {a}")
+
+    # 4) 已持 2 冰 → 不再规划资源目标
+    gs = gs_ice(my_ice=2)
+    plan = PlannerStrategy().planner.plan(gs)
+    ok &= check("冰猎: 持满 2 冰不再绕路", plan.kind != "resource", repr(plan))
+
+    # 5) 截止吃紧 → 不为资源冒险
+    gs = gs_ice(round_no=520)
+    plan = PlannerStrategy().planner.plan(gs)
+    ok &= check("冰猎: 截止吃紧直奔交付", plan.kind == "deliver", repr(plan))
+    return ok
+
+
 def main():
     ok = test_codec()
     ok &= test_state_and_strategy()
@@ -908,6 +986,7 @@ def main():
     ok &= test_watchdog()
     ok &= test_active_guard()
     ok &= test_corridor()
+    ok &= test_ice_hunt()
     print()
     print("ALL PASS" if ok else "SOME FAILED")
     sys.exit(0 if ok else 1)

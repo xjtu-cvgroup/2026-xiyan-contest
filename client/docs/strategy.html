@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>荔枝争运战 · 完整策略文档 (BUILD 3.1-corridor)</title>
+<title>荔枝争运战 · 完整策略文档 (BUILD 3.2-icehunt)</title>
 <style>
   .viz-root {
     --surface-1: #fcfcfb;
@@ -96,8 +96,8 @@
 <div class="viz-root">
 
 <h1>《一骑红尘：荔枝争运战》完整策略文档</h1>
-<p class="sub">客户端 <code>PlannerStrategy</code> · <span class="badge">BUILD 3.1-corridor</span>
-   · 77 项自测覆盖 · 生成于 2026-07-02</p>
+<p class="sub">客户端 <code>PlannerStrategy</code> · <span class="badge">BUILD 3.2-icehunt</span>
+   · 83 项自测覆盖 · 生成于 2026-07-02</p>
 
 <div class="toc">
 <strong>目录</strong>
@@ -378,11 +378,12 @@
 <tr><td>2.5 horse+audit</td><td>马匹经济 + 帧价值恒计 + 交付后静默 + 任务资源前置 + 等待中用冰</td><td>三连败复盘：骑掉马丢 60 分、交付晚 63 帧、代码自查 3 个 P0</td></tr>
 <tr><td>2.5 buildguard</td><td>版本水印 + 停滞看门狗 + 人手账本</td><td>旧包上平台重演已修复败局（r91 骑马实锤）</td></tr>
 <tr><td>3.0 activeguard</td><td>主动设卡：领先过咽喉回手防6卡</td><td>demo 四局全靠这招赢——刀递到我们手里</td></tr>
-<tr><td><b>3.1 corridor</b></td><td><b>走廊竞争：对手阴影惩罚 + 处理站帧数入 ETA + 天气感知寻路</b></td><td>根因分析：一切败局都是「落后 60~80 帧尾随同一走廊」的下游症状——阴影惩罚让寻路自动选无竞争走廊（水路），力争先过武关反手设卡</td></tr>
+<tr><td>3.1 corridor</td><td>走廊竞争：对手阴影惩罚 + 处理站帧数入 ETA + 天气感知寻路</td><td>根因分析：一切败局都是「落后 60~80 帧尾随同一走廊」的下游症状——阴影惩罚让寻路自动选无竞争走廊（水路），力争先过武关反手设卡</td></tr>
+<tr><td><b>3.2 icehunt</b></td><td><b>资源提货入规划：冰鉴(17分)/马匹与任务同台竞价，对手竞争折扣（先到×0.15/同至×0.55）</b></td><td>两场惜败（735:771 / 744:774）：水路竞速快 25 帧却零冰鉴——3 个冰鉴全在陆路，demo 双冰续到 91 鲜度 vs 我们自然衰减 75，鲜度分差 27~29 = 全部败分</td></tr>
 </table>
 
-<p class="foot">仓库 client/docs/strategy.html · 与代码同步于 main@3.0-activeguard ·
-自测 <code>python3 selftest.py</code>（71 项）</p>
+<p class="foot">仓库 client/docs/strategy.html · 与代码同步于 main@3.2-icehunt ·
+自测 <code>python3 selftest.py</code>（83 项）</p>
 </div>
 
 <script>
