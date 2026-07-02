@@ -351,8 +351,9 @@ class PlannerStrategy(BaselineStrategy):
         if guard:
             return guard
 
-        # 顺路领取（截止余量充足时才花这 2 帧）
-        if plan.kind == "task" or plan.slack > 80:
+        # 顺路领取（余量闸门 15：领取只花 2 帧读条，换 +18 分几乎恒值；
+        # 阴影惩罚会压低 slack，这里的闸门只挡真正的临门一脚）
+        if plan.kind == "task" or plan.slack > 15:
             stock = node.get("resourceStock") or {}
             for rt in self.CLAIM_EN_ROUTE:
                 limit = self.CLAIM_LIMIT.get(rt, 1)
@@ -487,9 +488,10 @@ class PlannerStrategy(BaselineStrategy):
         return (best[1], best[2]) if best else None
 
     def _route_next_hop(self, state, cur, target):
-        """与规划器共用同一套阻挡惩罚，保证走的路就是估值时算的路。"""
+        """与规划器共用同一套惩罚 + 天气边成本，保证走的路就是估值时算的路。"""
         return state.graph.next_hop(cur, target, state.my_speed(),
-                                    self.planner._penalty_fn(state))
+                                    self.planner._penalty_fn(state),
+                                    self.planner._edge_cost_fn(state))
 
     # ---------- 同帧争抢规避 ----------
 
@@ -582,12 +584,13 @@ class PlannerStrategy(BaselineStrategy):
             return None
         target = state.terminal_node if me.get("verified") else state.gate_node
         penalty = self.planner._penalty_fn(state)
+        ecost = self.planner._edge_cost_fn(state)
         speed = state.my_speed()
         best = None
         for nb, _ in state.graph.neighbors(seg_start):
             if nb == blocked_next or state.is_blocked(nb):
                 continue
-            eta, path = state.graph.shortest_path(nb, target, speed, penalty)
+            eta, path = state.graph.shortest_path(nb, target, speed, penalty, ecost)
             if path and (best is None or eta < best[1]):
                 best = (nb, eta)
         return best[0] if best else None

@@ -201,6 +201,11 @@ def test_planner():
                          currentProcess=None, currentNodeId=node,
                          taskScore=task_score, buffs=[],
                          freshness=95.0, resources={})  # 需要测冰的场景显式设置
+            else:
+                # 对手放在身后（样例中它在前方，阴影惩罚会诚实压低 slack，
+                # 干扰这些与走廊竞争无关的场景）
+                p.update(state="IDLE", currentNodeId="S03", nextNodeId=None,
+                         routeEdgeId=None, currentProcess=None)
         gs.on_inquire(d)
         return gs
 
@@ -803,6 +808,94 @@ def test_active_guard():
     return ok
 
 
+def test_corridor():
+    """V3.1 走廊竞争：对手阴影 / 处理站帧数 / 天气感知寻路。"""
+    ok = True
+    with open(os.path.join(DOC_DIR, "start消息.json"), encoding="utf-8") as f:
+        start = json.load(f)["msg_data"]
+    with open(os.path.join(DOC_DIR, "inquire消息.json"), encoding="utf-8") as f:
+        inquire = json.load(f)["msg_data"]
+
+    def gs_race(my_pos="S02", opp_pos="S07", weather=None, round_no=60,
+                strip_process=True):
+        gs = GameState(1001)
+        gs.on_start(start)
+        d = json.loads(json.dumps(inquire))
+        d["round"] = round_no
+        d["contests"], d["tasks"] = [], []
+        d["weather"] = weather or {"active": [], "forecast": []}
+        for p in d["players"]:
+            if p["playerId"] == 1001:
+                p.update(state="IDLE", currentNodeId=my_pos, nextNodeId=None,
+                         routeEdgeId=None, currentProcess=None, buffs=[],
+                         resources={}, freshness=95.0, goodFruit=95, badFruit=0)
+            else:
+                p.update(state="MOVING", currentNodeId=opp_pos, nextNodeId=None,
+                         routeEdgeId=None, currentProcess=None,
+                         delivered=False, retired=False)
+        for n in d["nodes"]:
+            n["hasObstacle"] = False
+            n["guard"] = None
+            n["resourceStock"] = {}
+            if strip_process:   # 路线选择测试剥离处理站帧数干扰
+                n.pop("processType", None)
+                n["processRound"] = 0
+        gs.on_inquire(d)
+        return gs
+
+    # 1) 阴影集合：对手在 S03（官道前方）→ 官道下游 S07 被抢先；水路 S04/S05 干净
+    gs = gs_race(my_pos="S02", opp_pos="S03")
+    st = PlannerStrategy()
+    shadow = st.planner._shadow_nodes(gs)
+    ok &= check("阴影: 对手官道前方节点被标记",
+                "S07" in shadow and "S04" not in shadow and "S05" not in shadow,
+                f"shadow={sorted(shadow)}")
+
+    # 2) 走廊选择：对手在官道前方(S03) → 我们从 S02 走水路 S04
+    a = st.main_action(gs)
+    ok &= check("走廊: 对手在官道前方走水路",
+                a and a["action"] == "MOVE" and a["targetNodeId"] == "S04", str(a))
+
+    # 3) 天气改道：暴雨生效中（水路 x1.35）→ 从 S02 改走官道 S03
+    rain_now = {"active": [{"type": "HEAVY_RAIN", "region": "WATER",
+                            "remainRound": 50}], "forecast": []}
+    gs2 = gs_race(my_pos="S02", opp_pos="S05", weather=rain_now)
+    a = PlannerStrategy().main_action(gs2)
+    ok &= check("走廊: 暴雨中改走官道",
+                a and a["action"] == "MOVE" and a["targetNodeId"] == "S03", str(a))
+
+    # 4) 处理站帧数计入惩罚：S04 登船 7 帧 / S05 水路换运 6 帧
+    gs3 = gs_race(opp_pos=None, strip_process=False)
+    for p in gs3.players.values():
+        if p["playerId"] != 1001:
+            p["currentNodeId"] = None
+    pen = PlannerStrategy().planner._penalty_fn(gs3)
+    ok &= check("ETA: 处理站帧数入惩罚",
+                pen("S04") == 7 and pen("S05") == 6 and pen("S11") == 5,
+                f"S04={pen('S04')} S05={pen('S05')} S11={pen('S11')}")
+
+    # 5) 天气：暴雨生效中水路边成本 x1.35，官道不受影响
+    rain = {"active": [{"type": "HEAVY_RAIN", "region": "WATER", "remainRound": 40}],
+            "forecast": []}
+    gs4 = gs_race(weather=rain, opp_pos="S05")
+    ec = PlannerStrategy().planner._edge_cost_fn(gs4)
+    e12 = gs4.graph.edges["E12"]   # S04-S05 WATER
+    e02 = gs4.graph.edges["E02"]   # S02-S03 ROAD
+    ok &= check("天气: 暴雨水路边成本x1.35",
+                abs(ec(e12, 100) - 135) < 1e-6 and ec(e02, 100) == 100,
+                f"water={ec(e12, 100)} road={ec(e02, 100)}")
+
+    # 6) 预告暴雨（近期窗口内）按半额计
+    fc = {"active": [], "forecast": [{"type": "HEAVY_RAIN", "region": "WATER",
+                                      "startRound": 120, "durationRound": 60}]}
+    gs5 = gs_race(weather=fc, round_no=60)
+    ec = PlannerStrategy().planner._edge_cost_fn(gs5)
+    ok &= check("天气: 预告暴雨半额计",
+                abs(ec(gs5.graph.edges["E12"], 100) - 117.5) < 1e-6,
+                f"{ec(gs5.graph.edges['E12'], 100)}")
+    return ok
+
+
 def main():
     ok = test_codec()
     ok &= test_state_and_strategy()
@@ -814,6 +907,7 @@ def main():
     ok &= test_horse_economy()
     ok &= test_watchdog()
     ok &= test_active_guard()
+    ok &= test_corridor()
     print()
     print("ALL PASS" if ok else "SOME FAILED")
     sys.exit(0 if ok else 1)
