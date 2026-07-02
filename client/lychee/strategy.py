@@ -164,11 +164,17 @@ class PlannerStrategy(BaselineStrategy):
     CLAIM_LIMIT = {P.ICE_BOX: 2}    # 冰鉴多多益善（+10 鲜度 ≈ 18 分），其余各 1
     USE_ICE_BELOW = 91          # 鲜度 ≤90 就用冰鉴：+10 不溢出，且防跌破转坏阈值
 
+    MIN_GOOD_RESERVE = 5        # 攻坚投入好果时保留的底仓（交付要求好果 > 0）
+    WEAKEN_RESEND_GAP = 12      # 同一设卡的削弱重发间隔（落地延迟 ~3-5 帧）
+
     def __init__(self, logger=None):
         super().__init__(logger)
         self.planner = TaskPlanner(logger)
         self._scout_sent = {}   # nodeId -> 派出帧
         self._rush_tactic_tried = False  # 护果令只尝试一次，被拒也不无限重试
+        self._weaken_sent = {}  # nodeId -> 派出帧（削弱敌卡）
+        self._weaken_target = None       # 本帧主车队让 squad_action 去削弱的目标
+        self._last_forced_node = None    # 上次强制通行到达节点（规则禁止重复）
 
     # ---------- 每帧入口 ----------
 
@@ -205,6 +211,12 @@ class PlannerStrategy(BaselineStrategy):
 
     def _absorb_feedback(self, state):
         super()._absorb_feedback(state)
+        self._weaken_target = None
+        for e in state.my_events("FORCED_PASS_END"):
+            p = e.get("payload") or {}
+            node = p.get("nodeId") or p.get("targetNodeId")
+            if node:
+                self._last_forced_node = node  # 规则：该节点不能再次强制通行
         for action, code in state.my_rejections():
             if action == "CLAIM_TASK" and code in (
                     "TASK_REQUIREMENT_NOT_MET", "TASK_PROTECTED", "OBJECT_BUSY",
@@ -296,13 +308,59 @@ class PlannerStrategy(BaselineStrategy):
         nxt = self._route_next_hop(state, cur, target)
         if nxt is None:
             return P.a_wait()
-        if state.has_obstacle(nxt):
+        if state.has_obstacle(nxt) and not state.enemy_guard(nxt):
             if me.get("goodFruit", 0) > 1:
                 return P.a_clear(nxt)
             return P.a_wait()
         if state.enemy_guard(nxt):
-            return P.a_wait()  # 攻坚/强制通行留给 V2
+            return self._breakthrough(state, nxt, plan)
         return P.a_move(nxt)
+
+    # ---------- 突破敌方设卡 ----------
+    # 平台败局教训：在 S09 干等 S10 敌卡风化 175 帧直接导致未交付（80:525）。
+    # 优先级：攻坚(坏果优先,瞬发) > 小分队削弱后攻坚 > 强制通行(时间税<=50帧) > 等。
+
+    def _breakthrough(self, state, target, plan):
+        me = state.me
+        g = state.enemy_guard(target)
+        defense = g.get("defense", 0) or 0
+
+        # 1) 一击必破：攻坚值 = 好果x2 + 坏果x3，投入各最多 2 篓，无读条
+        invest = self._break_invest(defense, me.get("goodFruit", 0),
+                                    me.get("badFruit", 0))
+        if invest:
+            gf, bf = invest
+            if self.log:
+                self.log.info("break guard %s def=%d with good=%d bad=%d",
+                              target, defense, gf, bf)
+            return P.a_break_guard(target, gf, bf)
+
+        # 2) 果品不够破：派小分队削弱（-2/次），主车队本帧等待
+        #    截止吃紧(slack<0)时跳过，直接走强制通行
+        if plan.slack > 0 and state.phase != P.PHASE_RUSH \
+                and (me.get("squadAvailable") or 0) >= 2:
+            if state.round - self._weaken_sent.get(target, -999) >= self.WEAKEN_RESEND_GAP:
+                self._weaken_target = target  # squad_action 本帧发 SQUAD_WEAKEN
+            return P.a_wait()
+
+        # 3) 强制通行兜底：关键关隘时间税最多 50 帧，仍远好于等风化
+        if target != self._last_forced_node:
+            return P.a_forced_pass(target)
+        return P.a_wait()
+
+    def _break_invest(self, defense, good, bad):
+        """选攻坚投入 (好果, 坏果)：坏果免费优先，好果留底仓；破不动返回 None。"""
+        if defense <= 0:
+            return None
+        best = None  # (成本, 好果, 坏果)
+        max_gf = min(2, max(0, good - self.MIN_GOOD_RESERVE))
+        for bf in range(min(2, bad) + 1):
+            for gf in range(max_gf + 1):
+                if gf + bf > 0 and gf * 2 + bf * 3 >= defense:
+                    cost = gf * 1.9 + bf * 0.1  # 好果值 ~1.9 分，坏果近乎免费
+                    if best is None or cost < best[0]:
+                        best = (cost, gf, bf)
+        return (best[1], best[2]) if best else None
 
     def _route_next_hop(self, state, cur, target):
         """与规划器共用同一套阻挡惩罚，保证走的路就是估值时算的路。"""
@@ -346,6 +404,13 @@ class PlannerStrategy(BaselineStrategy):
         avail = me.get("squadAvailable") or 0
         if avail <= 0:
             return None
+
+        # 削弱敌卡优先于探路（主车队正被挡住，每帧都在流血）
+        if self._weaken_target and avail >= 2:
+            t = self._weaken_target
+            self._weaken_sent[t] = state.round
+            self._weaken_target = None
+            return P.a_squad_weaken(t)
 
         cur = me.get("currentNodeId") or me.get("nextNodeId")
         targets = []

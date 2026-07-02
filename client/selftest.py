@@ -386,11 +386,91 @@ def test_contention():
     return ok
 
 
+def test_breakthrough():
+    """平台败局回归：S09 面对 S10 敌卡不再干等风化（曾等 175 帧导致未交付）。"""
+    ok = True
+    with open(os.path.join(DOC_DIR, "start消息.json"), encoding="utf-8") as f:
+        start = json.load(f)["msg_data"]
+    with open(os.path.join(DOC_DIR, "inquire消息.json"), encoding="utf-8") as f:
+        inquire = json.load(f)["msg_data"]
+
+    def blocked_state(defense=6, good=90, bad=2, squad=6, round_no=330):
+        """我方(RED)在 S09，S10 有蓝方设卡，其余阻挡清空。"""
+        gs = GameState(1001)
+        gs.on_start(start)
+        d = json.loads(json.dumps(inquire))
+        d["round"] = round_no
+        d["contests"], d["tasks"] = [], []
+        for p in d["players"]:
+            if p["playerId"] == 1001:
+                p.update(state="IDLE", routeEdgeId=None, nextNodeId=None,
+                         currentProcess=None, currentNodeId="S09", buffs=[],
+                         goodFruit=good, badFruit=bad, squadAvailable=squad,
+                         freshness=95.0, resources={}, taskScore=90)
+        for n in d["nodes"]:
+            n["hasObstacle"] = False
+            n["guard"] = None
+            n["resourceStock"] = {}
+            if n["nodeId"] == "S10":
+                n["guard"] = {"ownerTeamId": "BLUE", "defense": defense,
+                              "maxDefense": 7, "active": True}
+        gs.on_inquire(d)
+        return gs
+
+    # 1) 坏果够破：2 坏果攻坚值 6 >= 防守 6，好果一个不花
+    st = PlannerStrategy()
+    a = st.decide(blocked_state(defense=6, bad=2))
+    brk = next((x for x in a if x["action"] == "BREAK_GUARD"), None)
+    ok &= check("突破: 坏果优先一击必破",
+                brk and brk["targetNodeId"] == "S10"
+                and brk["goodFruit"] == 0 and brk["badFruit"] == 2,
+                json.dumps(a, ensure_ascii=False))
+
+    # 2) 防守低时最小好果投入
+    a = st.decide(blocked_state(defense=2, bad=0))
+    brk = next((x for x in a if x["action"] == "BREAK_GUARD"), None)
+    ok &= check("突破: 低防守最小投入",
+                brk and brk["goodFruit"] == 1 and brk["badFruit"] == 0,
+                json.dumps(a, ensure_ascii=False))
+
+    # 3) 果品不够破且余量充足 -> 主车队等待 + 小分队削弱同帧出发
+    #    （r330 余量已为负会直接强通，所以取 r200 测削弱分支）
+    a = PlannerStrategy().decide(blocked_state(defense=6, bad=0, round_no=200))
+    kinds = {x["action"]: x for x in a}
+    ok &= check("突破: 破不动先派削弱",
+                kinds.get("SQUAD_WEAKEN", {}).get("targetNodeId") == "S10"
+                and "WAIT" in kinds,
+                json.dumps(a, ensure_ascii=False))
+
+    # 4) 无人手可削弱 -> 强制通行兜底
+    a = PlannerStrategy().decide(blocked_state(defense=6, bad=0, squad=1))
+    ok &= check("突破: 无人手走强制通行",
+                any(x["action"] == "FORCED_PASS" and x["targetNodeId"] == "S10"
+                    for x in a),
+                json.dumps(a, ensure_ascii=False))
+
+    # 5) 截止吃紧 -> 跳过削弱直接强制通行
+    a = PlannerStrategy().decide(blocked_state(defense=6, bad=0, round_no=520))
+    ok &= check("突破: 截止吃紧直接强通",
+                any(x["action"] == "FORCED_PASS" for x in a),
+                json.dumps(a, ensure_ascii=False))
+
+    # 6) 规则限制：上次强通到达节点不能重复强通
+    st = PlannerStrategy()
+    st._last_forced_node = "S10"
+    a = st.decide(blocked_state(defense=6, bad=0, squad=0))
+    ok &= check("突破: 重复强通被规避",
+                not any(x["action"] == "FORCED_PASS" for x in a),
+                json.dumps(a, ensure_ascii=False))
+    return ok
+
+
 def main():
     ok = test_codec()
     ok &= test_state_and_strategy()
     ok &= test_planner()
     ok &= test_contention()
+    ok &= test_breakthrough()
     print()
     print("ALL PASS" if ok else "SOME FAILED")
     sys.exit(0 if ok else 1)
