@@ -519,12 +519,24 @@ class TaskPlanner:
         return False
 
     def _opp_eta(self, state, node_id):
+        """对手到目标节点的帧数，含路线边上的剩余进度。
+
+        V3.7 修复：对手在边上时曾把 nextNodeId 当作已到达（ETA=0），
+        导致主动设卡的时机判断（教科书场景：我在武关、它在半路）永远不成立。
+        """
         opp = state.opp
-        opp_node = opp.get("nextNodeId") or opp.get("currentNodeId")
+        edge_remain = 0.0
+        if opp.get("routeEdgeId") and opp.get("nextNodeId"):
+            total = opp.get("edgeTotalMs") or 0
+            done = opp.get("edgeProgressMs") or 0
+            edge_remain = max(0, total - done) / 1000.0  # 对手速度按基准估
+            opp_node = opp.get("nextNodeId")
+        else:
+            opp_node = opp.get("currentNodeId")
         if not opp_node:
             return math.inf
         f, path = state.graph.shortest_path(opp_node, node_id)
-        return f if path else math.inf
+        return edge_remain + f if path else math.inf
 
     @staticmethod
     def _opp_processing_task(state, task):
