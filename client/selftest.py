@@ -1120,6 +1120,95 @@ def test_honest_eta():
     return ok
 
 
+def test_trap_proof():
+    """V3.5 回归（replay20：S11 中边连环陷阱冻到终场，60:754 未交付）。"""
+    ok = True
+    with open(os.path.join(DOC_DIR, "start消息.json"), encoding="utf-8") as f:
+        start = json.load(f)["msg_data"]
+    with open(os.path.join(DOC_DIR, "inquire消息.json"), encoding="utf-8") as f:
+        inquire = json.load(f)["msg_data"]
+
+    def gs_tail(opp_cur="S11", opp_next=None, opp_edge=None, round_no=380,
+                guard_def=0):
+        """我在 S10 空闲欲往 S11（必经之路），对手位置可配。"""
+        gs = GameState(1001)
+        gs.on_start(start)
+        d = json.loads(json.dumps(inquire))
+        d["round"] = round_no
+        d["contests"], d["tasks"] = [], []
+        d["weather"] = {"active": [], "forecast": []}
+        for p in d["players"]:
+            if p["playerId"] == 1001:
+                p.update(state="IDLE", currentNodeId="S10", nextNodeId=None,
+                         routeEdgeId=None, currentProcess=None, buffs=[],
+                         resources={}, freshness=90.0, goodFruit=90,
+                         badFruit=2, taskScore=90, squadAvailable=1)
+            else:
+                p.update(state="MOVING" if opp_edge else "IDLE",
+                         currentNodeId=opp_cur, nextNodeId=opp_next,
+                         routeEdgeId=opp_edge, currentProcess=None,
+                         delivered=False, retired=False)
+        for n in d["nodes"]:
+            n["hasObstacle"] = False
+            n["guard"] = None
+            n["resourceStock"] = {}
+            n.pop("processType", None)
+            n["processRound"] = 0
+            if n["nodeId"] == "S11" and guard_def:
+                n["guard"] = {"ownerTeamId": "BLUE", "defense": guard_def,
+                              "maxDefense": 6, "active": True}
+        gs.on_inquire(d)
+        return gs
+
+    # 1) 对手正站在我们的下一跳 S11 → 不上边，等待
+    st = PlannerStrategy()
+    a = st.main_action(gs_tail())
+    ok &= check("防陷阱: 对手占下一跳时等待",
+                a and a["action"] == "WAIT", str(a))
+
+    # 2) 对手在赶往 S11 且明显先到 → 同样等待
+    a = PlannerStrategy().main_action(
+        gs_tail(opp_cur="S12", opp_next="S11", opp_edge="E07"))
+    ok &= check("防陷阱: 对手先到下一跳时等待",
+                a and a["action"] == "WAIT", str(a))
+
+    # 3) 对手已离开（在 S12 且驶向 S13）→ 正常上边
+    a = PlannerStrategy().main_action(
+        gs_tail(opp_cur="S12", opp_next="S13", opp_edge="E08"))
+    ok &= check("防陷阱: 对手离开后正常推进",
+                a and a["action"] == "MOVE" and a["targetNodeId"] == "S11", str(a))
+
+    # 4) 它留了卡 → 站在节点上攻坚拆（好果2×2+坏果2×3=10 ≥ 6）
+    a = PlannerStrategy().main_action(
+        gs_tail(opp_cur="S12", opp_next="S13", opp_edge="E08", guard_def=6))
+    ok &= check("防陷阱: 留卡则节点攻坚瞬拆",
+                a and a["action"] == "BREAK_GUARD" and a["targetNodeId"] == "S11",
+                str(a))
+
+    # 5) 对峙上限：连续等待 30 帧后硬闯，不陪它耗
+    st = PlannerStrategy()
+    last = None
+    for i in range(35):
+        last = st.main_action(gs_tail(round_no=380 + i))
+    ok &= check("防陷阱: 对峙超限后硬闯",
+                last and last["action"] == "MOVE", str(last))
+
+    # 6) 截止吃紧也不赌：slack 越紧冻结越致命（等待 10~30 帧 vs 冻结 180+ 帧）
+    a = PlannerStrategy().main_action(gs_tail(round_no=545))
+    ok &= check("防陷阱: 截止吃紧仍不上险边",
+                a and a["action"] == "WAIT", str(a))
+
+    # 7) 对手已交付 → 无陷阱风险
+    gs = gs_tail()
+    for p in gs.players.values():
+        if p["playerId"] != 1001:
+            p["delivered"] = True
+    a = PlannerStrategy().main_action(gs)
+    ok &= check("防陷阱: 对手已交付不误等",
+                a and a["action"] == "MOVE", str(a))
+    return ok
+
+
 def main():
     ok = test_codec()
     ok &= test_state_and_strategy()
@@ -1135,6 +1224,7 @@ def main():
     ok &= test_ice_hunt()
     ok &= test_fresh_race()
     ok &= test_honest_eta()
+    ok &= test_trap_proof()
     print()
     print("ALL PASS" if ok else "SOME FAILED")
     sys.exit(0 if ok else 1)
