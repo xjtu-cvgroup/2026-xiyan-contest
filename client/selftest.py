@@ -336,14 +336,15 @@ def test_contention():
         gs.on_inquire(d)
         return gs
 
-    # ---- 错峰：同一帧，两边必然一个 PROCESS 一个 WAIT ----
+    # ---- V3.7 改策：固定处理站不让行（对不让行的对手让行=白送5帧先手，
+    #      S02 先手决定整条冰链归属）。同帧撞车打 DOCK 窗口，混合出牌破平局 ----
     for rnd in (44, 45):
         acts = {}
         for pid in (1001, 2002):
             a = PlannerStrategy().main_action(mirror_state(pid, rnd))
             acts[pid] = a["action"]
-        ok &= check(f"错峰: r{rnd} 双方不同帧启动处理",
-                    sorted(acts.values()) == ["PROCESS", "WAIT"],
+        ok &= check(f"抢先手: r{rnd} 双方都立即开始处理",
+                    sorted(acts.values()) == ["PROCESS", "PROCESS"],
                     f"{acts}")
 
     # ---- 对手读条中：排队等待，不重复提交 ----
@@ -1275,6 +1276,65 @@ def test_bundle():
     return ok
 
 
+def test_tempo_guard():
+    """V3.7 回归（replay23：S02 让行送先手丢冰链；边上对手 ETA=0 设卡从未触发）。"""
+    ok = True
+    with open(os.path.join(DOC_DIR, "start消息.json"), encoding="utf-8") as f:
+        start = json.load(f)["msg_data"]
+    with open(os.path.join(DOC_DIR, "inquire消息.json"), encoding="utf-8") as f:
+        inquire = json.load(f)["msg_data"]
+
+    def gs_guard_moment(opp_progress=0.6):
+        """replay23 r287 重演：我在武关 S10 空闲，对手在 S09→S10 边上 60%。"""
+        gs = GameState(1001)
+        gs.on_start(start)
+        d = json.loads(json.dumps(inquire))
+        d["round"] = 287
+        d["contests"], d["tasks"] = [], []
+        d["weather"] = {"active": [], "forecast": []}
+        for p in d["players"]:
+            if p["playerId"] == 1001:
+                p.update(state="IDLE", currentNodeId="S10", nextNodeId=None,
+                         routeEdgeId=None, currentProcess=None, buffs=[],
+                         resources={}, freshness=85.0, goodFruit=95,
+                         badFruit=1, taskScore=120)
+            else:
+                total = 55200
+                p.update(state="MOVING", currentNodeId="S09", nextNodeId="S10",
+                         routeEdgeId="E05", edgeTotalMs=total,
+                         edgeProgressMs=int(total * opp_progress),
+                         currentProcess=None, delivered=False, retired=False)
+        for n in d["nodes"]:
+            n["hasObstacle"] = False
+            n["guard"] = None
+            n["resourceStock"] = {}
+            n.pop("processType", None)
+            n["processRound"] = 0
+        gs.on_inquire(d)
+        return gs
+
+    # 1) 对手边上 ETA 含剩余进度（不再是 0）
+    gs = gs_guard_moment()
+    eta = PlannerStrategy().planner._opp_eta(gs, "S10")
+    ok &= check("对手ETA: 含边上剩余进度", 15 <= eta <= 30, f"eta={eta:.1f}")
+
+    # 2) 武关设卡时机触发（replay23 r287 的教科书场景）
+    st = PlannerStrategy()
+    plan = st.planner.plan(gs)
+    a = st.main_action(gs, plan)
+    ok &= check("设卡: 武关回手卡触发",
+                a and a["action"] == "SET_GUARD" and a["targetNodeId"] == "S10",
+                f"plan={plan.kind} -> {a}")
+
+    # 3) 对手已过半很久（progress 0.98，ETA<8）→ 来不及成卡，不设
+    gs = gs_guard_moment(opp_progress=0.98)
+    st = PlannerStrategy()
+    a = st.main_action(gs, st.planner.plan(gs))
+    ok &= check("设卡: 对手将至不硬设",
+                not (a and a["action"] == "SET_GUARD"), str(a))
+    return ok
+
+
 def main():
     ok = test_codec()
     ok &= test_state_and_strategy()
@@ -1292,6 +1352,7 @@ def main():
     ok &= test_honest_eta()
     ok &= test_trap_proof()
     ok &= test_bundle()
+    ok &= test_tempo_guard()
     print()
     print("ALL PASS" if ok else "SOME FAILED")
     sys.exit(0 if ok else 1)

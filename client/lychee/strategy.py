@@ -341,15 +341,17 @@ class PlannerStrategy(BaselineStrategy):
                 return P.a_verify_gate()
             return P.a_wait()
 
-        # 固定处理站点必须先处理完才能离站
+        # 固定处理站点必须先处理完才能离站。
+        # V3.7：不再奇偶让行 —— 对不让行的对手等于每次白送 5 帧先手，
+        # 而 S02 的 5 帧先手决定整条冰链归属（replay23 实锤）。同帧撞车
+        # 就打 DOCK 窗口：我们有 4 张兵争 + 混合出牌，期望优于必然让行；
+        # 镜像平局链由混合出牌概率性打破。
         node = state.node(cur)
         needs_process = (node.get("processType") and node.get("processType") != "VERIFY"
                          and node.get("processRound", 0) > 0)
         if needs_process and not self._processed_here:
             if self._opp_processing_here(state, cur):
-                return P.a_wait()   # 对手正在处理本站流程：排队，不制造窗口
-            if self._yield_for_contention(state):
-                return P.a_wait()   # 同位错峰：奇偶帧让行 1 帧，避免同帧抢同一对象
+                return P.a_wait()   # 对手已在处理本站流程：排队，不白挨拒绝
             return P.a_process()
 
         # 任务：已在执行位置就开始读条（任务是独占对象，不让行，靠出牌博弈）
@@ -423,17 +425,20 @@ class PlannerStrategy(BaselineStrategy):
         if self._my_active_guards(state) >= 2:
             return None  # 每队上限 2 个，第 3 个会顶掉最早的
 
-        # 对手确实还要从这里过：ETA 在窗口内，且该节点在其高效路线上
+        # 对手确实还要从这里过：ETA 在窗口内（含其边上剩余进度，V3.7 修复：
+        # 曾把边上对手当作已到达 → ETA=0 → 主动设卡上线以来从未触发过），
+        # 且该节点在其高效路线上
         opp_pos = opp.get("nextNodeId") or opp.get("currentNodeId")
         if not opp_pos:
             return None
         g_graph = state.graph
-        opp_eta, path = g_graph.shortest_path(opp_pos, cur, P.BASE_SPEED)
-        if not path or not (self.GUARD_MIN_OPP_ETA <= opp_eta <= self.GUARD_MAX_OPP_ETA):
+        opp_eta = self.planner._opp_eta(state, cur)
+        if not (self.GUARD_MIN_OPP_ETA <= opp_eta <= self.GUARD_MAX_OPP_ETA):
             return None
-        opp_to_gate, p1 = g_graph.shortest_path(opp_pos, state.gate_node, P.BASE_SPEED)
+        # 两侧都用含边上余量的同一度量（V3.7：度量不一致曾让该检查恒假）
+        opp_to_gate = self.planner._opp_eta(state, state.gate_node)
         here_to_gate, p2 = g_graph.shortest_path(cur, state.gate_node, P.BASE_SPEED)
-        if not p1 or not p2 or \
+        if not p2 or opp_to_gate == float("inf") or \
                 opp_eta + here_to_gate > opp_to_gate + self.GUARD_ROUTE_TOLERANCE:
             return None  # 绕开我们这里更快，卡了也白卡
 
