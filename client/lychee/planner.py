@@ -24,6 +24,16 @@ CONTEST_RISK_DISCOUNT = 0.5  # 对手比我们更近时的估值折扣
 OBSTACLE_PENALTY = 10       # 清障 6 帧读条 + 1 好果 / 强通税 8 帧
 GUARD_PENALTY = 35          # 强通时间税 min(40, 10+防守值×5) 量级
 
+# 对手阴影惩罚（V3.1 走廊竞争）：对手会先于我们到达的节点，资源会被扫空、
+# 设卡会掐点出现（四局回放实锤：落后 60~80 帧走同一走廊 = 全程吃陷阱）。
+SHADOW_CHOKE_PENALTY = 35   # 咽喉类节点（对手大概率回手设卡）
+SHADOW_NODE_PENALTY = 8     # 普通节点（资源被扫、任务被先手）
+SHADOW_MARGIN = 5           # 到达时间差超过该值才算被抢先
+# 阴影咽喉不含 GATE：宫门验核双方都要排队，实战对手从未卡宫门；
+# 尾段(S11-S14)双走廊共用，过重的阴影只会虚压 slack 不改变路线
+CHOKE_TYPES = {"KEY_PASS", "PASS", "MOUNTAIN_PASS"}
+FORECAST_HORIZON = 120      # 预告天气只影响这个时间窗内的路段估价
+
 
 def milestone_bonus(base):
     if base >= 110:
@@ -70,6 +80,7 @@ class TaskPlanner:
     def __init__(self, logger=None):
         self.log = logger
         self.blacklist = {}   # taskId -> 解禁帧（吃到拒绝后临时拉黑）
+        self._shadow_cache = (-1, frozenset())  # (round, 被对手抢先的节点集)
 
     # ================= 对外入口 =================
 
@@ -79,10 +90,11 @@ class TaskPlanner:
         if not cur:
             return Plan("hold", detail="no position")
         penalty = self._penalty_fn(state)
+        ecost = self._edge_cost_fn(state)
         speed = state.my_speed()
         g = state.graph
 
-        to_gate, _ = g.shortest_path(cur, state.gate_node, speed, penalty)
+        to_gate, _ = g.shortest_path(cur, state.gate_node, speed, penalty, ecost)
         gate_to_term, _ = g.shortest_path(state.gate_node, state.terminal_node, speed)
         eta_direct = to_gate + GATE_VERIFY_FRAMES + gate_to_term + DELIVER_FRAMES
         slack = state.duration_round - (state.round + eta_direct + SAFETY_MARGIN)
@@ -99,7 +111,7 @@ class TaskPlanner:
             if self.blacklist.get(t["taskId"], 0) > state.round:
                 continue
             ev = self._evaluate(state, t, cur, base, to_gate, eta_direct,
-                                slack, speed, penalty)
+                                slack, speed, penalty, ecost)
             if ev and ev[0] > best_net:
                 best_net, best = ev[0], (t, ev[1])
 
@@ -112,7 +124,7 @@ class TaskPlanner:
     # ================= 估值 =================
 
     def _evaluate(self, state, task, cur, base, to_gate, eta_direct,
-                  slack, speed, penalty):
+                  slack, speed, penalty, ecost=None):
         """返回 (净收益, 停靠节点)；不可行返回 None。"""
         # 资源前置：如 T06 启动时要消耗 1 匹马；缺前置资源跑过去只会被拒
         # （requiredResourceTypes 语义为「任一满足」，如 快马/短程马 二选一）。
@@ -127,7 +139,7 @@ class TaskPlanner:
                 return None
 
         g = state.graph
-        pos, f_to = self._position_for(state, task, cur, speed, penalty)
+        pos, f_to = self._position_for(state, task, cur, speed, penalty, ecost)
         if pos is None:
             return None
 
@@ -141,7 +153,8 @@ class TaskPlanner:
             return None
 
         # 绕路帧数 = (当前->任务点 + 任务点->宫门) - 当前->宫门直达
-        f_back, back_path = g.shortest_path(pos, state.gate_node, speed, penalty)
+        f_back, back_path = g.shortest_path(pos, state.gate_node, speed,
+                                            penalty, ecost)
         if not back_path:
             return None
         detour = max(0, f_to + f_back - to_gate)
@@ -161,7 +174,7 @@ class TaskPlanner:
         net = value - cost
         return (net, pos) if net > 0 else None
 
-    def _position_for(self, state, task, cur, speed, penalty):
+    def _position_for(self, state, task, cur, speed, penalty, ecost=None):
         """任务执行停靠点与到达帧数。T04 清障可在障碍节点或相邻节点处理。"""
         g = state.graph
         node = task.get("nodeId")
@@ -172,11 +185,11 @@ class TaskPlanner:
                 return cur, 0
             best = None
             for c in cands:
-                f, path = g.shortest_path(cur, c, speed, penalty)
+                f, path = g.shortest_path(cur, c, speed, penalty, ecost)
                 if path and (best is None or f < best[1]):
                     best = (c, f)
             return best if best else (None, None)
-        f, path = g.shortest_path(cur, node, speed, penalty)
+        f, path = g.shortest_path(cur, node, speed, penalty, ecost)
         if not path:
             return None, None
         return node, f
@@ -202,15 +215,80 @@ class TaskPlanner:
         return me.get("currentNodeId")
 
     def _penalty_fn(self, state):
-        """阻挡节点的附加帧数按真实处理代价估算（会计入 ETA）。"""
+        """节点附加帧数 = 阻挡代价 + 固定处理站读条 + 对手阴影。
+
+        寻路、ETA、任务估值共用同一套，保证「估的路就是走的路」。
+        """
+        shadow = self._shadow_nodes(state)
+        gate, term = state.gate_node, state.terminal_node
+
         def penalty(nid):
             p = 0
             if state.enemy_guard(nid):
                 p += GUARD_PENALTY
             if state.has_obstacle(nid):
                 p += OBSTACLE_PENALTY
+            node = state.node(nid)
+            # 固定处理站必须处理完才能离站（登船7/水路换运6/入关5/宫前5）
+            # 宫门验核帧数由 plan() 单独计，终点无处理，都不重复算
+            if nid not in (gate, term):
+                proc_type = node.get("processType")
+                if proc_type and proc_type != "VERIFY":
+                    p += node.get("processRound", 0) or 0
+            if nid in shadow:
+                p += (SHADOW_CHOKE_PENALTY
+                      if node.get("nodeType") in CHOKE_TYPES
+                      else SHADOW_NODE_PENALTY)
             return p
         return penalty
+
+    def _shadow_nodes(self, state):
+        """对手前进路线上、且会先于我们到达的节点集（按帧缓存）。"""
+        if self._shadow_cache[0] == state.round:
+            return self._shadow_cache[1]
+        shadow = set()
+        opp = state.opp
+        me = state.me
+        if opp and not opp.get("delivered") and not opp.get("retired") and state.graph:
+            opp_pos = opp.get("nextNodeId") or opp.get("currentNodeId")
+            my_pos = me.get("nextNodeId") or me.get("currentNodeId")
+            if opp_pos and my_pos and opp_pos != my_pos:
+                opp_dist = state.graph.all_frames(opp_pos)
+                my_dist = state.graph.all_frames(my_pos)
+                _, opp_path = state.graph.shortest_path(opp_pos, state.gate_node)
+                for n in opp_path[1:]:  # 对手脚下的点不算
+                    if n == state.terminal_node:
+                        continue
+                    if opp_dist.get(n, math.inf) + SHADOW_MARGIN \
+                            < my_dist.get(n, math.inf):
+                        shadow.add(n)
+        self._shadow_cache = (state.round, frozenset(shadow))
+        return self._shadow_cache[1]
+
+    def _edge_cost_fn(self, state):
+        """天气感知的边成本：暴雨命中水路 / 山雾命中山路时移动变慢。
+
+        生效中的天气全额计；已预告、且在近期时间窗内开始的按半额计
+        （粗粒度：不精确模拟我们到达该边的时刻，方向正确即可）。
+        """
+        weather = state.weather or {}
+        active = weather.get("active") or []
+        forecast = weather.get("forecast") or []
+
+        def edge_cost(edge, base_frames):
+            rt = edge.get("routeType")
+            mult = 1.0
+            for w in active:
+                tax = P.WEATHER_MOVE_TAX.get((w.get("type"), rt))
+                if tax:
+                    mult = max(mult, tax / 1000.0)
+            for w in forecast:
+                tax = P.WEATHER_MOVE_TAX.get((w.get("type"), rt))
+                if tax and (w.get("startRound", 10 ** 9) - state.round) \
+                        <= FORECAST_HORIZON:
+                    mult = max(mult, 1.0 + (tax / 1000.0 - 1.0) * 0.5)
+            return base_frames * mult
+        return edge_cost
 
     @staticmethod
     def _has_our_scout_mark(state, node_id):

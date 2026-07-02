@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>荔枝争运战 · 完整策略文档 (BUILD 3.0-activeguard)</title>
+<title>荔枝争运战 · 完整策略文档 (BUILD 3.1-corridor)</title>
 <style>
   .viz-root {
     --surface-1: #fcfcfb;
@@ -96,8 +96,8 @@
 <div class="viz-root">
 
 <h1>《一骑红尘：荔枝争运战》完整策略文档</h1>
-<p class="sub">客户端 <code>PlannerStrategy</code> · <span class="badge">BUILD 3.0-activeguard</span>
-   · 71 项自测覆盖 · 生成于 2026-07-02</p>
+<p class="sub">客户端 <code>PlannerStrategy</code> · <span class="badge">BUILD 3.1-corridor</span>
+   · 77 项自测覆盖 · 生成于 2026-07-02</p>
 
 <div class="toc">
 <strong>目录</strong>
@@ -350,6 +350,10 @@
 <tr><td>SAFETY_MARGIN 交付安全余量</td><td>60 帧</td><td>对冲 ETA 乐观误差（马速/天气/窗口）</td></tr>
 <tr><td>帧价值（绕路成本）</td><td>0.227/帧</td><td>鲜度 0.11 + 用时斜率 70/600（恒计：每绕1帧交付晚1帧）</td></tr>
 <tr><td>寻路惩罚</td><td>敌卡 +35 / 障碍 +10 帧</td><td>按真实处理代价（强通税/清障读条）估，估值与实际走的路同一套</td></tr>
+<tr><td>对手阴影惩罚（V3.1）</td><td>咽喉 +35 / 普通 +8 帧（对手将先到达的其前进路线节点；宫门除外）</td><td>四局实锤：尾随对手走廊 = 资源被扫 + 掐点吃卡；惩罚驱动寻路自动切换到干净走廊（如水路）</td></tr>
+<tr><td>处理站帧数入 ETA（V3.1）</td><td>登船 7 / 水路换运 6 / 入关 5 / 宫前 5</td><td>此前 ETA 系统性乐观；宫门验核单独计不重复</td></tr>
+<tr><td>天气边成本（V3.1）</td><td>生效全额（暴雨水路 ×1.35 / 山雾山路 ×1.1）；120 帧内预告半额</td><td>预告提前 30 帧公开，雨天自动回官道</td></tr>
+<tr><td>顺路领取闸门</td><td>slack &gt; 15</td><td>领取只花 2 帧读条 ≈0.5 分，换 +18 分；只挡临门一脚</td></tr>
 <tr><td>USE_ICE_BELOW 用冰阈值</td><td>鲜度 ≤ 90</td><td>+10 不溢出，且防跌破 90/80/… 好果转坏阈值</td></tr>
 <tr><td>CLAIM_LIMIT 领取上限</td><td>冰鉴 2 / 马各 1</td><td>冰鉴 +10鲜度 ≈ 18 分</td></tr>
 <tr><td>MIN_GOOD_RESERVE 好果底仓</td><td>5 篓</td><td>交付要求好果 &gt; 0，对抗投资不许掏空</td></tr>
@@ -373,7 +377,8 @@
 <tr><td>V2.4 edge-block</td><td>冻结解冻（边上削弱）+ 设卡预判</td><td>平台 80:699——demo 掐点设卡冻我们半路 180 帧</td></tr>
 <tr><td>2.5 horse+audit</td><td>马匹经济 + 帧价值恒计 + 交付后静默 + 任务资源前置 + 等待中用冰</td><td>三连败复盘：骑掉马丢 60 分、交付晚 63 帧、代码自查 3 个 P0</td></tr>
 <tr><td>2.5 buildguard</td><td>版本水印 + 停滞看门狗 + 人手账本</td><td>旧包上平台重演已修复败局（r91 骑马实锤）</td></tr>
-<tr><td><b>3.0 activeguard</b></td><td><b>主动设卡：领先过咽喉回手防6卡</b></td><td>demo 四局全靠这招赢——刀递到我们手里</td></tr>
+<tr><td>3.0 activeguard</td><td>主动设卡：领先过咽喉回手防6卡</td><td>demo 四局全靠这招赢——刀递到我们手里</td></tr>
+<tr><td><b>3.1 corridor</b></td><td><b>走廊竞争：对手阴影惩罚 + 处理站帧数入 ETA + 天气感知寻路</b></td><td>根因分析：一切败局都是「落后 60~80 帧尾随同一走廊」的下游症状——阴影惩罚让寻路自动选无竞争走廊（水路），力争先过武关反手设卡</td></tr>
 </table>
 
 <p class="foot">仓库 client/docs/strategy.html · 与代码同步于 main@3.0-activeguard ·
