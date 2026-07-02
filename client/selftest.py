@@ -210,13 +210,63 @@ def test_planner():
     ok &= check("规划: 站在任务点发 CLAIM_TASK",
                 kinds.get("CLAIM_TASK", {}).get("taskId") == "T_003",
                 json.dumps(a, ensure_ascii=False))
-    # 同帧应派小分队去探路（任务点已在脚下，探宫门 S14）
-    ok &= check("规划: 同帧派小分队探宫门",
+    # 早期不探宫门（验核 ~390 帧才开放，标记 45 帧就过期）；任务点在脚下也不探
+    ok &= check("探路: 早期不浪费人手探宫门", "SQUAD_SCOUT" not in kinds,
+                json.dumps(a, ensure_ascii=False))
+
+    # ---- 场景1b: 355 帧后接近宫门时才派探路 ----
+    gs = make_state(round_no=360, node="S13")
+    a = PlannerStrategy().decide(gs)
+    kinds = {x["action"]: x for x in a}
+    ok &= check("探路: 355帧后近宫门派探路",
                 kinds.get("SQUAD_SCOUT", {}).get("targetNodeId") == "S14",
-                json.dumps(kinds.get("SQUAD_SCOUT"), ensure_ascii=False))
+                json.dumps(a, ensure_ascii=False))
+
+    # ---- 场景1c: 冰鉴鲜度 ≤90 就用（防跌破转坏阈值） ----
+    gs = make_state()
+    for p in gs.players.values():
+        if p["playerId"] == 1001:
+            p["freshness"] = 88.0
+            p["resources"] = {"ICE_BOX": 1}
+    gs.tasks = []  # 排除任务干扰
+    a = PlannerStrategy().main_action(gs)
+    ok &= check("保鲜: 鲜度88即用冰鉴",
+                a and a["action"] == "USE_RESOURCE" and a["resourceType"] == "ICE_BOX",
+                str(a))
+
+    # ---- 场景1d: 已持有 1 个冰鉴仍可再领（上限 2） ----
+    gs = make_state()
+    for p in gs.players.values():
+        if p["playerId"] == 1001:
+            p["resources"] = {"ICE_BOX": 1}
+            p["freshness"] = 95.0  # 高于用冰阈值，测领取分支
+    gs.tasks = []
+    gs.nodes["S07"]["resourceStock"] = {"ICE_BOX": 1}
+    gs.nodes["S07"].pop("processType", None)
+    a = PlannerStrategy().main_action(gs)
+    ok &= check("保鲜: 持1个冰鉴仍再领",
+                a and a["action"] == "CLAIM_RESOURCE" and a["resourceType"] == "ICE_BOX",
+                str(a))
+
+    # ---- 场景1e: RUSH 在宫门先打护果令再验核 ----
+    gs = make_state(node="S14")
+    gs.phase = "RUSH"
+    for p in gs.players.values():
+        if p["playerId"] == 1001:
+            p["rushTacticUsedCount"] = 0  # 样例里已用过急策，重置以测该分支
+    st = PlannerStrategy()
+    a1 = st.main_action(gs)
+    a2 = st.main_action(gs)
+    ok &= check("急策: 验核前打护果令",
+                a1 and a1["action"] == "RUSH_PROTECT"
+                and a2 and a2["action"] == "VERIFY_GATE",
+                f"{a1} -> {a2}")
 
     # ---- 场景2: 截止临近（r560）应放弃任务直奔交付线 ----
     gs = make_state(round_no=560, node="S09")
+    for p in gs.players.values():
+        if p["playerId"] == 1001:
+            p["resources"] = {}  # 清空背包，排除「临交付用冰鉴」正确分支的干扰
     st = PlannerStrategy()
     plan = st.planner.plan(gs)
     ok &= check("规划: 截止临近直奔交付", plan.kind == "deliver", repr(plan))
@@ -314,27 +364,25 @@ def test_contention():
                              P.CARD_BING_ZHENG, P.CARD_ABSTAIN})
 
     # ---- 移动中只有小分队动作时补显式 MOVE（防服务端暂停推进） ----
+    # 场景: r360 在 E09 上移动、接近宫门 -> 触发探路，同包必须补 MOVE 保持推进
     gs = GameState(1001)
     gs.on_start(start)
     d = json.loads(json.dumps(inquire))
     d["contests"], d["tasks"] = [], []
+    d["round"] = 360
     for p in d["players"]:
         if p["playerId"] == 1001:
-            p.update(state="MOVING", currentNodeId="S01", nextNodeId="S02",
-                     routeEdgeId="E01", currentProcess=None, buffs=[],
+            p.update(state="MOVING", currentNodeId="S13", nextNodeId="S14",
+                     routeEdgeId="E09", currentProcess=None, buffs=[],
                      resources={})
     gs.on_inquire(d)
     a = PlannerStrategy().decide(gs)
     kinds = [x["action"] for x in a]
-    has_squad = "SQUAD_SCOUT" in kinds
-    has_main = any(k in P.MAIN_ACTION_TYPES for k in kinds)
+    ok &= check("移动中: 触发探路", "SQUAD_SCOUT" in kinds, f"{kinds}")
+    mv = [x for x in a if x["action"] == "MOVE"]
     ok &= check("移动中: 小分队动作伴随显式 MOVE 保持推进",
-                (not has_squad) or has_main, f"{kinds}")
-    if has_main:
-        mv = [x for x in a if x["action"] == "MOVE"]
-        ok &= check("移动中: MOVE 目标为当前目标节点",
-                    not mv or mv[0]["targetNodeId"] == "S02",
-                    json.dumps(a, ensure_ascii=False))
+                len(mv) == 1 and mv[0]["targetNodeId"] == "S14",
+                json.dumps(a, ensure_ascii=False))
     return ok
 
 

@@ -158,13 +158,17 @@ class PlannerStrategy(BaselineStrategy):
     """V1：任务规划（保 90 冲 110+）+ 小分队探路 + 窗口出牌升级。"""
 
     SCOUT_RESEND_GAP = 25       # 同一目标探路重发间隔（防止在途期间重复派人）
-    SCOUT_RESERVE = 0           # 保留人手（V1 全部可用于探路）
+    SCOUT_MAX_ETA = 40          # 只探 40 帧内能赶到的目标（标记寿命 45 帧）
+    GATE_SCOUT_FROM = 355       # 宫门验核最早 ~390 帧，此前派的标记必然过期
     CLAIM_EN_ROUTE = (P.ICE_BOX, P.FAST_HORSE, P.SHORT_HORSE)  # 顺路领取清单
+    CLAIM_LIMIT = {P.ICE_BOX: 2}    # 冰鉴多多益善（+10 鲜度 ≈ 18 分），其余各 1
+    USE_ICE_BELOW = 91          # 鲜度 ≤90 就用冰鉴：+10 不溢出，且防跌破转坏阈值
 
     def __init__(self, logger=None):
         super().__init__(logger)
         self.planner = TaskPlanner(logger)
         self._scout_sent = {}   # nodeId -> 派出帧
+        self._rush_tactic_tried = False  # 护果令只尝试一次，被拒也不无限重试
 
     # ---------- 每帧入口 ----------
 
@@ -244,9 +248,14 @@ class PlannerStrategy(BaselineStrategy):
                 return P.a_deliver()
             return P.a_wait()
 
-        # 宫门验核（仅 RUSH）
+        # 宫门验核（仅 RUSH）；验核前一帧先打护果令（免费，终段鲜度损耗 ×0.2）
         if cur == gate and not verified and plan.kind == "deliver":
             if state.phase == P.PHASE_RUSH:
+                if (me.get("rushTacticUsedCount") or 0) == 0 \
+                        and not self._rush_tactic_tried \
+                        and me.get("freshness", 0) < 100:
+                    self._rush_tactic_tried = True
+                    return P.a_rush_protect()
                 return P.a_verify_gate()
             return P.a_wait()
 
@@ -274,7 +283,8 @@ class PlannerStrategy(BaselineStrategy):
         if plan.kind == "task" or plan.slack > 80:
             stock = node.get("resourceStock") or {}
             for rt in self.CLAIM_EN_ROUTE:
-                if stock.get(rt, 0) > 0 and res.get(rt, 0) == 0:
+                limit = self.CLAIM_LIMIT.get(rt, 1)
+                if stock.get(rt, 0) > 0 and res.get(rt, 0) < limit:
                     if self._yield_for_contention(state):
                         return P.a_wait()  # 错峰一帧再领，资源窗口不值得打
                     return P.a_claim_resource(cur, rt)
@@ -326,26 +336,35 @@ class PlannerStrategy(BaselineStrategy):
             (proc.get("action") or proc.get("type")) in ("PROCESS", "DOCK")
 
     # ---------- 小分队：给任务点 / 宫门提前打探路标记（读条 -3 帧） ----------
+    # 标记只活 45 帧：只探 SCOUT_MAX_ETA 帧内能赶到的目标；宫门验核最早
+    # ~390 帧才开放，355 帧前派去宫门的标记必然过期（实测一局浪费 6/8 人手）。
 
     def squad_action(self, state, plan):
         if state.phase == P.PHASE_RUSH:
             return None  # 冲刺阶段禁止新派小分队
         me = state.me
-        if (me.get("squadAvailable") or 0) <= self.SCOUT_RESERVE:
+        avail = me.get("squadAvailable") or 0
+        if avail <= 0:
             return None
 
-        cur = me.get("currentNodeId")
+        cur = me.get("currentNodeId") or me.get("nextNodeId")
         targets = []
-        # 任务点：人还没到才值得探（标记落地有延迟，就地开读条来不及吃到减时）
-        if plan.kind == "task" and plan.position and plan.position != cur:
+        # 宫门优先（时机窗口窄）；保留 1 人手给宫门
+        if state.round >= self.GATE_SCOUT_FROM:
+            targets.append(state.gate_node)
+        if plan.kind == "task" and plan.position and plan.position != cur and avail > 1:
             targets.append(plan.position)
-        targets.append(state.gate_node)  # 宫门验核 6->3 帧，稳赚
 
+        penalty = self.planner._penalty_fn(state)
+        speed = state.my_speed()
         for t in targets:
             if self.planner._has_our_scout_mark(state, t):
                 continue
             if state.round - self._scout_sent.get(t, -999) < self.SCOUT_RESEND_GAP:
                 continue
+            eta, path = state.graph.shortest_path(cur, t, speed, penalty)
+            if not path or eta > self.SCOUT_MAX_ETA:
+                continue  # 太远：标记会在我们到达前过期
             self._scout_sent[t] = state.round
             return P.a_squad_scout(t)
         return None
