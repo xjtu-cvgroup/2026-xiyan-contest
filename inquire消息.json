@@ -1,0 +1,1737 @@
+{
+  "msg_name": "inquire",
+  "msg_data": {
+    "matchId": "match_20260701_1001_vs_2002_sample",
+    "rulesVersion": "4.1",
+    "round": 142,
+    "tick": 141,
+    "phase": "NORMAL",
+    "players": [
+      {
+        "playerId": 1001,
+        "camp": 1,
+        "teamId": "RED",
+        "playerName": "demo-red",
+        "online": true,
+        "state": "PROCESSING",
+        "currentNodeId": "S07",
+        "nextNodeId": "S09",
+        "routeEdgeId": "E04",
+        "routeType": "ROAD",
+        "moveDirection": "PAUSED",
+        "moveProgress": 0.52,
+        "moveProgressRound": 24,
+        "currentEdgeCost": 46,
+        "edgeProgressPermille": 520,
+        "edgeProgressMs": 23920,
+        "edgeTotalMs": 46000,
+        "freshness": 82.36,
+        "goodFruit": 88,
+        "badFruit": 12,
+        "verified": false,
+        "delivered": false,
+        "retired": false,
+        "retiredRound": 0,
+        "missingActionRounds": 0,
+        "illegalActionCount": 1,
+        "penaltyScore": 4,
+        "breakOrderReady": true,
+        "rushTacticUsedCount": 1,
+        "currentProcess": {
+          "action": "CLAIM_TASK",
+          "objectKey": "TASK:T_003",
+          "taskId": "T_003",
+          "startedRound": 140,
+          "remainRound": 2,
+          "type": "CLAIM_TASK",
+          "targetNodeId": "S07",
+          "remainingRound": 2,
+          "totalRound": 3,
+          "progress": 0.3333333333
+        },
+        "frozenGoodFruit": 2,
+        "squadAvailable": 5,
+        "squadInFlight": 3,
+        "guardActionPoint": 2,
+        "resources": {
+          "ICE_BOX": 1,
+          "FAST_HORSE": 0,
+          "SHORT_HORSE": 1,
+          "PASS_TOKEN": 1,
+          "OFFICIAL_PERMIT": 0,
+          "INTEL": 2,
+          "BOAT_RIGHT": 1
+        },
+        "buffs": [
+          {
+            "type": "RUSH_SPEED",
+            "remainingRound": 9,
+            "moveMultiplier": 0.7,
+            "freshnessMultiplier": 1.25
+          },
+          {
+            "type": "SHORT_HORSE",
+            "remainingRound": 5,
+            "moveMultiplier": 0.85,
+            "freshnessMultiplier": 1.0
+          }
+        ],
+        "totalScore": 319,
+        "taskScore": 45,
+        "bountyScore": 10,
+        "scoreDetail": {
+          "delivery": 0,
+          "goodFruit": 88,
+          "freshness": 82,
+          "time": 98,
+          "tasks": 45,
+          "bounty": 10,
+          "penalty": -4,
+          "total": 319
+        }
+      },
+      {
+        "playerId": 2002,
+        "camp": 2,
+        "teamId": "BLUE",
+        "playerName": "demo-blue",
+        "online": true,
+        "state": "MOVING",
+        "currentNodeId": "S08",
+        "nextNodeId": "S10",
+        "routeEdgeId": "E17",
+        "routeType": "BRANCH",
+        "moveDirection": "FORWARD",
+        "moveProgress": 0.61,
+        "moveProgressRound": 29,
+        "currentEdgeCost": 46,
+        "edgeProgressPermille": 610,
+        "edgeProgressMs": 28060,
+        "edgeTotalMs": 46000,
+        "freshness": 86.18,
+        "goodFruit": 91,
+        "badFruit": 9,
+        "verified": false,
+        "delivered": false,
+        "retired": false,
+        "retiredRound": 0,
+        "missingActionRounds": 1,
+        "illegalActionCount": 2,
+        "penaltyScore": 8,
+        "breakOrderReady": false,
+        "rushTacticUsedCount": 0,
+        "currentProcess": {
+          "action": "CLAIM_RESOURCE",
+          "objectKey": "RESOURCE:S08:PASS_TOKEN",
+          "resourceType": "PASS_TOKEN",
+          "startedRound": 141,
+          "remainRound": 1,
+          "type": "CLAIM_RESOURCE",
+          "targetNodeId": "S08",
+          "remainingRound": 1,
+          "totalRound": 2,
+          "progress": 0.5
+        },
+        "frozenGoodFruit": 0,
+        "squadAvailable": 6,
+        "squadInFlight": 2,
+        "guardActionPoint": 3,
+        "resources": {
+          "ICE_BOX": 0,
+          "FAST_HORSE": 1,
+          "SHORT_HORSE": 0,
+          "PASS_TOKEN": 0,
+          "OFFICIAL_PERMIT": 1,
+          "INTEL": 1,
+          "BOAT_RIGHT": 0
+        },
+        "buffs": [
+          {
+            "type": "FAST_HORSE",
+            "remainingRound": 12,
+            "moveMultiplier": 0.8,
+            "freshnessMultiplier": 1.0
+          }
+        ],
+        "totalScore": 301,
+        "taskScore": 30,
+        "bountyScore": 0,
+        "scoreDetail": {
+          "delivery": 0,
+          "goodFruit": 91,
+          "freshness": 86,
+          "time": 102,
+          "tasks": 30,
+          "bounty": 0,
+          "penalty": -8,
+          "total": 301
+        }
+      }
+    ],
+    "nodes": [
+      {
+        "nodeId": "S01",
+        "name": "岭南果园",
+        "x": 5,
+        "y": 50,
+        "nodeType": "START",
+        "processRound": 0,
+        "start": true,
+        "terminal": false,
+        "visible": true,
+        "resourceVisible": true,
+        "resourceStock": {},
+        "effectiveCombatCount": 0,
+        "guardBlockCount": 0,
+        "keyPassCombatCount": 0,
+        "hasObstacle": false,
+        "canWindow": true,
+        "scouted": []
+      },
+      {
+        "nodeId": "S02",
+        "name": "南岭驿",
+        "x": 15,
+        "y": 44,
+        "nodeType": "CHECKPOINT",
+        "processType": "TRANSFER",
+        "processRound": 4,
+        "start": false,
+        "terminal": false,
+        "visible": true,
+        "resourceVisible": true,
+        "resourceStock": {},
+        "effectiveCombatCount": 0,
+        "guardBlockCount": 0,
+        "keyPassCombatCount": 0,
+        "hasObstacle": false,
+        "canWindow": true,
+        "scouted": []
+      },
+      {
+        "nodeId": "S03",
+        "name": "梅关驿",
+        "x": 22,
+        "y": 38,
+        "nodeType": "PASS",
+        "processRound": 0,
+        "start": false,
+        "terminal": false,
+        "visible": true,
+        "resourceVisible": true,
+        "resourceStock": {
+          "ICE_BOX": 1,
+          "PASS_TOKEN": 1,
+          "INTEL": 1
+        },
+        "effectiveCombatCount": 0,
+        "guardBlockCount": 0,
+        "keyPassCombatCount": 0,
+        "hasObstacle": false,
+        "canWindow": true,
+        "scouted": []
+      },
+      {
+        "nodeId": "S04",
+        "name": "江南码头",
+        "x": 22,
+        "y": 52,
+        "nodeType": "DOCK",
+        "processType": "BOARD",
+        "processRound": 7,
+        "start": false,
+        "terminal": false,
+        "visible": true,
+        "resourceVisible": true,
+        "resourceStock": {
+          "SHORT_HORSE": 1,
+          "BOAT_RIGHT": 1,
+          "INTEL": 1
+        },
+        "effectiveCombatCount": 0,
+        "guardBlockCount": 0,
+        "keyPassCombatCount": 0,
+        "hasObstacle": false,
+        "canWindow": true,
+        "scouted": []
+      },
+      {
+        "nodeId": "S05",
+        "name": "洞庭水驿",
+        "x": 38,
+        "y": 48,
+        "nodeType": "WATER_STATION",
+        "processType": "WATER_TRANSFER",
+        "processRound": 6,
+        "start": false,
+        "terminal": false,
+        "visible": true,
+        "resourceVisible": true,
+        "resourceStock": {},
+        "effectiveCombatCount": 0,
+        "guardBlockCount": 0,
+        "keyPassCombatCount": 0,
+        "hasObstacle": false,
+        "canWindow": true,
+        "scouted": []
+      },
+      {
+        "nodeId": "S06",
+        "name": "五岭山道",
+        "x": 14,
+        "y": 32,
+        "nodeType": "MOUNTAIN_NODE",
+        "processRound": 0,
+        "start": false,
+        "terminal": false,
+        "visible": true,
+        "resourceVisible": true,
+        "resourceStock": {
+          "ICE_BOX": 1,
+          "INTEL": 1
+        },
+        "effectiveCombatCount": 0,
+        "guardBlockCount": 0,
+        "keyPassCombatCount": 0,
+        "hasObstacle": true,
+        "obstacleType": "BROKEN_BRIDGE",
+        "canWindow": true,
+        "scouted": []
+      },
+      {
+        "nodeId": "S07",
+        "name": "荆襄大驿",
+        "x": 40,
+        "y": 36,
+        "nodeType": "STATION",
+        "processRound": 0,
+        "start": false,
+        "terminal": false,
+        "visible": true,
+        "resourceVisible": true,
+        "resourceStock": {
+          "ICE_BOX": 1,
+          "SHORT_HORSE": 1
+        },
+        "effectiveCombatCount": 0,
+        "guardBlockCount": 0,
+        "keyPassCombatCount": 0,
+        "hasObstacle": false,
+        "canWindow": true,
+        "scouted": []
+      },
+      {
+        "nodeId": "S08",
+        "name": "秦岭栈道",
+        "x": 42,
+        "y": 24,
+        "nodeType": "MOUNTAIN_PASS",
+        "processRound": 0,
+        "start": false,
+        "terminal": false,
+        "visible": true,
+        "guard": {
+          "ownerTeamId": "RED",
+          "defense": 3,
+          "initialDefense": 4,
+          "maxDefense": 5,
+          "completeRound": 118,
+          "ageRound": 24
+        },
+        "resourceVisible": true,
+        "resourceStock": {
+          "SHORT_HORSE": 1,
+          "PASS_TOKEN": 1,
+          "INTEL": 1
+        },
+        "effectiveCombatCount": 2,
+        "guardBlockCount": 1,
+        "keyPassCombatCount": 0,
+        "hasObstacle": true,
+        "obstacleType": "ROCKFALL",
+        "obstacleResidue": {
+          "clearedByPlayerId": 1001,
+          "clearedByTeamId": "RED",
+          "clearRound": 128,
+          "untilRound": 158,
+          "remainRound": 16,
+          "taxRound": 6
+        },
+        "canWindow": true,
+        "scouted": []
+      },
+      {
+        "nodeId": "S09",
+        "name": "洛阳驿",
+        "x": 55,
+        "y": 32,
+        "nodeType": "STATION",
+        "processRound": 0,
+        "start": false,
+        "terminal": false,
+        "visible": true,
+        "resourceVisible": true,
+        "resourceStock": {
+          "FAST_HORSE": 1,
+          "OFFICIAL_PERMIT": 1
+        },
+        "effectiveCombatCount": 0,
+        "guardBlockCount": 0,
+        "keyPassCombatCount": 0,
+        "hasObstacle": false,
+        "canWindow": true,
+        "scouted": [
+          {
+            "playerId": 1001,
+            "teamId": "RED",
+            "round": 120,
+            "source": "SQUAD_SCOUT",
+            "remainRound": 8
+          }
+        ]
+      },
+      {
+        "nodeId": "S10",
+        "name": "武关",
+        "x": 62,
+        "y": 26,
+        "nodeType": "KEY_PASS",
+        "processRound": 0,
+        "start": false,
+        "terminal": false,
+        "visible": true,
+        "guard": {
+          "ownerTeamId": "RED",
+          "defense": 3,
+          "initialDefense": 4,
+          "maxDefense": 5,
+          "completeRound": 118,
+          "ageRound": 24
+        },
+        "resourceVisible": true,
+        "resourceStock": {
+          "INTEL": 1
+        },
+        "effectiveCombatCount": 2,
+        "guardBlockCount": 1,
+        "keyPassCombatCount": 1,
+        "hasObstacle": true,
+        "obstacleType": "MUD",
+        "canWindow": true,
+        "scouted": [
+          {
+            "playerId": 1001,
+            "teamId": "RED",
+            "round": 120,
+            "source": "SQUAD_SCOUT",
+            "remainRound": 8
+          }
+        ]
+      },
+      {
+        "nodeId": "S11",
+        "name": "潼关驿",
+        "x": 66,
+        "y": 22,
+        "nodeType": "PASS",
+        "processType": "PASS_TRANSFER",
+        "processRound": 5,
+        "start": false,
+        "terminal": false,
+        "visible": true,
+        "resourceVisible": true,
+        "resourceStock": {
+          "INTEL": 1
+        },
+        "effectiveCombatCount": 0,
+        "guardBlockCount": 0,
+        "keyPassCombatCount": 0,
+        "hasObstacle": true,
+        "obstacleType": "DOCK_BLOCK",
+        "canWindow": true,
+        "scouted": []
+      },
+      {
+        "nodeId": "S12",
+        "name": "关中平原",
+        "x": 70,
+        "y": 20,
+        "nodeType": "JUNCTION",
+        "processRound": 0,
+        "start": false,
+        "terminal": false,
+        "visible": true,
+        "resourceVisible": true,
+        "resourceStock": {},
+        "effectiveCombatCount": 0,
+        "guardBlockCount": 0,
+        "keyPassCombatCount": 0,
+        "hasObstacle": false,
+        "canWindow": true,
+        "scouted": []
+      },
+      {
+        "nodeId": "S13",
+        "name": "灞桥驿",
+        "x": 73,
+        "y": 19,
+        "nodeType": "PALACE_STATION",
+        "processType": "PALACE_TRANSFER",
+        "processRound": 5,
+        "start": false,
+        "terminal": false,
+        "visible": true,
+        "resourceVisible": true,
+        "resourceStock": {
+          "PASS_TOKEN": 1,
+          "OFFICIAL_PERMIT": 1,
+          "INTEL": 1
+        },
+        "effectiveCombatCount": 0,
+        "guardBlockCount": 0,
+        "keyPassCombatCount": 0,
+        "hasObstacle": false,
+        "canWindow": true,
+        "scouted": []
+      },
+      {
+        "nodeId": "S14",
+        "name": "朱雀门",
+        "x": 76,
+        "y": 18,
+        "nodeType": "GATE",
+        "processType": "VERIFY",
+        "processRound": 6,
+        "start": false,
+        "terminal": false,
+        "visible": true,
+        "resourceVisible": true,
+        "resourceStock": {},
+        "effectiveCombatCount": 0,
+        "guardBlockCount": 0,
+        "keyPassCombatCount": 0,
+        "hasObstacle": false,
+        "canWindow": true,
+        "scouted": []
+      },
+      {
+        "nodeId": "S15",
+        "name": "兴庆宫",
+        "x": 78,
+        "y": 18,
+        "nodeType": "FINISH",
+        "processRound": 0,
+        "start": false,
+        "terminal": true,
+        "visible": true,
+        "resourceVisible": true,
+        "resourceStock": {},
+        "effectiveCombatCount": 0,
+        "guardBlockCount": 0,
+        "keyPassCombatCount": 0,
+        "hasObstacle": false,
+        "canWindow": true,
+        "scouted": []
+      }
+    ],
+    "edges": [
+      {
+        "edgeId": "E01",
+        "fromNode": "S01",
+        "toNode": "S02",
+        "fromNodeId": "S01",
+        "toNodeId": "S02",
+        "routeType": "ROAD",
+        "distance": 30,
+        "bidirectional": true,
+        "pathId": "P_E01"
+      },
+      {
+        "edgeId": "E02",
+        "fromNode": "S02",
+        "toNode": "S03",
+        "fromNodeId": "S02",
+        "toNodeId": "S03",
+        "routeType": "ROAD",
+        "distance": 25,
+        "bidirectional": true,
+        "pathId": "P_E02"
+      },
+      {
+        "edgeId": "E03",
+        "fromNode": "S03",
+        "toNode": "S07",
+        "fromNodeId": "S03",
+        "toNodeId": "S07",
+        "routeType": "ROAD",
+        "distance": 54,
+        "bidirectional": true,
+        "pathId": "P_E03"
+      },
+      {
+        "edgeId": "E04",
+        "fromNode": "S07",
+        "toNode": "S09",
+        "fromNodeId": "S07",
+        "toNodeId": "S09",
+        "routeType": "ROAD",
+        "distance": 46,
+        "bidirectional": true,
+        "pathId": "P_E04"
+      },
+      {
+        "edgeId": "E05",
+        "fromNode": "S09",
+        "toNode": "S10",
+        "fromNodeId": "S09",
+        "toNodeId": "S10",
+        "routeType": "ROAD",
+        "distance": 40,
+        "bidirectional": true,
+        "pathId": "P_E05"
+      },
+      {
+        "edgeId": "E06",
+        "fromNode": "S10",
+        "toNode": "S11",
+        "fromNodeId": "S10",
+        "toNodeId": "S11",
+        "routeType": "ROAD",
+        "distance": 36,
+        "bidirectional": true,
+        "pathId": "P_E06"
+      },
+      {
+        "edgeId": "E07",
+        "fromNode": "S11",
+        "toNode": "S12",
+        "fromNodeId": "S11",
+        "toNodeId": "S12",
+        "routeType": "ROAD",
+        "distance": 20,
+        "bidirectional": true,
+        "pathId": "P_E07"
+      },
+      {
+        "edgeId": "E08",
+        "fromNode": "S12",
+        "toNode": "S13",
+        "fromNodeId": "S12",
+        "toNodeId": "S13",
+        "routeType": "ROAD",
+        "distance": 25,
+        "bidirectional": true,
+        "pathId": "P_E08"
+      },
+      {
+        "edgeId": "E09",
+        "fromNode": "S13",
+        "toNode": "S14",
+        "fromNodeId": "S13",
+        "toNodeId": "S14",
+        "routeType": "ROAD",
+        "distance": 18,
+        "bidirectional": true,
+        "pathId": "P_E09"
+      },
+      {
+        "edgeId": "E10",
+        "fromNode": "S14",
+        "toNode": "S15",
+        "fromNodeId": "S14",
+        "toNodeId": "S15",
+        "routeType": "ROAD",
+        "distance": 10,
+        "bidirectional": true,
+        "pathId": "P_E10"
+      },
+      {
+        "edgeId": "E11",
+        "fromNode": "S02",
+        "toNode": "S04",
+        "fromNodeId": "S02",
+        "toNodeId": "S04",
+        "routeType": "ROAD",
+        "distance": 20,
+        "bidirectional": true,
+        "pathId": "P_E11"
+      },
+      {
+        "edgeId": "E12",
+        "fromNode": "S04",
+        "toNode": "S05",
+        "fromNodeId": "S04",
+        "toNodeId": "S05",
+        "routeType": "WATER",
+        "distance": 44,
+        "bidirectional": true,
+        "pathId": "P_E12"
+      },
+      {
+        "edgeId": "E13",
+        "fromNode": "S05",
+        "toNode": "S07",
+        "fromNodeId": "S05",
+        "toNodeId": "S07",
+        "routeType": "BRANCH",
+        "distance": 46,
+        "bidirectional": true,
+        "pathId": "P_E13"
+      },
+      {
+        "edgeId": "E15",
+        "fromNode": "S01",
+        "toNode": "S06",
+        "fromNodeId": "S01",
+        "toNodeId": "S06",
+        "routeType": "MOUNTAIN",
+        "distance": 44,
+        "bidirectional": true,
+        "pathId": "P_E15"
+      },
+      {
+        "edgeId": "E16",
+        "fromNode": "S06",
+        "toNode": "S08",
+        "fromNodeId": "S06",
+        "toNodeId": "S08",
+        "routeType": "MOUNTAIN",
+        "distance": 54,
+        "bidirectional": true,
+        "pathId": "P_E16"
+      },
+      {
+        "edgeId": "E17",
+        "fromNode": "S08",
+        "toNode": "S10",
+        "fromNodeId": "S08",
+        "toNodeId": "S10",
+        "routeType": "BRANCH",
+        "distance": 46,
+        "bidirectional": true,
+        "pathId": "P_E17"
+      },
+      {
+        "edgeId": "E18",
+        "fromNode": "S03",
+        "toNode": "S06",
+        "fromNodeId": "S03",
+        "toNodeId": "S06",
+        "routeType": "BRANCH",
+        "distance": 38,
+        "bidirectional": true,
+        "pathId": "P_E18"
+      },
+      {
+        "edgeId": "E19",
+        "fromNode": "S05",
+        "toNode": "S09",
+        "fromNodeId": "S05",
+        "toNodeId": "S09",
+        "routeType": "WATER",
+        "distance": 48,
+        "bidirectional": true,
+        "pathId": "P_E19"
+      },
+      {
+        "edgeId": "E20",
+        "fromNode": "S07",
+        "toNode": "S08",
+        "fromNodeId": "S07",
+        "toNodeId": "S08",
+        "routeType": "MOUNTAIN",
+        "distance": 42,
+        "bidirectional": true,
+        "pathId": "P_E20"
+      },
+      {
+        "edgeId": "E21",
+        "fromNode": "S04",
+        "toNode": "S07",
+        "fromNodeId": "S04",
+        "toNodeId": "S07",
+        "routeType": "BRANCH",
+        "distance": 54,
+        "bidirectional": true,
+        "pathId": "P_E21"
+      },
+      {
+        "edgeId": "E22",
+        "fromNode": "S08",
+        "toNode": "S09",
+        "fromNodeId": "S08",
+        "toNodeId": "S09",
+        "routeType": "BRANCH",
+        "distance": 64,
+        "bidirectional": true,
+        "pathId": "P_E22"
+      }
+    ],
+    "weather": {
+      "active": [
+        {
+          "weatherId": "W_POLICY_02",
+          "type": "HEAVY_RAIN",
+          "region": "WATER",
+          "remainRound": 18
+        }
+      ],
+      "forecast": [
+        {
+          "weatherId": "W_POLICY_03",
+          "type": "MOUNTAIN_FOG",
+          "region": "MOUNTAIN",
+          "startRound": 168,
+          "durationRound": 35
+        }
+      ]
+    },
+    "tasks": [
+      {
+        "taskId": "T_003",
+        "taskTemplateId": "T02",
+        "name": "????",
+        "nodeId": "S07",
+        "routeBucket": "ROAD",
+        "processType": "CLAIM_TASK",
+        "processRound": 3,
+        "score": 15,
+        "refreshRound": 118,
+        "expireRound": 178,
+        "active": true,
+        "completed": false,
+        "failed": false,
+        "ownerPlayerId": 0,
+        "protectionPlayerId": 1001
+      },
+      {
+        "taskId": "T_004",
+        "taskTemplateId": "T06",
+        "name": "????",
+        "nodeId": "S09",
+        "routeBucket": "ROAD",
+        "processType": "CLAIM_TASK",
+        "processRound": 3,
+        "score": 30,
+        "refreshRound": 126,
+        "expireRound": 190,
+        "active": true,
+        "completed": true,
+        "failed": false,
+        "ownerPlayerId": 1001,
+        "protectionPlayerId": 0
+      },
+      {
+        "taskId": "T_005",
+        "taskTemplateId": "T03",
+        "name": "????",
+        "nodeId": "S10",
+        "routeBucket": "BRANCH",
+        "processType": "CLAIM_TASK",
+        "processRound": 4,
+        "score": 15,
+        "refreshRound": 130,
+        "expireRound": 160,
+        "active": false,
+        "completed": false,
+        "failed": true,
+        "failureReason": "EXPIRED",
+        "ownerPlayerId": 0,
+        "protectionPlayerId": 0
+      }
+    ],
+    "bounties": [
+      {
+        "bountyId": "B_128_001",
+        "bountyType": "GUARD_BREAK",
+        "nodeId": "S08",
+        "ownerTeamId": "RED",
+        "triggerReason": "BREAK_GUARD",
+        "triggerRound": 128,
+        "cooldownUntilRound": 158,
+        "rewardScore": 10,
+        "active": true,
+        "completed": false,
+        "winnerPlayerId": 0
+      },
+      {
+        "bountyId": "B_131_001",
+        "bountyType": "CLEAR_OBSTACLE",
+        "nodeId": "S10",
+        "ownerTeamId": "BLUE",
+        "triggerReason": "SQUAD_CLEAR",
+        "triggerRound": 131,
+        "cooldownUntilRound": 161,
+        "rewardScore": 15,
+        "rewardResourceType": "PASS_TOKEN",
+        "active": false,
+        "completed": true,
+        "winnerPlayerId": 2002
+      }
+    ],
+    "contests": [
+      {
+        "contestId": "C_142_001",
+        "contestType": "RESOURCE",
+        "targetNodeId": "S08",
+        "resourceType": "PASS_TOKEN",
+        "redPlayerId": 1001,
+        "bluePlayerId": 2002,
+        "initiatorPlayerId": 2002,
+        "initialTimeTaxRound": 0,
+        "initialBlockType": "RESOURCE",
+        "initialGuardOwnerTeamId": "RED",
+        "initialGuardCompleteRound": 118,
+        "initialGuardTaxRound": 3,
+        "initialObstacle": true,
+        "initialObstacleType": "LANDSLIDE",
+        "initialObstacleTaxRound": 6,
+        "breakOrderCostTypes": {
+          "1001": "GOOD_FRUIT",
+          "2002": "INTEL"
+        },
+        "sourceActionTypes": {
+          "1001": "CLAIM_RESOURCE",
+          "2002": "CLAIM_RESOURCE"
+        },
+        "sourceTaskIds": {},
+        "roundIndex": 2,
+        "totalRounds": 3,
+        "redPoint": 1,
+        "bluePoint": 1,
+        "redCostCount": 1,
+        "blueCostCount": 1,
+        "deadlineRound": 143,
+        "resolved": false,
+        "cards": {
+          "1001": "ATTACK",
+          "2002": "DEFEND"
+        }
+      },
+      {
+        "contestId": "C_142_002",
+        "contestType": "TASK",
+        "targetNodeId": "S07",
+        "taskId": "T_003",
+        "redPlayerId": 1001,
+        "bluePlayerId": 2002,
+        "initiatorPlayerId": 1001,
+        "initialTimeTaxRound": 0,
+        "initialBlockType": "TASK",
+        "initialGuardCompleteRound": 0,
+        "initialGuardTaxRound": 0,
+        "initialObstacle": false,
+        "initialObstacleTaxRound": 0,
+        "breakOrderCostTypes": {},
+        "sourceActionTypes": {
+          "1001": "CLAIM_TASK",
+          "2002": "CLAIM_TASK"
+        },
+        "sourceTaskIds": {
+          "1001": "T_003",
+          "2002": "T_003"
+        },
+        "roundIndex": 1,
+        "totalRounds": 3,
+        "redPoint": 0,
+        "bluePoint": 0,
+        "redCostCount": 0,
+        "blueCostCount": 0,
+        "deadlineRound": 144,
+        "resolved": false,
+        "cards": {}
+      },
+      {
+        "contestId": "SUPPRESSED:RESOURCE:S03:ICE_BOX",
+        "contestType": "RESOURCE",
+        "status": "SUPPRESSED",
+        "targetNodeId": "S03",
+        "resourceType": "ICE_BOX",
+        "objectKey": "RESOURCE:S03:ICE_BOX",
+        "suppressUntilRound": 147,
+        "remainRound": 5,
+        "redPlayerId": 1001,
+        "bluePlayerId": 2002
+      }
+    ],
+    "events": [
+      {
+        "eventId": "EV_141_001",
+        "type": "MOVE_PROGRESS",
+        "round": 141,
+        "payload": {
+          "playerId": 2002,
+          "teamId": "BLUE",
+          "fromNodeId": "S08",
+          "toNodeId": "S10",
+          "edgeId": "E17",
+          "routeType": "BRANCH",
+          "progress": 0.61
+        }
+      },
+      {
+        "eventId": "EV_141_002",
+        "type": "WINDOW_CONTEST_DRAW",
+        "round": 141,
+        "payload": {
+          "contestId": "C_141_001",
+          "contestType": "RESOURCE",
+          "targetNodeId": "S03",
+          "resourceType": "ICE_BOX",
+          "redPoint": 1,
+          "bluePoint": 1,
+          "winnerTeamId": "DRAW"
+        }
+      },
+      {
+        "eventId": "EV_142_001",
+        "type": "WEATHER_CHANGE",
+        "round": 142,
+        "payload": {
+          "weatherId": "W_POLICY_02",
+          "type": "HEAVY_RAIN",
+          "region": "WATER",
+          "startRound": 142,
+          "durationRound": 35,
+          "remainRound": 18
+        }
+      },
+      {
+        "eventId": "EV_142_002",
+        "type": "ACTION_REJECTED",
+        "round": 142,
+        "payload": {
+          "playerId": 2002,
+          "teamId": "BLUE",
+          "action": "DELIVER",
+          "errorCode": "DELIVER_NOT_VERIFIED",
+          "message": "Gate verification is required before delivery."
+        }
+      }
+    ],
+    "actionResults": [
+      {
+        "round": 141,
+        "playerId": 1001,
+        "action": "CLAIM_TASK",
+        "accepted": true,
+        "result": "ACCEPTED"
+      },
+      {
+        "round": 141,
+        "playerId": 2002,
+        "action": "DELIVER",
+        "accepted": false,
+        "result": "ACTION_REJECTED",
+        "errorCode": "DELIVER_NOT_VERIFIED",
+        "message": "ACTION_REJECTED"
+      }
+    ],
+    "scorePreview": {
+      "RED": 319,
+      "BLUE": 301
+    },
+    "debug": {
+      "startupMode": "client-debug",
+      "debugVisibility": "full",
+      "localOpponent": "off",
+      "seed": 20260618,
+      "seedHash": "sha256_dev_seed",
+      "viewerPlayerId": 1001,
+      "round": 142,
+      "tick": 141,
+      "phase": "NORMAL",
+      "players": [
+        {
+          "playerId": 1001,
+          "teamId": "RED",
+          "state": "PROCESSING",
+          "node": "S07",
+          "nextNode": "S09",
+          "totalScore": 319,
+          "freshness": 82.36,
+          "goodFruit": 88,
+          "badFruit": 12,
+          "delivered": false,
+          "retired": false
+        },
+        {
+          "playerId": 2002,
+          "teamId": "BLUE",
+          "state": "MOVING",
+          "node": "S08",
+          "nextNode": "S10",
+          "totalScore": 301,
+          "freshness": 86.18,
+          "goodFruit": 91,
+          "badFruit": 9,
+          "delivered": false,
+          "retired": false
+        }
+      ],
+      "nodes": [
+        {
+          "nodeId": "S01",
+          "name": "岭南果园",
+          "x": 5,
+          "y": 50,
+          "nodeType": "START",
+          "processRound": 0,
+          "start": true,
+          "terminal": false,
+          "visible": true,
+          "resourceVisible": true,
+          "resourceStock": {},
+          "effectiveCombatCount": 0,
+          "guardBlockCount": 0,
+          "keyPassCombatCount": 0,
+          "hasObstacle": false,
+          "canWindow": true,
+          "scouted": []
+        },
+        {
+          "nodeId": "S02",
+          "name": "南岭驿",
+          "x": 15,
+          "y": 44,
+          "nodeType": "CHECKPOINT",
+          "processType": "TRANSFER",
+          "processRound": 4,
+          "start": false,
+          "terminal": false,
+          "visible": true,
+          "resourceVisible": true,
+          "resourceStock": {},
+          "effectiveCombatCount": 0,
+          "guardBlockCount": 0,
+          "keyPassCombatCount": 0,
+          "hasObstacle": false,
+          "canWindow": true,
+          "scouted": []
+        },
+        {
+          "nodeId": "S03",
+          "name": "梅关驿",
+          "x": 22,
+          "y": 38,
+          "nodeType": "PASS",
+          "processRound": 0,
+          "start": false,
+          "terminal": false,
+          "visible": true,
+          "resourceVisible": true,
+          "resourceStock": {
+            "ICE_BOX": 1,
+            "PASS_TOKEN": 1,
+            "INTEL": 1
+          },
+          "effectiveCombatCount": 0,
+          "guardBlockCount": 0,
+          "keyPassCombatCount": 0,
+          "hasObstacle": false,
+          "canWindow": true,
+          "scouted": []
+        },
+        {
+          "nodeId": "S04",
+          "name": "江南码头",
+          "x": 22,
+          "y": 52,
+          "nodeType": "DOCK",
+          "processType": "BOARD",
+          "processRound": 7,
+          "start": false,
+          "terminal": false,
+          "visible": true,
+          "resourceVisible": true,
+          "resourceStock": {
+            "SHORT_HORSE": 1,
+            "BOAT_RIGHT": 1,
+            "INTEL": 1
+          },
+          "effectiveCombatCount": 0,
+          "guardBlockCount": 0,
+          "keyPassCombatCount": 0,
+          "hasObstacle": false,
+          "canWindow": true,
+          "scouted": []
+        },
+        {
+          "nodeId": "S05",
+          "name": "洞庭水驿",
+          "x": 38,
+          "y": 48,
+          "nodeType": "WATER_STATION",
+          "processType": "WATER_TRANSFER",
+          "processRound": 6,
+          "start": false,
+          "terminal": false,
+          "visible": true,
+          "resourceVisible": true,
+          "resourceStock": {},
+          "effectiveCombatCount": 0,
+          "guardBlockCount": 0,
+          "keyPassCombatCount": 0,
+          "hasObstacle": false,
+          "canWindow": true,
+          "scouted": []
+        },
+        {
+          "nodeId": "S06",
+          "name": "五岭山道",
+          "x": 14,
+          "y": 32,
+          "nodeType": "MOUNTAIN_NODE",
+          "processRound": 0,
+          "start": false,
+          "terminal": false,
+          "visible": true,
+          "resourceVisible": true,
+          "resourceStock": {
+            "ICE_BOX": 1,
+            "INTEL": 1
+          },
+          "effectiveCombatCount": 0,
+          "guardBlockCount": 0,
+          "keyPassCombatCount": 0,
+          "hasObstacle": true,
+          "obstacleType": "BROKEN_BRIDGE",
+          "canWindow": true,
+          "scouted": []
+        },
+        {
+          "nodeId": "S07",
+          "name": "荆襄大驿",
+          "x": 40,
+          "y": 36,
+          "nodeType": "STATION",
+          "processRound": 0,
+          "start": false,
+          "terminal": false,
+          "visible": true,
+          "resourceVisible": true,
+          "resourceStock": {
+            "ICE_BOX": 1,
+            "SHORT_HORSE": 1
+          },
+          "effectiveCombatCount": 0,
+          "guardBlockCount": 0,
+          "keyPassCombatCount": 0,
+          "hasObstacle": false,
+          "canWindow": true,
+          "scouted": []
+        },
+        {
+          "nodeId": "S08",
+          "name": "秦岭栈道",
+          "x": 42,
+          "y": 24,
+          "nodeType": "MOUNTAIN_PASS",
+          "processRound": 0,
+          "start": false,
+          "terminal": false,
+          "visible": true,
+          "guard": {
+            "ownerTeamId": "RED",
+            "defense": 3,
+            "initialDefense": 4,
+            "maxDefense": 5,
+            "completeRound": 118,
+            "ageRound": 24
+          },
+          "resourceVisible": true,
+          "resourceStock": {
+            "SHORT_HORSE": 1,
+            "PASS_TOKEN": 1,
+            "INTEL": 1
+          },
+          "effectiveCombatCount": 2,
+          "guardBlockCount": 1,
+          "keyPassCombatCount": 0,
+          "hasObstacle": true,
+          "obstacleType": "ROCKFALL",
+          "obstacleResidue": {
+            "clearedByPlayerId": 1001,
+            "clearedByTeamId": "RED",
+            "clearRound": 128,
+            "untilRound": 158,
+            "remainRound": 16,
+            "taxRound": 6
+          },
+          "canWindow": true,
+          "scouted": []
+        },
+        {
+          "nodeId": "S09",
+          "name": "洛阳驿",
+          "x": 55,
+          "y": 32,
+          "nodeType": "STATION",
+          "processRound": 0,
+          "start": false,
+          "terminal": false,
+          "visible": true,
+          "resourceVisible": true,
+          "resourceStock": {
+            "FAST_HORSE": 1,
+            "OFFICIAL_PERMIT": 1
+          },
+          "effectiveCombatCount": 0,
+          "guardBlockCount": 0,
+          "keyPassCombatCount": 0,
+          "hasObstacle": false,
+          "canWindow": true,
+          "scouted": [
+            {
+              "playerId": 1001,
+              "teamId": "RED",
+              "round": 120,
+              "source": "SQUAD_SCOUT",
+              "remainRound": 8
+            }
+          ]
+        },
+        {
+          "nodeId": "S10",
+          "name": "武关",
+          "x": 62,
+          "y": 26,
+          "nodeType": "KEY_PASS",
+          "processRound": 0,
+          "start": false,
+          "terminal": false,
+          "visible": true,
+          "guard": {
+            "ownerTeamId": "RED",
+            "defense": 3,
+            "initialDefense": 4,
+            "maxDefense": 5,
+            "completeRound": 118,
+            "ageRound": 24
+          },
+          "resourceVisible": true,
+          "resourceStock": {
+            "INTEL": 1
+          },
+          "effectiveCombatCount": 2,
+          "guardBlockCount": 1,
+          "keyPassCombatCount": 1,
+          "hasObstacle": true,
+          "obstacleType": "MUD",
+          "canWindow": true,
+          "scouted": [
+            {
+              "playerId": 1001,
+              "teamId": "RED",
+              "round": 120,
+              "source": "SQUAD_SCOUT",
+              "remainRound": 8
+            }
+          ]
+        },
+        {
+          "nodeId": "S11",
+          "name": "潼关驿",
+          "x": 66,
+          "y": 22,
+          "nodeType": "PASS",
+          "processType": "PASS_TRANSFER",
+          "processRound": 5,
+          "start": false,
+          "terminal": false,
+          "visible": true,
+          "resourceVisible": true,
+          "resourceStock": {
+            "INTEL": 1
+          },
+          "effectiveCombatCount": 0,
+          "guardBlockCount": 0,
+          "keyPassCombatCount": 0,
+          "hasObstacle": true,
+          "obstacleType": "DOCK_BLOCK",
+          "canWindow": true,
+          "scouted": []
+        },
+        {
+          "nodeId": "S12",
+          "name": "关中平原",
+          "x": 70,
+          "y": 20,
+          "nodeType": "JUNCTION",
+          "processRound": 0,
+          "start": false,
+          "terminal": false,
+          "visible": true,
+          "resourceVisible": true,
+          "resourceStock": {},
+          "effectiveCombatCount": 0,
+          "guardBlockCount": 0,
+          "keyPassCombatCount": 0,
+          "hasObstacle": false,
+          "canWindow": true,
+          "scouted": []
+        },
+        {
+          "nodeId": "S13",
+          "name": "灞桥驿",
+          "x": 73,
+          "y": 19,
+          "nodeType": "PALACE_STATION",
+          "processType": "PALACE_TRANSFER",
+          "processRound": 5,
+          "start": false,
+          "terminal": false,
+          "visible": true,
+          "resourceVisible": true,
+          "resourceStock": {
+            "PASS_TOKEN": 1,
+            "OFFICIAL_PERMIT": 1,
+            "INTEL": 1
+          },
+          "effectiveCombatCount": 0,
+          "guardBlockCount": 0,
+          "keyPassCombatCount": 0,
+          "hasObstacle": false,
+          "canWindow": true,
+          "scouted": []
+        },
+        {
+          "nodeId": "S14",
+          "name": "朱雀门",
+          "x": 76,
+          "y": 18,
+          "nodeType": "GATE",
+          "processType": "VERIFY",
+          "processRound": 6,
+          "start": false,
+          "terminal": false,
+          "visible": true,
+          "resourceVisible": true,
+          "resourceStock": {},
+          "effectiveCombatCount": 0,
+          "guardBlockCount": 0,
+          "keyPassCombatCount": 0,
+          "hasObstacle": false,
+          "canWindow": true,
+          "scouted": []
+        },
+        {
+          "nodeId": "S15",
+          "name": "兴庆宫",
+          "x": 78,
+          "y": 18,
+          "nodeType": "FINISH",
+          "processRound": 0,
+          "start": false,
+          "terminal": true,
+          "visible": true,
+          "resourceVisible": true,
+          "resourceStock": {},
+          "effectiveCombatCount": 0,
+          "guardBlockCount": 0,
+          "keyPassCombatCount": 0,
+          "hasObstacle": false,
+          "canWindow": true,
+          "scouted": []
+        }
+      ],
+      "actions": [
+        {
+          "playerId": 1001,
+          "round": 142,
+          "firstAction": "CLAIM_TASK",
+          "serverGeneratedMissingAction": false,
+          "actions": [
+            {
+              "action": "CLAIM_TASK",
+              "targetNodeId": "S07",
+              "taskId": "T_003"
+            }
+          ],
+          "accepted": true,
+          "result": "ACCEPTED",
+          "suggestion": "Action accepted; check events for actual effect."
+        },
+        {
+          "playerId": 2002,
+          "round": 142,
+          "firstAction": "DELIVER",
+          "serverGeneratedMissingAction": false,
+          "actions": [
+            {
+              "action": "DELIVER"
+            }
+          ],
+          "accepted": false,
+          "result": "ACTION_REJECTED",
+          "errorCode": "DELIVER_NOT_VERIFIED",
+          "suggestion": "Verify at the gate before delivery."
+        }
+      ],
+      "events": [
+        {
+          "eventId": "EV_141_001",
+          "type": "MOVE_PROGRESS",
+          "round": 141,
+          "payload": {
+            "playerId": 2002,
+            "teamId": "BLUE",
+            "fromNodeId": "S08",
+            "toNodeId": "S10",
+            "edgeId": "E17",
+            "routeType": "BRANCH",
+            "progress": 0.61
+          }
+        },
+        {
+          "eventId": "EV_141_002",
+          "type": "WINDOW_CONTEST_DRAW",
+          "round": 141,
+          "payload": {
+            "contestId": "C_141_001",
+            "contestType": "RESOURCE",
+            "targetNodeId": "S03",
+            "resourceType": "ICE_BOX",
+            "redPoint": 1,
+            "bluePoint": 1,
+            "winnerTeamId": "DRAW"
+          }
+        },
+        {
+          "eventId": "EV_142_001",
+          "type": "WEATHER_CHANGE",
+          "round": 142,
+          "payload": {
+            "weatherId": "W_POLICY_02",
+            "type": "HEAVY_RAIN",
+            "region": "WATER",
+            "startRound": 142,
+            "durationRound": 35,
+            "remainRound": 18
+          }
+        },
+        {
+          "eventId": "EV_142_002",
+          "type": "ACTION_REJECTED",
+          "round": 142,
+          "payload": {
+            "playerId": 2002,
+            "teamId": "BLUE",
+            "action": "DELIVER",
+            "errorCode": "DELIVER_NOT_VERIFIED",
+            "message": "Gate verification is required before delivery."
+          }
+        }
+      ],
+      "weather": {
+        "active": [
+          {
+            "weatherId": "W_POLICY_02",
+            "type": "HEAVY_RAIN",
+            "region": "WATER",
+            "remainRound": 18
+          }
+        ],
+        "forecast": [
+          {
+            "weatherId": "W_POLICY_03",
+            "type": "MOUNTAIN_FOG",
+            "region": "MOUNTAIN",
+            "startRound": 168,
+            "durationRound": 35
+          }
+        ]
+      },
+      "tasks": [
+        {
+          "taskId": "T_003",
+          "taskTemplateId": "T02",
+          "name": "????",
+          "nodeId": "S07",
+          "routeBucket": "ROAD",
+          "processType": "CLAIM_TASK",
+          "processRound": 3,
+          "score": 15,
+          "refreshRound": 118,
+          "expireRound": 178,
+          "active": true,
+          "completed": false,
+          "failed": false,
+          "ownerPlayerId": 0,
+          "protectionPlayerId": 1001
+        },
+        {
+          "taskId": "T_004",
+          "taskTemplateId": "T06",
+          "name": "????",
+          "nodeId": "S09",
+          "routeBucket": "ROAD",
+          "processType": "CLAIM_TASK",
+          "processRound": 3,
+          "score": 30,
+          "refreshRound": 126,
+          "expireRound": 190,
+          "active": true,
+          "completed": true,
+          "failed": false,
+          "ownerPlayerId": 1001,
+          "protectionPlayerId": 0
+        },
+        {
+          "taskId": "T_005",
+          "taskTemplateId": "T03",
+          "name": "????",
+          "nodeId": "S10",
+          "routeBucket": "BRANCH",
+          "processType": "CLAIM_TASK",
+          "processRound": 4,
+          "score": 15,
+          "refreshRound": 130,
+          "expireRound": 160,
+          "active": false,
+          "completed": false,
+          "failed": true,
+          "failureReason": "EXPIRED",
+          "ownerPlayerId": 0,
+          "protectionPlayerId": 0
+        }
+      ],
+      "bounties": [
+        {
+          "bountyId": "B_128_001",
+          "bountyType": "GUARD_BREAK",
+          "nodeId": "S08",
+          "ownerTeamId": "RED",
+          "triggerReason": "BREAK_GUARD",
+          "triggerRound": 128,
+          "cooldownUntilRound": 158,
+          "rewardScore": 10,
+          "active": true,
+          "completed": false,
+          "winnerPlayerId": 0
+        },
+        {
+          "bountyId": "B_131_001",
+          "bountyType": "CLEAR_OBSTACLE",
+          "nodeId": "S10",
+          "ownerTeamId": "BLUE",
+          "triggerReason": "SQUAD_CLEAR",
+          "triggerRound": 131,
+          "cooldownUntilRound": 161,
+          "rewardScore": 15,
+          "rewardResourceType": "PASS_TOKEN",
+          "active": false,
+          "completed": true,
+          "winnerPlayerId": 2002
+        }
+      ],
+      "contests": [
+        {
+          "contestId": "C_142_001",
+          "contestType": "RESOURCE",
+          "targetNodeId": "S08",
+          "resourceType": "PASS_TOKEN",
+          "redPlayerId": 1001,
+          "bluePlayerId": 2002,
+          "initiatorPlayerId": 2002,
+          "initialTimeTaxRound": 0,
+          "initialBlockType": "RESOURCE",
+          "initialGuardOwnerTeamId": "RED",
+          "initialGuardCompleteRound": 118,
+          "initialGuardTaxRound": 3,
+          "initialObstacle": true,
+          "initialObstacleType": "LANDSLIDE",
+          "initialObstacleTaxRound": 6,
+          "breakOrderCostTypes": {
+            "1001": "GOOD_FRUIT",
+            "2002": "INTEL"
+          },
+          "sourceActionTypes": {
+            "1001": "CLAIM_RESOURCE",
+            "2002": "CLAIM_RESOURCE"
+          },
+          "sourceTaskIds": {},
+          "roundIndex": 2,
+          "totalRounds": 3,
+          "redPoint": 1,
+          "bluePoint": 1,
+          "redCostCount": 1,
+          "blueCostCount": 1,
+          "deadlineRound": 143,
+          "resolved": false,
+          "cards": {
+            "1001": "ATTACK",
+            "2002": "DEFEND"
+          }
+        },
+        {
+          "contestId": "C_142_002",
+          "contestType": "TASK",
+          "targetNodeId": "S07",
+          "taskId": "T_003",
+          "redPlayerId": 1001,
+          "bluePlayerId": 2002,
+          "initiatorPlayerId": 1001,
+          "initialTimeTaxRound": 0,
+          "initialBlockType": "TASK",
+          "initialGuardCompleteRound": 0,
+          "initialGuardTaxRound": 0,
+          "initialObstacle": false,
+          "initialObstacleTaxRound": 0,
+          "breakOrderCostTypes": {},
+          "sourceActionTypes": {
+            "1001": "CLAIM_TASK",
+            "2002": "CLAIM_TASK"
+          },
+          "sourceTaskIds": {
+            "1001": "T_003",
+            "2002": "T_003"
+          },
+          "roundIndex": 1,
+          "totalRounds": 3,
+          "redPoint": 0,
+          "bluePoint": 0,
+          "redCostCount": 0,
+          "blueCostCount": 0,
+          "deadlineRound": 144,
+          "resolved": false,
+          "cards": {}
+        },
+        {
+          "contestId": "SUPPRESSED:RESOURCE:S03:ICE_BOX",
+          "contestType": "RESOURCE",
+          "status": "SUPPRESSED",
+          "targetNodeId": "S03",
+          "resourceType": "ICE_BOX",
+          "objectKey": "RESOURCE:S03:ICE_BOX",
+          "suppressUntilRound": 147,
+          "remainRound": 5,
+          "redPlayerId": 1001,
+          "bluePlayerId": 2002
+        }
+      ],
+      "actionResults": [
+        {
+          "round": 141,
+          "playerId": 1001,
+          "action": "CLAIM_TASK",
+          "accepted": true,
+          "result": "ACCEPTED"
+        },
+        {
+          "round": 141,
+          "playerId": 2002,
+          "action": "DELIVER",
+          "accepted": false,
+          "result": "ACTION_REJECTED",
+          "errorCode": "DELIVER_NOT_VERIFIED",
+          "message": "ACTION_REJECTED"
+        }
+      ],
+      "scorePreview": {
+        "RED": 319,
+        "BLUE": 301
+      }
+    }
+  }
+}
