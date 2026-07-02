@@ -42,6 +42,24 @@ CLAIM_FRAMES = 2            # 资源领取读条
 SWEEP_DISCOUNT = 0.15       # 对手明显先到：大概率被扫空
 CONTEST_DISCOUNT = 0.55     # 五五开：窗口期间双方同冻结，时间近乎免费
 
+# V3.3 鲜度竞赛：
+# 拒止倍率——资源在对手前进路线上时，抢到 = 我 +17 且对手 -18（双向摇摆）
+DENIAL_FACTOR = 1.5
+# 链式加成——目标点通往宫门路上的其他资源按半权计（赢下 S03 后 S07 顺路白拿）
+CHAIN_WEIGHT = 0.5
+# 不在对手路线上的资源，竞争折扣下限（对手专程绕过来的概率低）
+OFFPATH_RACE_FLOOR = 0.7
+# 路线鲜度定价——每帧鲜度损耗超出停靠基准(0.05)的部分折算成等效帧数：
+# 山路 0.07 → ×1.16，支路 ×1.12，官道 ×1.04，水路 ×0.96（对败局：山路捡冰
+# 的绕路成本被低估 15%，省下的冰又漏在路上）
+_FV = FRESH_VALUE_PER_FRAME + TIME_SCORE_PER_FRAME
+ROUTE_FRESH_FACTOR = {
+    rt: 1.0 + (decay - P.IDLE_FRESH_DECAY) * 1.8 / _FV
+    for rt, decay in P.ROUTE_FRESH_DECAY.items()
+}
+# 天气对鲜度的区域加成（任务书 2.5）：暴雨命中水路 ×1.3；酷暑全图 ×1.5
+WEATHER_FRESH_REGION = {("HEAVY_RAIN", P.WATER): 1.3}
+
 
 def milestone_bonus(base):
     if base >= 110:
@@ -92,6 +110,7 @@ class TaskPlanner:
         self.log = logger
         self.blacklist = {}   # taskId -> 解禁帧（吃到拒绝后临时拉黑）
         self._shadow_cache = (-1, frozenset())  # (round, 被对手抢先的节点集)
+        self._opp_path_cache = (-1, frozenset())  # (round, 对手前进路线节点集)
 
     # ================= 对外入口 =================
 
@@ -141,23 +160,47 @@ class TaskPlanner:
     # ================= 资源提货估值 =================
 
     def _resource_targets(self, state, cur, to_gate, slack, speed, penalty, ecost):
-        """有库存且值得专程去领的资源点: [(nodeId, resourceType, 净收益)]。"""
+        """有库存且值得专程去领的资源点: [(nodeId, resourceType, 净收益)]。
+
+        V3.3 估值 = 面值 × 竞争折扣 × 拒止倍率 + 链式加成 − 绕路成本：
+        - 拒止：资源在对手前进路线上，抢到 = 我 +17 且对手 -18（双向摇摆）
+        - 链式：目标点通往宫门路上的其他可领资源按半权计入
+          （败局教训：S06 山冰面值 17 干净，却放走了官道 S03+S07 买一送一）
+        """
         me_res = state.me.get("resources") or {}
         opp = state.opp
         opp_pos = (opp.get("nextNodeId") or opp.get("currentNodeId")) if opp else None
         opp_dist = state.graph.all_frames(opp_pos) if opp_pos and \
             not (opp.get("delivered") or opp.get("retired")) else {}
-
-        out = []
+        my_raw = state.graph.all_frames(cur)   # 竞速用裸帧：双方同一度量
+        opp_path = self._opp_path_nodes(state)
         g = state.graph
-        for node_id, node in state.nodes.items():
+
+        def race_discount(node_id, our_raw_eta):
+            oe = opp_dist.get(node_id)
+            if oe is None:
+                return 1.0
+            if oe + SHADOW_MARGIN < our_raw_eta:
+                d = SWEEP_DISCOUNT
+            elif abs(oe - our_raw_eta) <= SHADOW_MARGIN:
+                d = CONTEST_DISCOUNT
+            else:
+                return 1.0
+            # 不在对手前进路线上的资源：它专程绕过来的概率低，折扣设下限
+            if node_id not in opp_path:
+                d = max(d, OFFPATH_RACE_FLOOR)
+            return d
+
+        def stock_claimables(node):
             stock = node.get("resourceStock") or {}
             for rtype, value in RESOURCE_VALUES.items():
-                if stock.get(rtype, 0) <= 0:
-                    continue
                 limit = 2 if rtype == P.ICE_BOX else 1
-                if me_res.get(rtype, 0) >= limit:
-                    continue
+                if stock.get(rtype, 0) > 0 and me_res.get(rtype, 0) < limit:
+                    yield rtype, value
+
+        out = []
+        for node_id, node in state.nodes.items():
+            for rtype, value in stock_claimables(node):
                 f_to, path = g.shortest_path(cur, node_id, speed, penalty, ecost)
                 if not path:
                     continue
@@ -168,15 +211,22 @@ class TaskPlanner:
                 detour = max(0, f_to + f_back - to_gate) + CLAIM_FRAMES
                 if detour > slack:
                     continue
-                # 竞争折扣：对手明显先到=基本白跑；同时到=窗口五五开
-                v = value
-                oe = opp_dist.get(node_id)
-                if oe is not None:
-                    if oe + SHADOW_MARGIN < f_to:
-                        v *= SWEEP_DISCOUNT
-                    elif abs(oe - f_to) <= SHADOW_MARGIN:
-                        v *= CONTEST_DISCOUNT
-                net = v - detour * self._frame_value(state, to_gate)
+                v = value * race_discount(node_id, my_raw.get(node_id, 0))
+                if node_id in opp_path:
+                    v *= DENIAL_FACTOR      # 抢的是对手碗里的
+                # 链式加成：拿下该点后，去宫门路上的其他资源顺路半价计
+                chain = 0.0
+                node_raw = g.all_frames(node_id)
+                for nb in set(back[1:]):
+                    nb_node = state.nodes.get(nb) or {}
+                    for rt2, val2 in stock_claimables(nb_node):
+                        eta2 = my_raw.get(node_id, 0) + CLAIM_FRAMES \
+                            + node_raw.get(nb, 0)
+                        d2 = race_discount(nb, eta2)
+                        if nb in opp_path:
+                            val2 = val2 * DENIAL_FACTOR
+                        chain += CHAIN_WEIGHT * val2 * d2
+                net = v + chain - detour * self._frame_value(state, to_gate)
                 if net > 0:
                     out.append((node_id, rtype, net))
         return out
@@ -325,6 +375,20 @@ class TaskPlanner:
         self._shadow_cache = (state.round, frozenset(shadow))
         return self._shadow_cache[1]
 
+    def _opp_path_nodes(self, state):
+        """对手去宫门的前进路线节点集（不含其脚下，按帧缓存）。"""
+        if self._opp_path_cache[0] == state.round:
+            return self._opp_path_cache[1]
+        nodes = set()
+        opp = state.opp
+        if opp and not opp.get("delivered") and not opp.get("retired") and state.graph:
+            opp_pos = opp.get("nextNodeId") or opp.get("currentNodeId")
+            if opp_pos:
+                _, path = state.graph.shortest_path(opp_pos, state.gate_node)
+                nodes = set(path)  # 含其脚下/正在前往的点（到站就会顺手领）
+        self._opp_path_cache = (state.round, frozenset(nodes))
+        return self._opp_path_cache[1]
+
     def _edge_cost_fn(self, state):
         """天气感知的边成本：暴雨命中水路 / 山雾命中山路时移动变慢。
 
@@ -335,19 +399,29 @@ class TaskPlanner:
         active = weather.get("active") or []
         forecast = weather.get("forecast") or []
 
+        active_types = {w.get("type") for w in active}
+
         def edge_cost(edge, base_frames):
             rt = edge.get("routeType")
-            mult = 1.0
+            # 路线鲜度定价（V3.3）：天气生效时区域鲜度加成一并计入
+            # （暴雨中的水路 0.045×1.3 > 0.05，"水路更保鲜"在雨中反转）
+            decay = P.ROUTE_FRESH_DECAY.get(rt, P.IDLE_FRESH_DECAY)
+            region = 1.0
+            for wt in active_types:
+                region = max(region, WEATHER_FRESH_REGION.get((wt, rt), 1.0))
+            scale = 1.5 if P.HOT in active_types else 1.0  # 酷暑全图等比放大
+            mult = 1.0 + (decay * region - P.IDLE_FRESH_DECAY) * scale * 1.8 / _FV
+            wmult = 1.0
             for w in active:
                 tax = P.WEATHER_MOVE_TAX.get((w.get("type"), rt))
                 if tax:
-                    mult = max(mult, tax / 1000.0)
+                    wmult = max(wmult, tax / 1000.0)
             for w in forecast:
                 tax = P.WEATHER_MOVE_TAX.get((w.get("type"), rt))
                 if tax and (w.get("startRound", 10 ** 9) - state.round) \
                         <= FORECAST_HORIZON:
-                    mult = max(mult, 1.0 + (tax / 1000.0 - 1.0) * 0.5)
-            return base_frames * mult
+                    wmult = max(wmult, 1.0 + (tax / 1000.0 - 1.0) * 0.5)
+            return base_frames * mult * wmult
         return edge_cost
 
     @staticmethod

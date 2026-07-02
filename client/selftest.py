@@ -876,25 +876,34 @@ def test_corridor():
                 pen("S04") == 7 and pen("S05") == 6 and pen("S11") == 5,
                 f"S04={pen('S04')} S05={pen('S05')} S11={pen('S11')}")
 
-    # 5) 天气：暴雨生效中水路边成本 x1.35，官道不受影响
+    # 5) 天气：暴雨生效中水路边成本 = 移动税x1.35 × 雨中鲜度因子(>1)；官道仅鲜度因子
+    from lychee.planner import _FV
+    from lychee import protocol as PP
     rain = {"active": [{"type": "HEAVY_RAIN", "region": "WATER", "remainRound": 40}],
             "forecast": []}
     gs4 = gs_race(weather=rain, opp_pos="S05")
     ec = PlannerStrategy().planner._edge_cost_fn(gs4)
     e12 = gs4.graph.edges["E12"]   # S04-S05 WATER
     e02 = gs4.graph.edges["E02"]   # S02-S03 ROAD
-    ok &= check("天气: 暴雨水路边成本x1.35",
-                abs(ec(e12, 100) - 135) < 1e-6 and ec(e02, 100) == 100,
-                f"water={ec(e12, 100)} road={ec(e02, 100)}")
+    f_water_rain = 1 + (0.045 * 1.3 - PP.IDLE_FRESH_DECAY) * 1.8 / _FV
+    f_road = 1 + (0.055 - PP.IDLE_FRESH_DECAY) * 1.8 / _FV
+    ok &= check("天气: 暴雨水路成本(移动税x鲜度)",
+                abs(ec(e12, 100) - 135 * f_water_rain) < 1e-6
+                and abs(ec(e02, 100) - 100 * f_road) < 1e-6,
+                f"water={ec(e12, 100):.1f} (exp {135*f_water_rain:.1f}) "
+                f"road={ec(e02, 100):.1f}")
+    ok &= check("天气: 雨中水路鲜度反超基准", f_water_rain > 1.0,
+                f"factor={f_water_rain:.3f}")
 
-    # 6) 预告暴雨（近期窗口内）按半额计
+    # 6) 预告暴雨（近期窗口内）移动税按半额计（鲜度因子按无雨基准）
     fc = {"active": [], "forecast": [{"type": "HEAVY_RAIN", "region": "WATER",
                                       "startRound": 120, "durationRound": 60}]}
     gs5 = gs_race(weather=fc, round_no=60)
     ec = PlannerStrategy().planner._edge_cost_fn(gs5)
+    f_water = 1 + (0.045 - PP.IDLE_FRESH_DECAY) * 1.8 / _FV
     ok &= check("天气: 预告暴雨半额计",
-                abs(ec(gs5.graph.edges["E12"], 100) - 117.5) < 1e-6,
-                f"{ec(gs5.graph.edges['E12'], 100)}")
+                abs(ec(gs5.graph.edges["E12"], 100) - 117.5 * f_water) < 1e-6,
+                f"{ec(gs5.graph.edges['E12'], 100):.1f} (exp {117.5*f_water:.1f})")
     return ok
 
 
@@ -974,6 +983,77 @@ def test_ice_hunt():
     return ok
 
 
+def test_fresh_race():
+    """V3.3 鲜度竞赛回归（败局14：山冰独食 80 鲜度 vs 官道双冰 93，输 16）。"""
+    ok = True
+    with open(os.path.join(DOC_DIR, "start消息.json"), encoding="utf-8") as f:
+        start = json.load(f)["msg_data"]
+    with open(os.path.join(DOC_DIR, "inquire消息.json"), encoding="utf-8") as f:
+        inquire = json.load(f)["msg_data"]
+    from lychee.planner import ROUTE_FRESH_FACTOR
+
+    # 1) 路线鲜度定价：山路 > 支路 > 官道 > 1 > 水路
+    ok &= check("鲜度定价: 山>支>官>1>水",
+                ROUTE_FRESH_FACTOR["MOUNTAIN"] > ROUTE_FRESH_FACTOR["BRANCH"]
+                > ROUTE_FRESH_FACTOR["ROAD"] > 1.0 > ROUTE_FRESH_FACTOR["WATER"],
+                json.dumps({k: round(v, 3) for k, v in ROUTE_FRESH_FACTOR.items()}))
+
+    def gs_open(ice_nodes, my_pos="S01", opp_pos="S01", round_no=2):
+        gs = GameState(1001)
+        gs.on_start(start)
+        d = json.loads(json.dumps(inquire))
+        d["round"] = round_no
+        d["contests"], d["tasks"] = [], []
+        d["weather"] = {"active": [], "forecast": []}
+        for p in d["players"]:
+            if p["playerId"] == 1001:
+                p.update(state="IDLE", currentNodeId=my_pos, nextNodeId=None,
+                         routeEdgeId=None, currentProcess=None, buffs=[],
+                         resources={}, freshness=100.0, goodFruit=100,
+                         badFruit=0, taskScore=0)
+            else:
+                p.update(state="IDLE", currentNodeId=opp_pos, nextNodeId=None,
+                         routeEdgeId=None, currentProcess=None,
+                         delivered=False, retired=False)
+        for n in d["nodes"]:
+            n["hasObstacle"] = False
+            n["guard"] = None
+            n["resourceStock"] = ({"ICE_BOX": 1} if n["nodeId"] in ice_nodes else {})
+            n.pop("processType", None)
+            n["processRound"] = 0
+        gs.on_inquire(d)
+        return gs
+
+    # 2) 败局14开局重演：S03+S07 官道双冰(对手必经) vs S06 山冰独食
+    #    拒止×1.5 + 链式半权 应选官道 S03，不再上山
+    gs = gs_open(("S03", "S06", "S07"))
+    st = PlannerStrategy()
+    plan = st.planner.plan(gs)
+    ok &= check("鲜度竞赛: 选官道双冰链而非山冰独食",
+                plan.kind == "resource" and plan.position == "S03", repr(plan))
+
+    # 3) 只剩 S06 山冰（官道冰没了）→ 仍去 S06（有比没有强）
+    gs = gs_open(("S06",))
+    plan = PlannerStrategy().planner.plan(gs)
+    ok &= check("鲜度竞赛: 仅剩山冰仍去取",
+                plan.kind == "resource" and plan.position == "S06", repr(plan))
+
+    # 4) 链式估值：三冰在场时 S03（官道链头）估值严格最高
+    st = PlannerStrategy()
+    gs = gs_open(("S03", "S06", "S07"))
+    pen, ec = st.planner._penalty_fn(gs), st.planner._edge_cost_fn(gs)
+    to_gate = gs.graph.shortest_path("S01", "S14", 1000, pen, ec)[0]
+    targets = {(n, r): v for n, r, v in st.planner._resource_targets(
+        gs, "S01", to_gate, 400, 1000, pen, ec)}
+    v_s03 = targets.get(("S03", "ICE_BOX"), 0)
+    v_s06 = targets.get(("S06", "ICE_BOX"), 0)
+    v_s07 = targets.get(("S07", "ICE_BOX"), 0)
+    ok &= check("鲜度竞赛: 链头 S03 估值严格最高",
+                v_s03 > v_s07 > 0 and v_s03 > v_s06 > 0,
+                f"S03={v_s03:.1f} S07={v_s07:.1f} S06={v_s06:.1f}")
+    return ok
+
+
 def main():
     ok = test_codec()
     ok &= test_state_and_strategy()
@@ -987,6 +1067,7 @@ def main():
     ok &= test_active_guard()
     ok &= test_corridor()
     ok &= test_ice_hunt()
+    ok &= test_fresh_race()
     print()
     print("ALL PASS" if ok else "SOME FAILED")
     sys.exit(0 if ok else 1)
