@@ -34,6 +34,14 @@ SHADOW_MARGIN = 5           # 到达时间差超过该值才算被抢先
 CHOKE_TYPES = {"KEY_PASS", "PASS", "MOUNTAIN_PASS"}
 FORECAST_HORIZON = 120      # 预告天气只影响这个时间窗内的路段估价
 
+# 资源提货目标价值（V3.2）：冰鉴 +10 鲜度 = 18 分，按 17 计（贴 100 上限有损耗）。
+# 败局实锤：3 个冰鉴全在陆路，水路竞速交付快 25 帧却输 27 分鲜度。
+RESOURCE_VALUES = {P.ICE_BOX: 17.0, P.FAST_HORSE: 4.0, P.SHORT_HORSE: 3.0}
+CLAIM_FRAMES = 2            # 资源领取读条
+# 对手到资源点的竞争折扣
+SWEEP_DISCOUNT = 0.15       # 对手明显先到：大概率被扫空
+CONTEST_DISCOUNT = 0.55     # 五五开：窗口期间双方同冻结，时间近乎免费
+
 
 def milestone_bonus(base):
     if base >= 110:
@@ -60,20 +68,23 @@ def marginal_task_value(base, score, raw_time_score=RAW_TIME_SCORE_EST):
 
 
 class Plan:
-    """kind: 'task' 去做任务 / 'deliver' 直奔宫门交付线 / 'hold' 原地。"""
+    """kind: 'task' 做任务 / 'resource' 提资源 / 'deliver' 直奔交付线 / 'hold' 原地。"""
 
-    __slots__ = ("kind", "task", "position", "detail", "slack")
+    __slots__ = ("kind", "task", "position", "detail", "slack", "resource")
 
-    def __init__(self, kind, task=None, position=None, detail="", slack=0):
+    def __init__(self, kind, task=None, position=None, detail="", slack=0,
+                 resource=None):
         self.kind = kind
         self.task = task          # 任务实例 dict
-        self.position = position  # 执行任务应停靠的节点
+        self.position = position  # 执行任务/领取资源应停靠的节点
         self.detail = detail
         self.slack = slack        # 交付截止余量（帧），负数=已进入抢救模式
+        self.resource = resource  # kind='resource' 时的资源类型
 
     def __repr__(self):
         tid = self.task.get("taskId") if self.task else None
-        return f"Plan({self.kind}, task={tid}, pos={self.position}, slack={self.slack}, {self.detail})"
+        return (f"Plan({self.kind}, task={tid}, res={self.resource}, "
+                f"pos={self.position}, slack={self.slack}, {self.detail})")
 
 
 class TaskPlanner:
@@ -113,13 +124,62 @@ class TaskPlanner:
             ev = self._evaluate(state, t, cur, base, to_gate, eta_direct,
                                 slack, speed, penalty, ecost)
             if ev and ev[0] > best_net:
-                best_net, best = ev[0], (t, ev[1])
+                best_net, best = ev[0], ("task", t, ev[1], None)
+
+        # 资源提货目标与任务同台竞价（冰鉴 17 分 vs 任务 45~99 分 vs 绕路成本）
+        for node_id, rtype, net in self._resource_targets(
+                state, cur, to_gate, slack, speed, penalty, ecost):
+            if net > best_net:
+                best_net, best = net, ("resource", None, node_id, rtype)
 
         if best:
-            t, pos = best
-            return Plan("task", t, pos, slack=slack,
+            kind, t, pos, rtype = best
+            return Plan(kind, t, pos, slack=slack, resource=rtype,
                         detail=f"net={best_net:.0f} base={base}")
         return Plan("deliver", detail=f"no worthy task, base={base}", slack=slack)
+
+    # ================= 资源提货估值 =================
+
+    def _resource_targets(self, state, cur, to_gate, slack, speed, penalty, ecost):
+        """有库存且值得专程去领的资源点: [(nodeId, resourceType, 净收益)]。"""
+        me_res = state.me.get("resources") or {}
+        opp = state.opp
+        opp_pos = (opp.get("nextNodeId") or opp.get("currentNodeId")) if opp else None
+        opp_dist = state.graph.all_frames(opp_pos) if opp_pos and \
+            not (opp.get("delivered") or opp.get("retired")) else {}
+
+        out = []
+        g = state.graph
+        for node_id, node in state.nodes.items():
+            stock = node.get("resourceStock") or {}
+            for rtype, value in RESOURCE_VALUES.items():
+                if stock.get(rtype, 0) <= 0:
+                    continue
+                limit = 2 if rtype == P.ICE_BOX else 1
+                if me_res.get(rtype, 0) >= limit:
+                    continue
+                f_to, path = g.shortest_path(cur, node_id, speed, penalty, ecost)
+                if not path:
+                    continue
+                f_back, back = g.shortest_path(node_id, state.gate_node, speed,
+                                               penalty, ecost)
+                if not back:
+                    continue
+                detour = max(0, f_to + f_back - to_gate) + CLAIM_FRAMES
+                if detour > slack:
+                    continue
+                # 竞争折扣：对手明显先到=基本白跑；同时到=窗口五五开
+                v = value
+                oe = opp_dist.get(node_id)
+                if oe is not None:
+                    if oe + SHADOW_MARGIN < f_to:
+                        v *= SWEEP_DISCOUNT
+                    elif abs(oe - f_to) <= SHADOW_MARGIN:
+                        v *= CONTEST_DISCOUNT
+                net = v - detour * self._frame_value(state, to_gate)
+                if net > 0:
+                    out.append((node_id, rtype, net))
+        return out
 
     # ================= 估值 =================
 

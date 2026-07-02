@@ -346,6 +346,10 @@ class PlannerStrategy(BaselineStrategy):
         if plan.kind == "task" and cur == plan.position:
             return P.a_claim_task(plan.task["taskId"])
 
+        # 资源提货目标：到位就领（V3.2 冰鉴猎手；同帧撞车交给窗口博弈）
+        if plan.kind == "resource" and cur == plan.position:
+            return P.a_claim_resource(cur, plan.resource)
+
         # 主动设卡：领先通过咽喉节点时，回手一张卡挡住身后的对手
         guard = self._guard_opportunity(state, cur, plan)
         if guard:
@@ -353,7 +357,7 @@ class PlannerStrategy(BaselineStrategy):
 
         # 顺路领取（余量闸门 15：领取只花 2 帧读条，换 +18 分几乎恒值；
         # 阴影惩罚会压低 slack，这里的闸门只挡真正的临门一脚）
-        if plan.kind == "task" or plan.slack > 15:
+        if plan.kind in ("task", "resource") or plan.slack > 15:
             stock = node.get("resourceStock") or {}
             for rt in self.CLAIM_EN_ROUTE:
                 limit = self.CLAIM_LIMIT.get(rt, 1)
@@ -362,8 +366,9 @@ class PlannerStrategy(BaselineStrategy):
                         return P.a_wait()  # 错峰一帧再领，资源窗口不值得打
                     return P.a_claim_resource(cur, rt)
 
-        # 赶路：任务点 / 宫门 / 终点
-        target = plan.position if plan.kind == "task" else (terminal if verified else gate)
+        # 赶路：任务点 / 资源点 / 宫门 / 终点
+        target = plan.position if plan.kind in ("task", "resource") \
+            else (terminal if verified else gate)
         if target == cur:
             return P.a_wait()
         nxt = self._route_next_hop(state, cur, target)
