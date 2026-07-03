@@ -97,7 +97,7 @@
 
 <h1>《一骑红尘：荔枝争运战》完整策略文档</h1>
 <p class="sub">客户端 <code>PlannerStrategy</code> · <span class="badge">BUILD 3.12-latent-mechanics</span>
-   · 131 项自测覆盖 · 生成于 2026-07-03</p>
+   · 136 项自测覆盖 · 生成于 2026-07-03</p>
 
 <div class="toc">
 <strong>目录</strong>
@@ -305,9 +305,10 @@
     ⑤ 本队有效卡 &lt; 2（上限 2，第 3 张顶掉最早的）<br>
     ⑥ 对手到本节点 ETA ∈ [8, 150] 帧（8=读条4帧+生效余量；150=再远卡先风化/生悬赏）<br>
     ⑦ 本节点在对手去宫门的高效路线上（经此绕路 ≤ 15 帧容差）<br>
-    ⑧ 好果 − 底价(关隘/宫门1) − 额外2 &gt; 底仓5（投不满防守值 6 就不投）</div>
+    ⑧ 好果 − 底价(关隘/宫门1) − 额外(宫门1/其余2) &gt; 底仓5（投不满就不投）</div>
   <div class="arrow">↓ 全满足</div>
-  <div class="node act-main"><span class="ret">SET_GUARD(extraGoodFruit=2)</span> → 防守值 6 ·
+  <div class="node act-main"><span class="ret">SET_GUARD(extraGoodFruit=宫门1/其余2)</span> → 防守值 6（宫门上限 4，
+    extra=1 即拉满——超上限投入不提防守且不返还，V3.12 修正曾经的 extra=2 白烧 1 篓）·
     关键关隘防6首次风化 45 帧后 · 阻断对手 MOVE，逼其进入 §5 的代价选择</div>
 </div>
 
@@ -420,12 +421,13 @@
 ③过所/官凭——CLAIM_EN_ROUTE 补上，此前 YAN_DIE 出牌选项常年不在池子里；
 ④终局急策三选一——此前硬编码只试护果令，现在坏果充足时优先破关令绑验核（近乎免费省3帧），移动中截止吃紧（slack&lt;0）优先疾行令（唯一能在 MOVING 提交的急策）；
 ⑤小分队远程清障——路上非 T04 障碍派小分队清，主车队不用绕路/自己 CLEAR，严格排除自己在做的 T04 目标；
-⑥小分队续防——仅落后时给风化中的自家设卡续防守值，领先时故意不续（没有主动撤卡手段，唯一能做的是不主动把卡续到悬赏触发线上送对手追分分）
+⑥小分队续防——仅落后时给风化中的自家设卡续防守值，领先时故意不续（没有主动撤卡手段，唯一能做的是不主动把卡续到悬赏触发线上送对手追分分）。
+二审补修四处：疾行令/护果令补入 MAIN_ACTION_TYPES（4.1 明确按主车队动作提交，漏掉曾让移动补 MOVE 逻辑同帧发双主动作=全部作废+非法+急策名额被本地标记锁死）；疾行令好果 ≥3 前置检查（费 2 且交付要求 &gt;0，被拒也会锁死名额）；宫门设卡 extra 2→1（上限 4 拉满即止，规则 6.2.1 超上限投入不返还）；宫门情报标记补 355 帧时机门（与小分队探路同款，早标必过期）并把宫门等 RUSH 的裸 WAIT 接入情报空转帧
 </b></td><td>按任务书逐条对账代码引用面发现的规则数学空白：bounties[]/totalScore/SQUAD_REINFORCE/SQUAD_CLEAR/INTEL/PASS_TOKEN/OFFICIAL_PERMIT 全零引用；九局真图全量重放（round-by-round 全量决策 diff）+139 项 selftest 验证：唯一的早局分歧是 r86 在 S03 顺手领过所（对手已离场无竞争）和窗口出牌池变化（新增 YAN_DIE 选项后混合出牌落点改变，属设计内随机性），S02 起跑窗口画像不受影响</td></tr>
 </table>
 
 <p class="foot">仓库 client/docs/strategy.html · 与代码同步于 main@3.12-latent-mechanics ·
-自测 <code>python3 selftest.py</code>（131 项）</p>
+自测 <code>python3 selftest.py</code>（136 项）</p>
 </div>
 
 <script>
