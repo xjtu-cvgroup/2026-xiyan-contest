@@ -6,4 +6,5 @@
   （曾发生打包用了旧代码：r91 骑马 + 冻结零削弱 = 一眼识破旧版）。
 """
 # 3.13 = 3.12-choke-discipline（体检修复）+ 3.12-latent-mechanics（零引用机制）合流
-BUILD_VERSION = "3.17-parting-guard"
+# 3.18 = 强通语义修正 + 竞速模式 + 陷阱租买止损 + 目标粘性 + 出牌画像
+BUILD_VERSION = "3.18-race-tempo"

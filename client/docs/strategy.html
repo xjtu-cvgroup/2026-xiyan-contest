@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>荔枝争运战 · 完整策略文档 (BUILD 3.17-parting-guard)</title>
+<title>荔枝争运战 · 完整策略文档 (BUILD 3.18-race-tempo)</title>
 <style>
   .viz-root {
     --surface-1: #fcfcfb;
@@ -96,7 +96,7 @@
 <div class="viz-root">
 
 <h1>《一骑红尘：荔枝争运战》完整策略文档</h1>
-<p class="sub">客户端 <code>PlannerStrategy</code> · <span class="badge">BUILD 3.17-parting-guard</span>
+<p class="sub">客户端 <code>PlannerStrategy</code> · <span class="badge">BUILD 3.18-race-tempo</span>
    · 163 项自测覆盖 · 生成于 2026-07-03</p>
 
 <div class="toc">
@@ -501,10 +501,25 @@ S10/S11/S13，自己从不停留）取证两修：
 <td>四局全未交付 80~90:745，死于两道强通税（S10 117 帧 + S13 70 帧），终局差 ~25 帧死在去宫门的边上。
 修复后推演：S10 秒拆省 ~46 帧、S13 削一拆一省 ~55 帧 → 交付 ~r525，与 745 进入均势区。
 selftest 163 项全绿；九局回放 vs V3.16 零差异（新分支语料无既往触发点）</td></tr>
+<tr><td><b>3.18 race-tempo</b></td><td><b>三份外部体检综合落地（规则语义修正 + 竞速学说）：
+①强通重复限制语义修正——6.3.2 原文"主车队停在该节点时不能再次提交强制通行"限制的是【发起节点】，
+旧代码拦的是目标方向反了：站在上次强通到达节点上对邻站发强通会吃 FORCED_PASS_REPEAT 且逐帧重试卡死
+（武关→潼关双咽喉局必踩），而隔次强通进同一节点本合法却被自我禁足；
+②竞速模式（audit 缺口 1）——双方到下一关键关隘裸 ETA 差 ≤25 帧时：任务/悬赏帧价 ×1.75（资源豁免，
+与"资源不计漏斗差"同一理由）、马匹预留清零（竞速武器化）、蹲刷禁用、顺路领取只剩冰/马、
+关隘热设卡 slack 闸门 65→25（赢下竞速立刻兑现）；
+③陷阱等待租买止损——V3.15 删对峙上限后等待无上界，蹲点者可零成本冻结我们；ski-rental：等待帧数
+超过换走廊绕路差价即改道（承诺 120 帧、对手离开即解除），绕不开的真漏斗口照旧等待；短边（≤4 帧
+读条）豁免直接过；④敌卡首见帧吸收时全量记录——老卡蹲点者不再白吃 8 帧临别宽限；
+⑤目标粘性——换目标需 15% 净值优势，消同级目标震荡；⑥出牌画像——对手出牌历史拉普拉斯加权替代
+均匀假设，RNG 改 (matchId,playerId) 种子（回放可复现）</b></td>
+<td>规则可证 ×3（①③短边④）+ 结构性缺陷 ×2（③租买⑤）+ 体检共识 ×2（②⑥）。
+竞速倍率 2.5 实测会砍掉开局冰链（败局13 血泪资产）回退 1.75 并豁免资源口径；
+selftest 192 项全绿（新增 29 项含 6 项反例）；replay 语料既有触发点零回归</td></tr>
 </table>
 
-<p class="foot">仓库 client/docs/strategy.html · 与代码同步于 feat/v3.14-tempo-doctrine@3.17-parting-guard ·
-自测 <code>python3 selftest.py</code>（163 项）</p>
+<p class="foot">仓库 client/docs/strategy.html · 与代码同步于 feat/v3.14-tempo-doctrine@3.18-race-tempo ·
+自测 <code>python3 selftest.py</code>（192 项）</p>
 </div>
 
 <script>

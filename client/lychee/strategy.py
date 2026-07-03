@@ -168,6 +168,8 @@ class PlannerStrategy(BaselineStrategy):
     # 此前从不主动领导致这张克制牌常年打不出）和情报（免费囤着，等空转帧顺手用掉）
     CLAIM_EN_ROUTE = (P.ICE_BOX, P.FAST_HORSE, P.SHORT_HORSE,
                       P.PASS_TOKEN, P.OFFICIAL_PERMIT, P.INTEL)
+    # 竞速模式下的收缩清单（V3.18）：只领交付硬件与速度资源
+    RACE_CLAIM_ONLY = (P.ICE_BOX, P.FAST_HORSE, P.SHORT_HORSE)
     CLAIM_LIMIT = {P.ICE_BOX: 2}    # 冰鉴多多益善（+10 鲜度 ≈ 18 分），其余各 1
     USE_ICE_BELOW = 91          # 鲜度 ≤90 就用冰鉴：+10 不溢出，且防跌破转坏阈值
 
@@ -185,6 +187,12 @@ class PlannerStrategy(BaselineStrategy):
     GUARD_SLACK_MIN = 65        # 自己交付余量充足才花这 4 帧
     GUARD_ROUTE_TOLERANCE = 15  # 判断该节点是否在对手高效路线上的容差（帧）
     GUARD_RETRY_GAP = 40        # 同一节点设卡重试间隔
+    # 关隘热设卡（V3.18）：刚赢下漏斗竞速、对手正被汇过来（ETA ≤60）时，
+    # 4 帧读条 + 1~3 好果换对手 45+ 帧死等/满防税，是竞速胜利的兑现动作
+    # ——65 的常规闸门在这个场景下把"过关隘必设卡"整档拦掉（对手 2614
+    # 的同款打法：r314 立卡后边卡边农）。热窗口降到 25，仍留 6 倍读条缓冲
+    GUARD_SLACK_HOT = 25
+    GUARD_HOT_OPP_ETA = 60      # 对手到本关隘的 ETA 在此内算"热"
 
     # ---- 防中边陷阱（V3.5，V3.12 删证据门）----
     # 设卡必须站在节点上：对手占着/将先到我们的下一跳时，上边就可能被掐点
@@ -200,6 +208,13 @@ class PlannerStrategy(BaselineStrategy):
                                 # replay56 上限到点硬闯 71 帧长边被 r314 掐点冻死）
     # 注意：不设"截止吃紧就赌一把"的例外 —— slack 越紧冻结越致命
     # （等待成本 10~30 帧 vs 冻结成本 180+ 帧），对峙上限已兜底防赖
+    # 陷阱等待的租买止损（V3.18）：V3.15 删对峙上限后等待无上界，蹲点者
+    # 停靠在我们下一跳农任务 = 零成本冻结我们的推进（replay36 里 2614 还
+    # 花了设卡成本，懂这套逻辑的对手连卡都不用设）。修法不是回退硬闯
+    # （replay56 教训不动），而是 ski-rental：等待帧数一旦超过换走廊的
+    # 绕路差价就改道，总代价 ≤ 事后最优的 2 倍；绕不开的真漏斗口照旧等待
+    TRAP_AVOID_PENALTY = 900    # 改道承诺期间被避节点的寻路附加帧数
+    TRAP_AVOID_WINDOW = 120     # 改道承诺的有效窗口（帧），对手离开即提前解除
 
     # ---- 尾段蹲刷（V3.10）----
     # 任务刷新跟在车队身后：领跑者吃冰，跟随者吃刷新（29/30/31 三局对手
@@ -227,10 +242,19 @@ class PlannerStrategy(BaselineStrategy):
         self._weaken_sent = {}  # nodeId -> 派出帧（削弱敌卡）
         self._guard_first_seen = {}  # nodeId -> 首见该敌卡的帧（临别卡宽限计时）
         self._weaken_target = None       # 本帧主车队让 squad_action 去削弱的目标
-        self._last_forced_node = None    # 上次强制通行到达节点（规则禁止重复）
+        # 上次强制通行到达节点。6.3.2 重复限制的准确语义（V3.18 修正）：
+        # "主车队停在该节点时不能再次提交强制通行，离开后又回到该节点时仍不能提交"
+        # ——禁的是【从】该节点再次发起，不是再次通行【进入】该节点。
+        # 旧判断 target != _last_forced_node 方向拦反：站在记录节点上对邻站发
+        # 强通会被 FORCED_PASS_REPEAT 拒掉且逐帧重试卡死（武关→潼关双咽喉局
+        # 必然踩中）；而隔了一次强通后再次强通进同一节点其实合法却被自己禁了
+        self._last_forced_node = None
         self._squad_spent = 0            # 本地人手账本（服务端字段缺失时兜底）
         self._guard_sent = {}            # nodeId -> 设卡提交帧（防重试风暴）
         self._trap_wait = (None, 0)      # (等待的目标节点, 连续等待帧数)
+        self._trap_avoid = (None, -1)    # (租买改道要绕开的节点, 承诺到期帧)
+        self._opp_card_hist = {}         # 对手本局出牌频次（WINDOW_CARD_REVEAL）
+        self._rng = None                 # (matchId, playerId) 派生种子，回放可复现
         self._loiter_spent = 0           # 尾段蹲刷已用帧数（预算制）
         self._last_main_action = None    # 上一帧提交的主车队动作（拒绝反馈的 join 键）
         self._clear_sent = {}            # nodeId -> 小分队清障派出帧（防重试风暴）
@@ -292,6 +316,35 @@ class PlannerStrategy(BaselineStrategy):
         for node_id in list(self._guard_first_seen):
             if not state.enemy_guard(node_id):
                 del self._guard_first_seen[node_id]
+        # 首见帧在吸收时全量记录（V3.18）：曾只在 _breakthrough 里 setdefault，
+        # 走到卡前才起算宽限——存在已久的老卡（真蹲点）也被当"临别新卡"
+        # 白等 8 帧。吸收时记录后，宽限只留给真正刚立的卡
+        for node_id in state.nodes:
+            if state.enemy_guard(node_id):
+                self._guard_first_seen.setdefault(node_id, state.round)
+
+        # 租买改道承诺提前解除：对手离开被避节点（或已交付/退赛）后该走廊
+        # 已干净，不再为一个不存在的威胁多绕路
+        avoid, until = self._trap_avoid
+        if avoid:
+            opp = state.opp
+            gone = (not opp or opp.get("delivered") or opp.get("retired")
+                    or (opp.get("currentNodeId") != avoid
+                        and opp.get("nextNodeId") != avoid))
+            if state.round >= until or gone:
+                self._trap_avoid = (None, -1)
+
+        # 对手出牌画像（V3.18）：WINDOW_CARD_REVEAL 全公开，本局频率替代
+        # "对可负担集均匀出牌"的先验（pick_card 拉普拉斯平滑加权）
+        for e in state.events:
+            if e.get("type") != "WINDOW_CARD_REVEAL":
+                continue
+            p = e.get("payload") or {}
+            if p.get("playerId") == state.opp_id:
+                card = p.get("card") or p.get("cardType")
+                if card:
+                    self._opp_card_hist[card] = \
+                        self._opp_card_hist.get(card, 0) + 1
 
         for e in state.my_events("FORCED_PASS_END"):
             p = e.get("payload") or {}
@@ -453,7 +506,11 @@ class PlannerStrategy(BaselineStrategy):
         # 阴影惩罚会压低 slack，这里的闸门只挡真正的临门一脚）
         if plan.kind in ("task", "resource") or plan.slack > 15:
             stock = node.get("resourceStock") or {}
-            for rt in self.CLAIM_EN_ROUTE:
+            # 竞速期（V3.18）只领交付硬件（冰=鲜度）和速度（马）：文书/
+            # 情报各 2 帧读条在竞争带内是胜负帧，赢下漏斗后有的是空转帧补
+            claim_list = self.RACE_CLAIM_ONLY \
+                if self.planner.race_mode(state) else self.CLAIM_EN_ROUTE
+            for rt in claim_list:
                 limit = self.CLAIM_LIMIT.get(rt, 1)
                 if stock.get(rt, 0) > 0 and res.get(rt, 0) < limit:
                     if self._yield_for_contention(state):
@@ -490,7 +547,12 @@ class PlannerStrategy(BaselineStrategy):
             # 等 1~4 帧卡成型后站在节点上攻坚拆掉再走，代价小一个数量级
             return self._idle_upgrade(state, plan)
         if self._mid_edge_trap_risk(state, cur, nxt, plan):
-            return self._idle_upgrade(state, plan)  # 防中边陷阱：等对手离开我们的下一跳再上边
+            # 防中边陷阱：等对手离开我们的下一跳再上边。等待不是无价的——
+            # 等够绕路差价后租买止损改道（V3.18），绕不开的真漏斗口继续等
+            alt = self._trap_reroute(state, cur, nxt, target)
+            if alt:
+                return P.a_move(alt)
+            return self._idle_upgrade(state, plan)
         return P.a_move(nxt)
 
     # ---------- 主动设卡（V3）----------
@@ -499,7 +561,7 @@ class PlannerStrategy(BaselineStrategy):
 
     def _guard_opportunity(self, state, cur, plan):
         me, opp = state.me, state.opp
-        if state.phase == P.PHASE_RUSH or plan.slack < self.GUARD_SLACK_MIN:
+        if state.phase == P.PHASE_RUSH:
             return None
         if not opp or opp.get("delivered") or opp.get("retired"):
             return None
@@ -527,6 +589,14 @@ class PlannerStrategy(BaselineStrategy):
         g_graph = state.graph
         opp_eta = self.planner._opp_eta(state, cur)
         if not (self.GUARD_MIN_OPP_ETA <= opp_eta <= self.GUARD_MAX_OPP_ETA):
+            return None
+        # slack 闸门分档（V3.18）：常规 65；关键关隘上对手正被漏斗汇过来
+        # （热窗口）时降到 25——刚赢的竞速要立刻兑现，让它吃我们吃过的苦
+        slack_min = self.GUARD_SLACK_MIN
+        if node.get("nodeType") == "KEY_PASS" \
+                and opp_eta <= self.GUARD_HOT_OPP_ETA:
+            slack_min = self.GUARD_SLACK_HOT
+        if plan.slack < slack_min:
             return None
         # 两侧都用含边上余量的同一度量（V3.7：度量不一致曾让该检查恒假）
         opp_to_gate = self.planner._opp_eta(state, state.gate_node)
@@ -566,6 +636,8 @@ class PlannerStrategy(BaselineStrategy):
         """
         if state.phase != P.PHASE_NORMAL or state.me.get("verified"):
             return False
+        if self.planner.race_mode(state):
+            return False  # 竞速窗口先抢走廊：刷新等赢下漏斗再吃（V3.18）
         if plan.slack < self.LOITER_MIN_SLACK:
             return False
         opp = state.opp
@@ -666,6 +738,10 @@ class PlannerStrategy(BaselineStrategy):
 
     def _breakthrough(self, state, target, plan):
         me = state.me
+        cur = me.get("currentNodeId")
+        # 6.3.2 重复限制绑定在【发起节点】：停在上次强通到达节点时禁发（见
+        # _last_forced_node 注释）。target 是否被强通过不构成限制
+        forced_ok = cur != self._last_forced_node
         g = state.enemy_guard(target)
         defense = g.get("defense", 0) or 0
 
@@ -677,7 +753,7 @@ class PlannerStrategy(BaselineStrategy):
                 first = self._guard_first_seen.setdefault(target, state.round)
                 if state.round - first < self.CAMPER_GRACE:
                     return self._idle_upgrade(state, plan)  # 宽限：等它迈步
-                if target != self._last_forced_node:
+                if forced_ok:
                     if self.log:
                         self.log.info("camper holds %s past grace, forced pass",
                                       target)
@@ -728,7 +804,7 @@ class PlannerStrategy(BaselineStrategy):
             return P.a_wait()
 
         # 3) 强制通行兜底：关键关隘时间税最多 50 帧，仍远好于等风化
-        if target != self._last_forced_node:
+        if forced_ok:
             return P.a_forced_pass(target)
         return P.a_wait()
 
@@ -747,9 +823,19 @@ class PlannerStrategy(BaselineStrategy):
         return (best[1], best[2]) if best else None
 
     def _route_next_hop(self, state, cur, target):
-        """与规划器共用同一套惩罚 + 天气边成本，保证走的路就是估值时算的路。"""
-        return state.graph.next_hop(cur, target, state.my_speed(),
-                                    self.planner._penalty_fn(state),
+        """与规划器共用同一套惩罚 + 天气边成本，保证走的路就是估值时算的路。
+
+        租买改道承诺期间（V3.18）被避节点追加惩罚，保证后续帧继续走
+        替代走廊而不是下一帧又拐回去重新开始等待。"""
+        penalty = self.planner._penalty_fn(state)
+        avoid, until = self._trap_avoid
+        if avoid and state.round < until:
+            base_pen = penalty
+
+            def penalty(nid, _base=base_pen, _avoid=avoid):
+                return _base(nid) + \
+                    (self.TRAP_AVOID_PENALTY if nid == _avoid else 0)
+        return state.graph.next_hop(cur, target, state.my_speed(), penalty,
                                     self.planner._edge_cost_fn(state))
 
     # ---------- 同帧争抢规避 ----------
@@ -833,6 +919,14 @@ class PlannerStrategy(BaselineStrategy):
         camped = not opp.get("routeEdgeId") and opp_cur == nxt
         risk = False
         if camped:
+            # 短边豁免（V3.18）：设卡读条 4 帧、完成次帧生效——边长 ≤4 帧
+            # 时它当帧起手也赶不上我们过完边（正在读条的情形由上游
+            # _opp_setting_guard 分支拦截）。规则数学可证，不是赌
+            edge = state.graph.edge_between(cur, nxt)
+            our_edge = state.graph.edge_frames(edge, state.my_speed()) \
+                if edge else 0
+            if edge and our_edge <= self.TRAP_GUARD_FRAMES:
+                return give_up()
             risk = True        # 它正站在我们的下一跳上
         elif opp_next == nxt:
             # 它正赶往我们的下一跳：若它先到且来得及成卡（4帧），同样危险
@@ -861,6 +955,40 @@ class PlannerStrategy(BaselineStrategy):
             self.log.info("trap wait at %s reached %d frames (opp %s)",
                           nxt, n, "camped" if camped else "converging")
         return True
+
+    def _trap_reroute(self, state, cur, blocked, target):
+        """陷阱等待的租买止损（V3.18）：等待帧数 ≥ 换走廊的绕路差价时改道。
+
+        ski-rental：先等（对手随时可能离开，等待是廉价选项），等到累计
+        等待追平绕路差价还没解除，就承诺改道（_trap_avoid 记入寻路惩罚，
+        对手离开或到期自动解除）。总代价不超过事后最优的 2 倍。
+        绕不开（blocked 是真漏斗口，如 S10/S11）时返回 None 继续等待——
+        V3.15 "汇聚窗口等待优于硬闯"的结论不回退，这里只处理有第二条
+        走廊可选的情形。
+        """
+        waited = self._trap_wait[1] if self._trap_wait[0] == blocked else 0
+        g = state.graph
+        penalty = self.planner._penalty_fn(state)
+        ecost = self.planner._edge_cost_fn(state)
+        speed = state.my_speed()
+        direct, dpath = g.shortest_path(cur, target, speed, penalty, ecost)
+        if not dpath:
+            return None
+
+        def avoid_pen(nid):
+            return penalty(nid) + \
+                (self.TRAP_AVOID_PENALTY if nid == blocked else 0)
+
+        alt_cost, alt_path = g.shortest_path(cur, target, speed, avoid_pen, ecost)
+        if len(alt_path) < 2 or blocked in alt_path:
+            return None  # 无第二条走廊，等待仍是唯一解
+        if waited < alt_cost - direct:
+            return None  # 还没等够绕路差价，继续持有廉价的等待期权
+        self._trap_avoid = (blocked, state.round + self.TRAP_AVOID_WINDOW)
+        if self.log:
+            self.log.info("trap wait %d >= detour %.0f, reroute via %s (avoid %s)",
+                          waited, alt_cost - direct, alt_path[1], blocked)
+        return alt_path[1]
 
     # ---------- 小分队：给任务点 / 宫门提前打探路标记（读条 -3 帧） ----------
     # 标记只活 45 帧：只探 SCOUT_MAX_ETA 帧内能赶到的目标；宫门验核最早
@@ -1045,18 +1173,29 @@ class PlannerStrategy(BaselineStrategy):
             pool.append(P.CARD_YAN_DIE)
         return pool
 
+    def _get_rng(self, state):
+        """混合出牌的随机源（V3.18）：(matchId, playerId) 派生种子。
+
+        回放回归可复现（同局同序列）；混合策略的博弈价值不受影响——
+        对手不知道我们的种子派生方式，序列对它仍不可预测。"""
+        if self._rng is None:
+            self._rng = random.Random(f"{state.match_id}:{state.player_id}")
+        return self._rng
+
     def pick_card(self, state, contest):
-        """出牌 best-response（V3.16）：对手手牌全公开，别再盲盒加权。
+        """出牌 best-response（V3.16，V3.18 加对手画像）：对手手牌全公开。
 
         对手本拍可负担的牌集可由公开字段精确算出（文书/护卫点/鲜度好果/
-        马类增益），按"对其可负担集均匀出牌"求各牌期望胜拍，再按对象赌注
-        加权、减自身出牌成本，取最优。期望值打平（±CARD_TIE_EPS）时随机、
-        另留 CARD_MIX_RATE 概率按软权重混合——纯确定性 best-response 对
-        镜像对手会锁死同牌平局链（休整 3 帧 + 抑制 18 帧，曾双双 0 分）。
+        马类增益）；对可负担集的出牌概率用本局已观察的出牌历史做拉普拉斯
+        平滑加权（无观测时退化为均匀先验），再按对象赌注加权、减自身出牌
+        成本，取最优。期望值打平（±CARD_TIE_EPS）时随机、另留 CARD_MIX_RATE
+        概率按软权重混合——纯确定性 best-response 对镜像对手会锁死同牌
+        平局链（休整 3 帧 + 抑制 18 帧，曾双双 0 分）。
         """
         me = state.me
         res = me.get("resources") or {}
         ctype = contest.get("contestType")
+        rng = self._get_rng(state)
 
         # 拍分数学锁定即弃权（V3.14）：三拍两胜，先到 2 分胜负已定
         mine, theirs = self._contest_points(state, contest)
@@ -1091,18 +1230,25 @@ class PlannerStrategy(BaselineStrategy):
                 return -1
             return 0
 
+        # 对手出牌频率加权（V3.18）：拉普拉斯 +1 平滑，无观测退化为均匀。
+        # 真实对手有出牌偏好（demo 2614：窗口全弃权），均匀假设在扔信息
+        hist = self._opp_card_hist
+        pw = [hist.get(oc, 0) + 1.0 for oc in pool]
+        pw_total = sum(pw)
+
         scored = []
         for card, cost in my_options:
-            ev = sum(beat(card, oc) for oc in pool) / len(pool) * stake - cost
+            ev = sum(beat(card, oc) * w for oc, w in zip(pool, pw)) \
+                / pw_total * stake - cost
             scored.append((ev, card))
         scored.sort(key=lambda x: -x[0])
 
-        if random.random() < self.CARD_MIX_RATE:
+        if rng.random() < self.CARD_MIX_RATE:
             # 软权重混合（EV 平移到正区间），保留对镜像的不可预测性
             floor_ = min(ev for ev, _ in scored)
             weights = [(ev - floor_ + 0.5, card) for ev, card in scored]
             total = sum(w for w, _ in weights)
-            pick = random.random() * total
+            pick = rng.random() * total
             for w, card in weights:
                 pick -= w
                 if pick <= 0:
@@ -1110,4 +1256,4 @@ class PlannerStrategy(BaselineStrategy):
             return weights[-1][1]
         best_ev = scored[0][0]
         ties = [card for ev, card in scored if best_ev - ev <= self.CARD_TIE_EPS]
-        return random.choice(ties)
+        return rng.choice(ties)

@@ -531,12 +531,24 @@ def test_breakthrough():
                 and not any(x["action"] == "FORCED_PASS" for x in a),
                 json.dumps(a, ensure_ascii=False))
 
-    # 6) 规则限制：上次强通到达节点不能重复强通
+    # 6) 规则限制（6.3.2，V3.18 修正语义）：限制绑定在【发起节点】——
+    #    "主车队停在该节点时不能再次提交强制通行"，与目标无关
+    st = PlannerStrategy()
+    st._last_forced_node = "S09"   # 我们此刻就站在上次强通到达的 S09
+    a = st.decide(blocked_state(defense=6, bad=0, squad=0))
+    ok &= check("突破: 停在上次强通到达节点时禁发强通",
+                not any(x["action"] == "FORCED_PASS" for x in a),
+                json.dumps(a, ensure_ascii=False))
+
+    # 6b) 反向验证：上次强通到达的是 S10（目标本身），现在从 S09 发起——
+    #     规则允许（限制不在目标）。旧代码在这里自我禁足，双咽喉局
+    #     （强通 S10 → 站 S10 想强通 S11）则反向漏判吃 FORCED_PASS_REPEAT
     st = PlannerStrategy()
     st._last_forced_node = "S10"
     a = st.decide(blocked_state(defense=6, bad=0, squad=0))
-    ok &= check("突破: 重复强通被规避",
-                not any(x["action"] == "FORCED_PASS" for x in a),
+    ok &= check("突破: 从别处再次强通进同一节点合法放行",
+                any(x["action"] == "FORCED_PASS" and x["targetNodeId"] == "S10"
+                    for x in a),
                 json.dumps(a, ensure_ascii=False))
 
     # ---- V3.14 蹲点补卡对策（replay36: 拆一次它 ≤3 好果原地补一次）----
@@ -592,14 +604,29 @@ def test_breakthrough():
                 and any(x["action"] == "FORCED_PASS" for x in a),
                 json.dumps(a, ensure_ascii=False))
 
-    # 10) 蹲点+强通被规则禁止（上次强通到达点）→ 老实等它离开
+    # 10) 蹲点+强通被规则禁止（我们停在上次强通到达节点 S09）→ 老实等它离开
     st = PlannerStrategy()
-    st._last_forced_node = "S10"
+    st._last_forced_node = "S09"
     a = None
     for i in range(st.CAMPER_GRACE + 2):
         a = st.decide(camped_state(defense=6, bad=2, round_no=330 + i))
     ok &= check("突破: 蹲点且强通被禁则等待",
                 not any(x["action"] in ("BREAK_GUARD", "FORCED_PASS") for x in a),
+                json.dumps(a, ensure_ascii=False))
+
+    # 11) 首见帧吸收记录（V3.18）：老卡（首见已超宽限窗）+ 卡主在场 →
+    #     到卡前第一帧就强通，不再重新起算 8 帧宽限。先在远处"看见"这张卡
+    #     （吸收帧记录首见），再走到相邻节点测试
+    st = PlannerStrategy()
+    far = camped_state(defense=6, bad=2, round_no=318)
+    for p_ in far.players.values():
+        if p_["playerId"] == 1001:
+            p_.update(currentNodeId="S07", nextNodeId=None)  # 还离卡两跳远
+    st.decide(far)                                # r318 首见 S10 敌卡
+    a = st.decide(camped_state(defense=6, bad=2, round_no=330))  # 到 S09 相邻
+    ok &= check("突破: 老卡蹲点者到卡前立即强通（宽限只留给新卡）",
+                any(x["action"] == "FORCED_PASS" and x["targetNodeId"] == "S10"
+                    for x in a),
                 json.dumps(a, ensure_ascii=False))
     return ok
 
@@ -785,10 +812,11 @@ def test_horse_economy():
                 any(x["action"] == "USE_RESOURCE" for x in a),
                 json.dumps(a, ensure_ascii=False))
 
-    # 5) 帧价值修正：绕路成本恒含用时分斜率
+    # 5) 帧价值修正：绕路成本恒含用时分斜率（非竞速期取基准价；样例中对手
+    #    已近 S10、我们还在 S02→S03，ETA 差远超竞争带 → race off）
     from lychee.planner import TaskPlanner, FRESH_VALUE_PER_FRAME, TIME_SCORE_PER_FRAME
     gs = moving_state({"SHORT_HORSE": 1})
-    fv = TaskPlanner._frame_value(gs, eta_direct=200)
+    fv = TaskPlanner()._frame_value(gs, eta_direct=200)
     ok &= check("帧价值: 恒含用时斜率",
                 abs(fv - (FRESH_VALUE_PER_FRAME + TIME_SCORE_PER_FRAME)) < 1e-9,
                 f"fv={fv:.3f}")
@@ -2097,6 +2125,297 @@ def test_lenient_frame():
     return ok
 
 
+def test_race_tempo():
+    """V3.18 竞速模式：漏斗竞争带内帧价上调、马匹豁免、蹲刷禁用、关隘热设卡。
+
+    audit 缺口 1（领先没有被当成资产）的修复：所有对抗机制都是"被卡了
+    怎么办"的事后反应，这里补"怎么不落到被卡的位置"。"""
+    ok = True
+    with open(os.path.join(DOC_DIR, "start消息.json"), encoding="utf-8") as f:
+        start = json.load(f)["msg_data"]
+    with open(os.path.join(DOC_DIR, "inquire消息.json"), encoding="utf-8") as f:
+        inquire = json.load(f)["msg_data"]
+    from lychee.planner import (TaskPlanner, RACE_FRAME_MULT,
+                                FRESH_VALUE_PER_FRAME, TIME_SCORE_PER_FRAME)
+
+    def gs_race(my_pos="S02", opp_pos="S03", my_moving=None, resources=None,
+                round_no=60, opp_delivered=False, task_score=45):
+        gs = GameState(1001)
+        gs.on_start(start)
+        d = json.loads(json.dumps(inquire))
+        d["round"] = round_no
+        d["contests"], d["tasks"] = [], []
+        d["weather"] = {"active": [], "forecast": []}
+        for p in d["players"]:
+            if p["playerId"] == 1001:
+                if my_moving:  # (nextNodeId, edgeId)
+                    p.update(state="MOVING", currentNodeId=my_pos,
+                             nextNodeId=my_moving[0], routeEdgeId=my_moving[1],
+                             currentProcess=None, buffs=[],
+                             resources=resources or {}, freshness=95.0,
+                             goodFruit=90, badFruit=0, taskScore=task_score)
+                else:
+                    p.update(state="IDLE", currentNodeId=my_pos, nextNodeId=None,
+                             routeEdgeId=None, currentProcess=None, buffs=[],
+                             resources=resources or {}, freshness=95.0,
+                             goodFruit=90, badFruit=0, taskScore=task_score)
+            else:
+                p.update(state="IDLE", currentNodeId=opp_pos, nextNodeId=None,
+                         routeEdgeId=None, currentProcess=None,
+                         delivered=opp_delivered, retired=False)
+        for n in d["nodes"]:
+            n["hasObstacle"] = False
+            n["guard"] = None
+            n["resourceStock"] = {}
+            n.pop("processType", None)
+            n["processRound"] = 0
+        gs.on_inquire(d)
+        return gs
+
+    # 1) 进入条件：双方到武关 S10 的 ETA 差在竞争带内（S02 vs S03 差 35？
+    #    不对——S03 恰好近 35 帧，取双方同在 S03 差 0）→ 竞速模式激活
+    gs = gs_race(my_pos="S03", opp_pos="S03")
+    pl = TaskPlanner()
+    ok &= check("竞速: 同位起跑进入竞争带", pl.race_mode(gs), "")
+    base_fv = FRESH_VALUE_PER_FRAME + TIME_SCORE_PER_FRAME
+    fv = pl._frame_value(gs, 300)
+    ok &= check("竞速: 带内帧价按倍率上调",
+                abs(fv - base_fv * RACE_FRAME_MULT) < 1e-9, f"fv={fv:.3f}")
+    ok &= check("竞速: 资源口径豁免竞速溢价",
+                abs(pl._frame_value(gs, 300, race_adjust=False) - base_fv) < 1e-9,
+                "")
+
+    # 2) 退出条件：对手远远落后（S01 vs 我 S07，差 >25）→ 不在带内
+    ok &= check("竞速: 差距拉开退出",
+                not TaskPlanner().race_mode(gs_race(my_pos="S07", opp_pos="S01")),
+                "")
+    # 3) 过完咽喉（S11 之后无 KEY_PASS）→ 自然退出
+    ok &= check("竞速: 过完咽喉退出",
+                not TaskPlanner().race_mode(gs_race(my_pos="S11", opp_pos="S11")),
+                "")
+    # 4) 对手已交付 → 无漏斗威胁
+    ok &= check("竞速: 对手已交付不竞速",
+                not TaskPlanner().race_mode(
+                    gs_race(my_pos="S03", opp_pos="S13", opp_delivered=True)),
+                "")
+
+    # 5) 马匹武器化：竞争带内唯一的马也骑（平时留给 T06——语料里速度
+    #    手段全花在"输了以后"，这里花在决定输赢的窗口）
+    gs = gs_race(my_pos="S02", my_moving=("S03", "E02"), opp_pos="S03",
+                 resources={"SHORT_HORSE": 1})
+    a = PlannerStrategy().decide(gs)
+    ok &= check("竞速: 带内唯一的马也骑",
+                any(x["action"] == "USE_RESOURCE"
+                    and x["resourceType"] == "SHORT_HORSE" for x in a),
+                json.dumps(a, ensure_ascii=False))
+    # 5b) 带外行为不变：对手远落后时马仍留给 T06
+    gs = gs_race(my_pos="S02", my_moving=("S03", "E02"), opp_pos="S01",
+                 round_no=91, resources={"SHORT_HORSE": 1})
+    a = PlannerStrategy().decide(gs)
+    ok &= check("竞速: 带外马仍预留 T06",
+                not any(x["action"] == "USE_RESOURCE" for x in a),
+                json.dumps(a, ensure_ascii=False))
+
+    # 6) 蹲刷禁用：S09 是任务候选点、对手同位（带内、非领先）——平时会蹲，
+    #    竞争带内先抢走廊
+    gs = gs_race(my_pos="S09", opp_pos="S09", round_no=200, task_score=90)
+    a = PlannerStrategy().main_action(gs)
+    ok &= check("竞速: 带内不蹲刷，推进走廊",
+                a and a["action"] == "MOVE", str(a))
+
+    # 7) 关隘热设卡：刚过武关（slack 40 低于常规闸门 65），对手 ETA ~56 帧
+    #    在热窗口内 → 设卡兑现竞速胜利
+    gs = gs_race(my_pos="S10", opp_pos="S09", round_no=200)
+    a = PlannerStrategy()._guard_opportunity(gs, "S10", Plan("deliver", slack=40))
+    ok &= check("竞速: 关隘热窗口 slack 40 开卡",
+                a is not None and a["action"] == "SET_GUARD"
+                and a["targetNodeId"] == "S10", str(a))
+    # 7b) slack 低于热闸门 25 仍不设（交付优先的底线不动）
+    a = PlannerStrategy()._guard_opportunity(gs, "S10", Plan("deliver", slack=20))
+    ok &= check("竞速: slack 低于热闸门仍不设", a is None, str(a))
+    # 7c) 非关键关隘不吃热折扣：S11（PASS）slack 40 照旧被常规闸门拦住
+    gs = gs_race(my_pos="S11", opp_pos="S10", round_no=200)
+    a = PlannerStrategy()._guard_opportunity(gs, "S11", Plan("deliver", slack=40))
+    ok &= check("竞速: 普通咽喉不吃热折扣", a is None, str(a))
+    return ok
+
+
+def test_target_stickiness():
+    """V3.18 目标粘性：换目标要求 15% 净值优势，消除同级目标间的震荡。"""
+    ok = True
+    from lychee.planner import TaskPlanner
+    pl = TaskPlanner()
+
+    # 1) 首帧选 argmax 并承诺
+    key = pl._sticky_choice({"A": (100, None), "B": (90, None)})
+    ok &= check("粘性: 首帧承诺 argmax", key == "A", str(key))
+    # 2) B 小幅反超（105 < 100×1.15）→ 不换
+    key = pl._sticky_choice({"A": (100, None), "B": (105, None)})
+    ok &= check("粘性: 15% 以内的反超不换", key == "A", str(key))
+    # 3) B 显著反超（120 > 115）→ 换并更新承诺
+    key = pl._sticky_choice({"A": (100, None), "B": (120, None)})
+    ok &= check("粘性: 15% 以上的反超换目标", key == "B", str(key))
+    # 4) 承诺目标失效（被抢/过期）→ 无粘性直接 argmax
+    key = pl._sticky_choice({"A": (50, None)})
+    ok &= check("粘性: 承诺失效直接换", key == "A", str(key))
+    # 5) 无候选 → 清空承诺
+    key = pl._sticky_choice({})
+    ok &= check("粘性: 无候选清空承诺",
+                key is None and pl._committed is None, str(key))
+    return ok
+
+
+def test_trap_ransom():
+    """V3.18 陷阱等待租买止损：等够绕路差价换走廊；短边豁免；真漏斗口照旧等。"""
+    ok = True
+    with open(os.path.join(DOC_DIR, "start消息.json"), encoding="utf-8") as f:
+        start = json.load(f)["msg_data"]
+    with open(os.path.join(DOC_DIR, "inquire消息.json"), encoding="utf-8") as f:
+        inquire = json.load(f)["msg_data"]
+
+    def gs_camp(my_pos, camp_pos, round_no=200, edge_patch=None,
+                task_score=90):
+        """对手停靠在我们去宫门的下一跳上（无卡，纯占位威胁）。"""
+        gs = GameState(1001)
+        gs.on_start(start)
+        d = json.loads(json.dumps(inquire))
+        d["round"] = round_no
+        d["contests"], d["tasks"] = [], []
+        d["weather"] = {"active": [], "forecast": []}
+        if edge_patch:
+            for e in d.get("edges") or []:
+                if e["edgeId"] in edge_patch:
+                    e["distance"] = edge_patch[e["edgeId"]]
+        for p in d["players"]:
+            if p["playerId"] == 1001:
+                p.update(state="IDLE", currentNodeId=my_pos, nextNodeId=None,
+                         routeEdgeId=None, currentProcess=None, buffs=[],
+                         resources={}, freshness=95.0, goodFruit=90,
+                         badFruit=2, taskScore=task_score, squadAvailable=8)
+            else:
+                p.update(state="IDLE", currentNodeId=camp_pos, nextNodeId=None,
+                         routeEdgeId=None, currentProcess=None,
+                         delivered=False, retired=False)
+        for n in d["nodes"]:
+            n["hasObstacle"] = False
+            n["guard"] = None
+            n["resourceStock"] = {}
+            n.pop("processType", None)
+            n["processRound"] = 0
+        gs.on_inquire(d)
+        return gs
+
+    # 1) 有第二条走廊时租买止损：S06 去宫门直路经 S08（山口，对手蹲点），
+    #    替代走廊 S06→S03→官道存在。先等（廉价期权），等够绕路差价改道
+    st = PlannerStrategy()
+    moved, waited = None, 0
+    for i in range(140):
+        a = st.main_action(gs_camp("S06", "S08", round_no=200 + i))
+        if a and a["action"] == "MOVE":
+            moved = a
+            break
+        waited += 1
+    ok &= check("租买: 蹲点者占山口，等够差价后改道官道",
+                moved is not None and moved["targetNodeId"] == "S03",
+                f"waited={waited} -> {moved}")
+    ok &= check("租买: 改道前先付等待期权（不秒切）",
+                30 <= waited <= 130, f"waited={waited}")
+    ok &= check("租买: 改道承诺已记账",
+                st._trap_avoid[0] == "S08", str(st._trap_avoid))
+
+    # 1b) 承诺期间寻路持续绕开被避节点（不会下一帧又拐回去）
+    a = st.main_action(gs_camp("S06", "S08", round_no=200 + waited + 1))
+    ok &= check("租买: 承诺期间不回头", a and a["action"] == "MOVE"
+                and a["targetNodeId"] == "S03", str(a))
+
+    # 1c) 对手离开被避节点 → 承诺提前解除
+    gs = gs_camp("S06", "S07", round_no=200 + waited + 2)  # 对手已去 S07
+    st.decide(gs)
+    ok &= check("租买: 对手离开即解除承诺",
+                st._trap_avoid[0] is None, str(st._trap_avoid))
+
+    # 2) 真漏斗口（S10，绕不开）→ 永远等待，V3.15 结论不回退
+    st2 = PlannerStrategy()
+    last = None
+    for i in range(60):
+        last = st2.main_action(gs_camp("S09", "S10", round_no=200 + i))
+    ok &= check("租买: 真漏斗口绕不开照旧等待",
+                last and last["action"] == "WAIT", str(last))
+
+    # 3) 短边豁免：S13→S14 (E09) 改成 3 帧短边（设卡读条 4 帧），对手蹲在
+    #    宫门也来不及成卡 → 直接过，规则数学可证（task_score 130 关掉 S13
+    #    候选点的蹲刷分支，隔离被测逻辑）
+    a = PlannerStrategy().main_action(
+        gs_camp("S13", "S14", edge_patch={"E09": 2}, task_score=130))
+    ok &= check("租买: 短边豁免直接过（读条 4 帧追不上）",
+                a and a["action"] == "MOVE" and a["targetNodeId"] == "S14",
+                str(a))
+    return ok
+
+
+def test_card_profile():
+    """V3.18 出牌画像：对手出牌频率加权替代均匀假设；种子 RNG 回放可复现。"""
+    ok = True
+    with open(os.path.join(DOC_DIR, "start消息.json"), encoding="utf-8") as f:
+        start = json.load(f)["msg_data"]
+    with open(os.path.join(DOC_DIR, "inquire消息.json"), encoding="utf-8") as f:
+        inquire = json.load(f)["msg_data"]
+
+    def gs_contest():
+        gs = GameState(1001)
+        gs.on_start(start)
+        d = json.loads(json.dumps(inquire))
+        d["round"] = 100
+        d["contests"], d["tasks"] = [], []
+        for p in d["players"]:
+            if p["playerId"] == 1001:
+                p.update(state="IDLE", currentNodeId="S02", nextNodeId=None,
+                         routeEdgeId=None, currentProcess=None, buffs=[],
+                         resources={"PASS_TOKEN": 1}, freshness=95.0,
+                         goodFruit=90, badFruit=0, guardActionPoint=1)
+            else:  # 对手可负担全部 5 张牌
+                p.update(state="IDLE", currentNodeId="S02", nextNodeId=None,
+                         routeEdgeId=None, currentProcess=None, buffs=[],
+                         resources={"FAST_HORSE": 1, "PASS_TOKEN": 1},
+                         freshness=95.0, goodFruit=5, guardActionPoint=2,
+                         delivered=False, retired=False)
+        gs.on_inquire(d)
+        return gs
+
+    contest = {"contestId": "C_P", "contestType": "DOCK",
+               "redPlayerId": 1001, "bluePlayerId": 2002}
+
+    # 1) 无观测（均匀先验）：兵争克验牒/强行且近零成本，期望最优
+    st = PlannerStrategy()
+    st.CARD_MIX_RATE = 0  # 关掉混合，测纯 best-response
+    pick_uniform = st.pick_card(gs_contest(), contest)
+    ok &= check("画像: 无观测按均匀先验出兵争",
+                pick_uniform == P.CARD_BING_ZHENG, str(pick_uniform))
+
+    # 2) 观测到对手嗜好献贡（10 次）→ 兵争会被献贡克死，改打克献贡的强行
+    #    （我方有马增益免费）
+    st = PlannerStrategy()
+    st.CARD_MIX_RATE = 0
+    st._opp_card_hist = {P.CARD_XIAN_GONG: 10}
+    gs = gs_contest()
+    for p in gs.players.values():
+        if p["playerId"] == 1001:
+            p["buffs"] = [{"type": "SHORT_HORSE", "remainRound": 10}]
+    pick_biased = st.pick_card(gs, contest)
+    ok &= check("画像: 对手嗜好献贡则改打强行克制",
+                pick_biased == P.CARD_QIANG_XING, str(pick_biased))
+
+    # 3) 种子 RNG：同 matchId+playerId 的两个实例出牌序列完全一致
+    #    （回放回归可复现；对手不知道种子派生方式，博弈价值不受影响）
+    s1, s2 = PlannerStrategy(), PlannerStrategy()
+    gs = gs_contest()
+    seq1 = [s1.pick_card(gs, contest) for _ in range(30)]
+    seq2 = [s2.pick_card(gs, contest) for _ in range(30)]
+    ok &= check("画像: 同局种子出牌序列可复现", seq1 == seq2,
+                f"{seq1[:5]} vs {seq2[:5]}")
+    return ok
+
+
 def main():
     ok = test_codec()
     ok &= test_state_and_strategy()
@@ -2122,6 +2441,10 @@ def main():
     ok &= test_latent_mechanics()
     ok &= test_corridor_reserve()
     ok &= test_lenient_frame()
+    ok &= test_race_tempo()
+    ok &= test_target_stickiness()
+    ok &= test_trap_ransom()
+    ok &= test_card_profile()
     print()
     print("ALL PASS" if ok else "SOME FAILED")
     sys.exit(0 if ok else 1)

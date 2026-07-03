@@ -66,6 +66,26 @@ WEATHER_FRESH_REGION = {("HEAVY_RAIN", P.WATER): 1.3}
 BACKTRACK_PENALTY = 25
 BACKTRACK_WINDOW = 40
 
+# 目标粘性（V3.18）：每帧 argmax 重规划在两个净值接近的目标间会震荡
+# （回头迟滞只防物理折返，不防目标层面的反复横跳）。换目标要求新净值
+# 超出当前承诺目标 15%——迟滞带宽小于任何一次真实的估值翻转（对手抢先
+# 的竞争折扣 ×0.5、漏斗税差 ±30 帧都远大于 15%），只滤掉浮点级抖动
+SWITCH_MARGIN = 1.15
+
+# 竞速模式（V3.18，audit 缺口 1 的修复）：双方到下一关键关隘的裸 ETA 差
+# 在竞争带内时，每晚 1 帧都在提高"输掉漏斗竞速"的概率——输 = 死等 +
+# 满防税（45~80 帧）起步，尾部是 replay20/36 的 195 帧冻死。平时价
+# 0.227 分/帧会批准所有账面为正的小绕路，把走廊先手一口口让出去。
+# 倍率校准：漏斗的死等/税差已由 _funnel_delta 单独按时机定价，这个倍率
+# 只补"领先的附加值"——设卡权、刷新先手、免陷阱（audit 缺口 1 里
+# funnel 模型覆盖不到的部分），不能重复计满防税。2.5× 实测会把开局
+# 冰链（败局13：快 25 帧输 27 分鲜度）整个砍掉，回退到 1.75×：
+# 33 帧级的冰链绕路仍然放行（19 分 > 13.1），10 分以下+15 帧级的
+# 边际小目标出局（10 < 15×0.397=6 的两倍附近开始被压）。
+# 进入/退出条件全部公开可算：过完咽喉（前方无 KEY_PASS）或差距拉开自然退出
+RACE_BAND = 25
+RACE_FRAME_MULT = 1.75
+
 # 漏斗定价（V3.16）：全图汇于关键关隘（武关 S10 类），谁后到谁挨卡。
 # 对手先到时，我们过漏斗的真实代价随"到达时机"剧烈变化（replay57/60 实测）：
 # - 赶在它到位前过完边：0（设卡必须人到，规则 6.2.1 免疫）
@@ -152,6 +172,8 @@ class TaskPlanner:
         self._opp_path_cache = (-1, frozenset())  # (round, 对手前进路线节点集)
         self._guard_seen = False       # 对手本局设过卡（漏斗先验升为 1.0，粘性）
         self._funnel_cache = (None, None)  # ((round, cur), (choke, t_o, prior, toll_direct))
+        self._race_cache = (-1, False)     # (round, 竞速模式是否激活)
+        self._committed = None             # 目标粘性：当前承诺目标的键
         # 回头迟滞（V3.8）：刚离开的节点在窗口期内作为目标首跳要付额外代价。
         # replay25：走廊总价近似打平让 65 帧真实折返在绕路公式里"免费"，
         # S03→S02→S04 的回头使我们晚 70 帧到 S09，正好撞上对手设卡循环。
@@ -182,37 +204,55 @@ class TaskPlanner:
 
         # 已验核后离开宫门需要重新验核（6 帧），V1 不再接任务，直奔交付
         if me.get("verified"):
+            self._committed = None
             return Plan("deliver", detail="verified", slack=slack)
         if slack <= 0:
+            self._committed = None
             return Plan("deliver", detail="deadline", slack=slack)
 
         base = me.get("taskScore", 0) or 0
-        best, best_net = None, 0.0
+        cands = {}   # key -> (净值, ("task"/"resource"/"bounty", task, pos, rtype))
         for t in state.claimable_tasks():
             if self.blacklist.get(t["taskId"], 0) > state.round:
                 continue
             ev = self._evaluate(state, t, cur, base, to_gate, eta_direct,
                                 slack, speed, penalty, ecost)
-            if ev and ev[0] > best_net:
-                best_net, best = ev[0], ("task", t, ev[1], None)
+            if ev and ev[0] > 0:
+                cands[("task", t["taskId"])] = (ev[0], ("task", t, ev[1], None))
 
         # 资源提货目标与任务同台竞价（冰鉴 17 分 vs 任务 45~99 分 vs 绕路成本）
         for node_id, rtype, net in self._resource_targets(
                 state, cur, to_gate, slack, speed, penalty, ecost):
-            if net > best_net:
-                best_net, best = net, ("resource", None, node_id, rtype)
+            cands[("resource", node_id, rtype)] = \
+                (net, ("resource", None, node_id, rtype))
 
         # 悬赏目标：只在落后时同台竞价（追分专用，见 6.3.3）
         for node_id, net in self._bounty_targets(
                 state, cur, to_gate, slack, speed, penalty, ecost):
-            if net > best_net:
-                best_net, best = net, ("bounty", None, node_id, None)
+            cands[("bounty", node_id)] = (net, ("bounty", None, node_id, None))
 
-        if best:
-            kind, t, pos, rtype = best
+        best_key = self._sticky_choice(cands)
+        if best_key:
+            best_net, (kind, t, pos, rtype) = cands[best_key]
             return Plan(kind, t, pos, slack=slack, resource=rtype,
                         detail=f"net={best_net:.0f} base={base}")
         return Plan("deliver", detail=f"no worthy task, base={base}", slack=slack)
+
+    def _sticky_choice(self, cands):
+        """目标粘性（V3.18）：净值最高者胜出，但换目标要求 15% 的净值优势。
+
+        当前承诺目标已失效（被抢/过期/净值转负）时无粘性，直接换 argmax；
+        没有任何正净值候选时清空承诺（回到 deliver）。"""
+        if not cands:
+            self._committed = None
+            return None
+        best_key = max(cands, key=lambda k: cands[k][0])
+        held = self._committed
+        if held in cands and held != best_key \
+                and cands[best_key][0] < cands[held][0] * SWITCH_MARGIN:
+            best_key = held
+        self._committed = best_key
+        return best_key
 
     # ================= 漏斗定价（V3.16） =================
 
@@ -484,10 +524,12 @@ class TaskPlanner:
                         if nb in opp_path:
                             val2 = val2 * DENIAL_FACTOR
                         chain += CHAIN_WEIGHT * val2 * d2
-                # 资源不计漏斗差（V3.16）：资源面值 ≤19，漏斗模型在竞速带附近
-                # 的到达估计噪声（±2 帧出发差 → ±40 帧期望费）会淹没它们；
-                # 路线级灾难（36/56/57 山路口袋）全部由任务链驱动，任务侧计价足够
-                net = v + chain - detour * self._frame_value(state, to_gate)
+                # 资源不计漏斗差（V3.16）也不计竞速溢价（V3.18）：资源面值
+                # ≤19，漏斗模型在竞速带附近的到达估计噪声（±2 帧出发差 →
+                # ±40 帧期望费）会淹没它们；路线级灾难（36/56/57 山路口袋）
+                # 全部由任务链驱动，任务侧计价足够
+                net = v + chain - detour * self._frame_value(state, to_gate,
+                                                             race_adjust=False)
                 if net > 0:
                     out.append((node_id, rtype, net))
         return out
@@ -590,17 +632,54 @@ class TaskPlanner:
             return None, None
         return node, f
 
+    # ================= 竞速模式（V3.18） =================
+
+    def race_mode(self, state):
+        """漏斗竞速窗口：双方到下一关键关隘的裸 ETA 差在 ±RACE_BAND 帧内。
+
+        规则依据 6.2.1：设卡必须人站在目标节点上——先过漏斗者对身后的卡
+        免疫、对手的前路全在自己射程内；后到者吃死等+满防税。这个不对称
+        只在竞争带内可争夺，带内每一帧都是胜负帧。
+        进入/退出全由公开状态决定：过完咽喉（前方无 KEY_PASS）、对手已
+        交付/退赛、或差距拉出竞争带即退出。双方用同一裸帧度量。
+        """
+        if self._race_cache[0] == state.round:
+            return self._race_cache[1]
+        active = False
+        cur = self._anchor_node(state)
+        if cur and state.graph:
+            # 用价值口径选路找咽喉（与 plan() 同源，裸最短路会冤枉官道候选）
+            ctx = self._funnel_ctx(state, cur, self._penalty_fn(state),
+                                   self._edge_cost_fn(state))
+            if ctx:
+                choke, t_o, _, _ = ctx
+                my_eta = state.graph.all_frames(cur).get(choke, math.inf)
+                if my_eta != math.inf and \
+                        abs(state.round + my_eta - t_o) <= RACE_BAND:
+                    active = True
+        self._race_cache = (state.round, active)
+        return active
+
     # ================= 帧价值与辅助 =================
 
-    @staticmethod
-    def _frame_value(state, eta_direct):
-        """一帧的机会成本 = 鲜度损耗 + 用时分斜率。
+    def _frame_value(self, state, eta_direct, race_adjust=True):
+        """一帧的机会成本 = 鲜度损耗 + 用时分斜率；竞速窗口内按倍率上调。
 
         用时分按交付帧计算，而绕路 1 帧交付就晚 1 帧 —— 无论现在离
         宫宴冲刺多远，这 0.117 分/帧都是实打实的（平台三局我们交付
         都在 537+，比对手晚 40~60 帧，鲜度+用时合计输 30 分）。
+
+        竞速期（V3.18）：0.227 的平局真空价只对无争夺场景成立。竞争带内
+        改价格而不是逐个加闸门，让规划器自己砍掉边际小绕路。
+        race_adjust=False 供资源目标用——与"资源不计漏斗差"（V3.16）同一
+        理由：冰链是 17~19 分级的交付硬件、语料两次败局（13/14）实锤不可
+        放弃，竞速溢价会把开局唯一冰的争夺整个砍掉；路线级节奏灾难由任务
+        链驱动，任务侧计价足够。
         """
-        return FRESH_VALUE_PER_FRAME + TIME_SCORE_PER_FRAME
+        v = FRESH_VALUE_PER_FRAME + TIME_SCORE_PER_FRAME
+        if race_adjust and self.race_mode(state):
+            v *= RACE_FRAME_MULT
+        return v
 
     @staticmethod
     def _anchor_node(state):
@@ -819,6 +898,12 @@ class TaskPlanner:
         """
         if state.phase == P.PHASE_RUSH:
             return 0  # 冲刺阶段任务停刷，马全部用来赶路
+        if self.race_mode(state):
+            # 竞速窗口（V3.18）：马是走廊竞速武器不是存款——T06 是"可能刷
+            # 出来的 ≤45 边际分"，漏斗先手是"确定的 45~80 帧税差 + 设卡权"。
+            # 速度手段全留给"输了以后"（旧行为：疾行令只在 slack<0 才发）
+            # 正是 audit 缺口 1 的资源侧表现
+            return 0
         base = state.me.get("taskScore", 0) or 0
         if base >= 110:
             return 0  # 里程碑拿满，边际收益剩 45/个，速度更值钱
