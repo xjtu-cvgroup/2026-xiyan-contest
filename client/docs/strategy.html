@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>荔枝争运战 · 完整策略文档 (BUILD 3.16-funnel-doctrine)</title>
+<title>荔枝争运战 · 完整策略文档 (BUILD 3.16.1-lenient-frame)</title>
 <style>
   .viz-root {
     --surface-1: #fcfcfb;
@@ -96,8 +96,8 @@
 <div class="viz-root">
 
 <h1>《一骑红尘：荔枝争运战》完整策略文档</h1>
-<p class="sub">客户端 <code>PlannerStrategy</code> · <span class="badge">BUILD 3.16-funnel-doctrine</span>
-   · 158 项自测覆盖 · 生成于 2026-07-03</p>
+<p class="sub">客户端 <code>PlannerStrategy</code> · <span class="badge">BUILD 3.16.1-lenient-frame</span>
+   · 161 项自测覆盖 · 生成于 2026-07-03</p>
 
 <div class="toc">
 <strong>目录</strong>
@@ -482,10 +482,19 @@ S11+S13+S14 三处预热 = 6 帧正是胜负帧）；
 60 局引擎因 S06 冰缺货偶然走水路即交付 729:738。漏斗账本：山路死等 52+税 45+长边 71 出关 r443，
 水路死等 0+税 45+短边 55 出关 r409（倒贴 68 帧折返仍早 34 帧）。
 selftest 158 项全绿；九局回放回归：非出牌差异全部为既有人手预留压制，开局画像零漂移</td></tr>
+<tr><td><b>3.16.1 lenient-frame</b></td><td><b>宽容读帧：平台序列化缺陷会产出非法 JSON
+（验核绑破关令 + 同帧形成 GATE 窗口时，breakOrderCostTypes 把玩家 ID 序列化成裸整数键
+{2744:"GOOD_FRUIT"}），官方 read_frame 的 json.loads 抛异常杀死读循环。
+修复两层：按 JSON 规范给裸整数键补引号重试（对症，全恢复）；仍失败则跳帧、
+正则抠 round 回空心跳（读循环任何情况不许死）。官方包不动，在 StrategySession 覆盖 run()</b></td>
+<td>replay61（20:09 局）强制退赛 0 分取证：r503 双方同帧验核触发 GATE 窗口 + 我方破关令
+→ 服务端毒帧 → 客户端从 r503 起零动作 → r513 缺勤警告 → r563 累计缺 60 帧 PLAYER_RETIRED。
+之前未踩中纯属侥幸：57/58/59 的急策名额被移动中疾行令占用，验核没绑破关令。
+用 replay61 的三行真实毒帧验证修复解析成功；selftest 161 项全绿</td></tr>
 </table>
 
-<p class="foot">仓库 client/docs/strategy.html · 与代码同步于 feat/v3.14-tempo-doctrine@3.16-funnel-doctrine ·
-自测 <code>python3 selftest.py</code>（158 项）</p>
+<p class="foot">仓库 client/docs/strategy.html · 与代码同步于 feat/v3.14-tempo-doctrine@3.16.1-lenient-frame ·
+自测 <code>python3 selftest.py</code>（161 项）</p>
 </div>
 
 <script>

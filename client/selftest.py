@@ -2033,6 +2033,37 @@ def test_corridor_reserve():
     return ok
 
 
+def test_lenient_frame():
+    """V3.16.1 宽容读帧回归（replay61：服务端毒 JSON 杀死读循环 → 缺 60 帧强制退赛）。"""
+    from lychee.session import lenient_loads, FrameDecodeError
+    ok = True
+
+    # 1) 平台实测毒样：破关令成本表把玩家 ID 序列化成裸整数键
+    poison = ('{"round":503,"contests":[{"contestType":"GATE",'
+              '"breakOrderCostTypes":{2744:"GOOD_FRUIT"},"redPoint":0}]}')
+    d = lenient_loads(poison)
+    ok &= check("宽容读帧: 裸整数键补引号修复",
+                d["round"] == 503
+                and d["contests"][0]["breakOrderCostTypes"] == {"2744": "GOOD_FRUIT"},
+                str(d)[:120])
+
+    # 2) 合法 JSON 原样通过（不触发修复路径）
+    d = lenient_loads('{"round":1,"a":{"1":"x"},"s":"{2744:not-json-inside-string}"}')
+    ok &= check("宽容读帧: 合法帧原样解析（字符串内容不受修复干扰）",
+                d["s"] == "{2744:not-json-inside-string}", str(d))
+
+    # 3) 修不回来的帧抛 FrameDecodeError 且携带原文（供跳帧兜底抠 round）
+    try:
+        lenient_loads('{"round":77,broken!!!')
+        ok &= check("宽容读帧: 坏帧应抛 FrameDecodeError", False, "no raise")
+    except FrameDecodeError as e:
+        import re as _re
+        m = _re.search(r'"round"\s*:\s*(\d+)', e.body)
+        ok &= check("宽容读帧: 坏帧抛错且能抠出 round 兜底",
+                    m and m.group(1) == "77", str(e.body))
+    return ok
+
+
 def main():
     ok = test_codec()
     ok &= test_state_and_strategy()
@@ -2057,6 +2088,7 @@ def main():
     ok &= test_weaken_discipline()
     ok &= test_latent_mechanics()
     ok &= test_corridor_reserve()
+    ok &= test_lenient_frame()
     print()
     print("ALL PASS" if ok else "SOME FAILED")
     sys.exit(0 if ok else 1)
