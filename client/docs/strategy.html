@@ -97,7 +97,7 @@
 
 <h1>《一骑红尘：荔枝争运战》完整策略文档</h1>
 <p class="sub">客户端 <code>PlannerStrategy</code> · <span class="badge">BUILD 3.15-wait-doctrine</span>
-   · 152 项自测覆盖 · 生成于 2026-07-03</p>
+   · 157 项自测覆盖 · 生成于 2026-07-03</p>
 
 <div class="toc">
 <strong>目录</strong>
@@ -319,7 +319,7 @@
 
 <!-- ================================================================ -->
 <h2 id="squad">7. 小分队决策 squad_action()</h2>
-<p class="sub">人手初始 8。服务端 squadAvailable 字段缺失时用本地账本兜底（探路−1 / 削弱−2）。RUSH 阶段禁止新派。</p>
+<p class="sub">人手初始 8。服务端 squadAvailable 字段缺失时用本地账本兜底（探路−1 / 削弱−2）。RUSH 阶段禁止新派。<b>走廊人手底仓（V3.15）</b>：过验核前，探路/续防/清障必须给设卡战留 4 人手（=2 次削弱），削弱不受限——预留攒的就是它；对手已交付或我方已验核后解除。</p>
 <div class="flow">
   <div class="node act-squad">优先级 1 —— <span class="ret">SQUAD_WEAKEN(削弱目标)</span>：
     主车队被卡/被冻结时由 §4/§5 标记，人手≥2 即发（主车队正在流血，每帧都亏）</div>
@@ -387,6 +387,7 @@
 <tr><td>CLAIM_LIMIT 领取上限</td><td>冰鉴 2 / 马各 1</td><td>冰鉴 +10鲜度 ≈ 18 分</td></tr>
 <tr><td>MIN_GOOD_RESERVE 好果底仓</td><td>5 篓</td><td>交付要求好果 &gt; 0，对抗投资不许掏空</td></tr>
 <tr><td>CAMPER_BREAK_LIMIT 蹲点攻坚试探上限（V3.14）</td><td>2 次</td><td>每轮攻坚 ~2好果+1坏果≈4分 vs 对手原地补卡 ≤3 好果；语料蹲点停留 ~30 帧 ≈ 2 个攻坚周期，覆盖"它正要走"，再多是给补卡循环送果，超限转强通（税锁定不可冻，6.3.2）</td></tr>
+<tr><td>SQUAD_CORRIDOR_RESERVE 走廊人手底仓（V3.15）</td><td>4 人手</td><td>= 2 次削弱 = 防 6 削到好果可拆；过验核前探路（0.7分）/续防/清障不许击穿底仓，削弱本身不受限；对手已交付或我方已验核后解除（replay20/56：人手买穿后走廊第二张卡只能干等风化）</td></tr>
 <tr><td>攻坚成本权重</td><td>好果 1.9 / 坏果 0.1</td><td>好果值 1.8 分/篓 + 平分决胜价值；坏果近乎废物</td></tr>
 <tr><td>SCOUT_MAX_ETA / GATE_SCOUT_FROM</td><td>40 帧 / 第 355 帧</td><td>标记寿命 45 帧；宫门验核最早 ~390 开放（曾浪费 6/8 人手在过期标记上）</td></tr>
 <tr><td>SCOUT/WEAKEN 重发间隔</td><td>25 / 12 帧</td><td>在途落地延迟 3~15 帧，防重复派人；V3.12 起中边冻结分支同样受 12 帧间隔约束（曾 3 帧连发烧光 6 人手）</td></tr>
@@ -454,7 +455,10 @@ selftest 147 项全绿（+8：蹲点四例/对峙两例/拍分锁定三例…）
 TRAP_WAIT_MAX 降级为日志告警阈值；
 ②找回 V3.13 合并丢失的二审四修复（合并父提交停在 c70811d 前一格）：RUSH_SPEED/RUSH_PROTECT
 补进 MAIN_ACTION_TYPES（缺失导致 replay56 疾行令与自动补发的 MOVE 同帧双主动作全作废+急策名额锁死）、
-疾行令好果≥3 前置、宫门设卡 extra=1、宫门情报 355 帧时机门</b></td>
+疾行令好果≥3 前置、宫门设卡 extra=1、宫门情报 355 帧时机门；
+③走廊人手底仓——过验核前探路/续防/清障给设卡战留 4 人手（=2 次削弱），削弱不受限，
+对手交付或我方验核后解除（九局重放：18 处派遣被压制全为中局清障/尾段宫门探路，
+开局赢局画像零差异）</b></td>
 <td>replay56（80:734 未交付）：r276 防陷阱正确等待，r305 上限到点硬闯 71 帧长边，
 对手 r310 到 S10、r314 起卡，冻至 r389 风化死卡；恢复后 r452 节点攻坚拆 S11 卡（V3.14 机制正常），
 终局 r600 定格 S14 差约 40 帧未验核——上限不硬闯即活（等 5 帧对手到点转常驻，突破梯队全程可用）。
@@ -463,7 +467,7 @@ selftest 152 项全绿；九局回放播种后逐帧回归</td></tr>
 </table>
 
 <p class="foot">仓库 client/docs/strategy.html · 与代码同步于 feat/v3.14-tempo-doctrine@3.15-wait-doctrine ·
-自测 <code>python3 selftest.py</code>（152 项）</p>
+自测 <code>python3 selftest.py</code>（157 项）</p>
 </div>
 
 <script>

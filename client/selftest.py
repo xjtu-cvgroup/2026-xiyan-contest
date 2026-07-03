@@ -1965,6 +1965,71 @@ def test_latent_mechanics():
     return ok
 
 
+def test_corridor_reserve():
+    """V3.15 走廊人手预留：过验核前非削弱派遣给设卡战留 4 人手底仓。"""
+    ok = True
+    with open(os.path.join(DOC_DIR, "start消息.json"), encoding="utf-8") as f:
+        start = json.load(f)["msg_data"]
+    with open(os.path.join(DOC_DIR, "inquire消息.json"), encoding="utf-8") as f:
+        inquire = json.load(f)["msg_data"]
+
+    def gs_at(squad, verified=False, opp_delivered=False):
+        """我在 S13（离宫门 ETA ~30 帧），r360 触发宫门探路窗口。"""
+        gs = GameState(1001)
+        gs.on_start(start)
+        d = json.loads(json.dumps(inquire))
+        d["round"] = 360
+        d["contests"], d["tasks"] = [], []
+        d["weather"] = {"active": [], "forecast": []}
+        for p_ in d["players"]:
+            if p_["playerId"] == 1001:
+                p_.update(state="IDLE", currentNodeId="S13", nextNodeId=None,
+                          routeEdgeId=None, currentProcess=None, buffs=[],
+                          resources={}, squadAvailable=squad, verified=verified,
+                          goodFruit=90, badFruit=2, freshness=90.0)
+            else:
+                p_.update(delivered=opp_delivered, retired=False)
+        for n in d["nodes"]:
+            n["hasObstacle"] = False
+            n["guard"] = None
+            n["resourceStock"] = {}
+            n["scouted"] = []
+        gs.on_inquire(d)
+        return gs
+
+    plan = Plan("deliver", slack=200)
+
+    # 1) 人手 5：花 1 剩 4 = 底仓，允许探宫门
+    a = PlannerStrategy().squad_action(gs_at(5), plan)
+    ok &= check("人手预留: 剩够底仓时探路照发",
+                a and a["action"] == "SQUAD_SCOUT" and a["targetNodeId"] == "S14",
+                str(a))
+
+    # 2) 人手 4：花 1 就击穿底仓（= 少一次削弱），不发
+    a = PlannerStrategy().squad_action(gs_at(4), plan)
+    ok &= check("人手预留: 击穿底仓的探路不发（弹药留给设卡战）",
+                a is None, str(a))
+
+    # 3) 对手已交付：设卡威胁解除，敞开花
+    a = PlannerStrategy().squad_action(gs_at(4, opp_delivered=True), plan)
+    ok &= check("人手预留: 对手已交付则不再预留",
+                a and a["action"] == "SQUAD_SCOUT", str(a))
+
+    # 4) 已验核：走廊已过，敞开花
+    a = PlannerStrategy().squad_action(gs_at(4, verified=True), plan)
+    ok &= check("人手预留: 已验核则不再预留",
+                a and a["action"] == "SQUAD_SCOUT", str(a))
+
+    # 5) 削弱不受预留限制——预留攒的就是削弱弹药
+    st = PlannerStrategy()
+    st._weaken_target = "S14"
+    a = st.squad_action(gs_at(2), plan)
+    ok &= check("人手预留: 削弱不受底仓限制",
+                a and a["action"] == "SQUAD_WEAKEN" and a["targetNodeId"] == "S14",
+                str(a))
+    return ok
+
+
 def main():
     ok = test_codec()
     ok &= test_state_and_strategy()
@@ -1988,6 +2053,7 @@ def main():
     ok &= test_reject_join()
     ok &= test_weaken_discipline()
     ok &= test_latent_mechanics()
+    ok &= test_corridor_reserve()
     print()
     print("ALL PASS" if ok else "SOME FAILED")
     sys.exit(0 if ok else 1)

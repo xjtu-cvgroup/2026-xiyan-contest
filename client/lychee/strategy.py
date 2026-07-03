@@ -159,6 +159,10 @@ class PlannerStrategy(BaselineStrategy):
 
     SCOUT_RESEND_GAP = 25       # 同一目标探路重发间隔（防止在途期间重复派人）
     SCOUT_MAX_ETA = 40          # 只探 40 帧内能赶到的目标（标记寿命 45 帧）
+    # 走廊人手预留（V3.15）：过验核前非削弱派遣必须留下的人手底仓。
+    # 4 = 2 次削弱 = 防 6 削到 4（好果 2 篓即可拆）再留一次余量；replay20/56
+    # 实锤：人手在探路/边上削弱里买穿后，走廊第二张卡只能干等风化
+    SQUAD_CORRIDOR_RESERVE = 4
     GATE_SCOUT_FROM = 355       # 宫门验核最早 ~390 帧，此前派的标记必然过期
     # 顺路领取清单：冰鉴/马之外补上文书（充实验牒 YAN_DIE 出牌池，克强行 QIANG_XING，
     # 此前从不主动领导致这张克制牌常年打不出）和情报（免费囤着，等空转帧顺手用掉）
@@ -834,7 +838,8 @@ class PlannerStrategy(BaselineStrategy):
         if avail <= 0:
             return None
 
-        # 削弱敌卡优先于探路（主车队正被挡住，每帧都在流血）
+        # 削弱敌卡优先于探路（主车队正被挡住，每帧都在流血）。
+        # 削弱不受走廊预留限制——预留攒的就是这个
         if self._weaken_target and avail >= 2:
             t = self._weaken_target
             self._weaken_sent[t] = state.round
@@ -842,13 +847,28 @@ class PlannerStrategy(BaselineStrategy):
             self._squad_spent += 2
             return P.a_squad_weaken(t)
 
+        # 走廊人手预留（V3.15）：过验核前，人手是设卡战的保命弹药——
+        # 4 人手 = 2 次削弱 = 把防 6 的卡削到好果可拆（replay20：人手烧光后
+        # S11 第二张卡冻到终场未交付）。探路省 3 帧 ≈ 0.7 分、续防/清障也是
+        # 几分级的小便宜，不许把弹药买穿。对手已交付/退赛或我们已验核后
+        # 不再有设卡威胁，敞开花
+        opp = state.opp
+        guard_threat = (not me.get("verified") and opp
+                        and not opp.get("delivered") and not opp.get("retired"))
+
+        def can_spend(cost):
+            floor = self.SQUAD_CORRIDOR_RESERVE if guard_threat else 0
+            return avail - cost >= floor
+
         cur = me.get("currentNodeId") or me.get("nextNodeId")
         targets = []
-        # 宫门优先（时机窗口窄）；保留 1 人手给宫门
+        # 宫门优先（时机窗口窄）
         if state.round >= self.GATE_SCOUT_FROM:
             targets.append(state.gate_node)
-        if plan.kind == "task" and plan.position and plan.position != cur and avail > 1:
+        if plan.kind == "task" and plan.position and plan.position != cur:
             targets.append(plan.position)
+        if not can_spend(1):
+            targets = []
 
         penalty = self.planner._penalty_fn(state)
         speed = state.my_speed()
@@ -867,7 +887,7 @@ class PlannerStrategy(BaselineStrategy):
         # 续防自家设卡（V3.12）：只在落后时续——领先时故意不续，让快风化的卡
         # 自然失效，别把它续到破关悬赏 30/60 帧的触发线上，被拆时反倒给
         # 对手送追分分（悬赏只在攻破方总分更低时结算，见 6.3.3）
-        if avail >= 2:
+        if avail >= 2 and can_spend(2):
             reinforce_target = self._reinforce_opportunity(state)
             if reinforce_target:
                 self._reinforce_sent[reinforce_target] = state.round
@@ -877,7 +897,7 @@ class PlannerStrategy(BaselineStrategy):
         # 远程清障（V3.12）：路上有障碍挡着非 T04 目标时，派小分队清，主车队
         # 不用绕路/停下来自己 CLEAR；绝不碰自己正在做的 T04 目标（那要靠
         # CLAIM_TASK 才算数，小分队/CLEAR 清障只会让该 T04 失败且不重刷）
-        if avail >= 2:
+        if avail >= 2 and can_spend(2):
             clear_target = self._squad_clear_opportunity(state, plan)
             if clear_target and state.round - self._clear_sent.get(
                     clear_target, -999) >= self.SQUAD_CLEAR_RESEND_GAP:
