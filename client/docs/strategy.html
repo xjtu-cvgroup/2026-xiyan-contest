@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>荔枝争运战 · 完整策略文档 (BUILD 3.11-follower-doctrine)</title>
+<title>荔枝争运战 · 完整策略文档 (BUILD 3.12-choke-discipline)</title>
 <style>
   .viz-root {
     --surface-1: #fcfcfb;
@@ -96,7 +96,7 @@
 <div class="viz-root">
 
 <h1>《一骑红尘：荔枝争运战》完整策略文档</h1>
-<p class="sub">客户端 <code>PlannerStrategy</code> · <span class="badge">BUILD 3.11-follower-doctrine</span>
+<p class="sub">客户端 <code>PlannerStrategy</code> · <span class="badge">BUILD 3.12-choke-discipline</span>
    · 120 项自测覆盖 · 生成于 2026-07-02</p>
 
 <div class="toc">
@@ -142,7 +142,7 @@
 <div class="flow">
   <div class="node"><span class="tag">入口</span><br>收到 inquire(round=N) → <code>_absorb_feedback</code>：
     停靠节点变更重置处理标记 · 吸收 PROCESS_REQUIRED / PROCESS_COMPLETE / VERIFY_GATE_COMPLETE ·
-    移动停滞计数（看门狗）· 记录 FORCED_PASS_END 节点 · CLAIM_TASK 被拒→拉黑该任务 40 帧</div>
+    记录 FORCED_PASS_END 节点 · 记录上帧主动作（拒绝载荷缺 action 字段，V3.12 用它 join）· CLAIM_TASK 被拒→拉黑该任务 40 帧</div>
   <div class="arrow">↓</div>
   <div class="node decision">已交付 (delivered) 或已退赛 (retired)？</div>
   <div class="branch">
@@ -230,7 +230,7 @@
       <div class="lbl">是 —— 边上分支</div>
       <div class="node act-crit">a. 下一跳有敌方有效卡（冻结中）→ 标记削弱目标交给小分队，<span class="ret">无动作</span></div>
       <div class="arrow">↓</div>
-      <div class="node act-crit">b. 看门狗：进度停滞 ≥8 帧且无可见敌卡 → <span class="ret">MOVE(改道替代邻点)</span></div>
+      <div class="node act-crit">b. （V3.12 删看门狗改道：任务书 8.2 移动中只能 WAIT/续走/用马，中边改道 MOVE 是非法动作，该分支从未生效）</div>
       <div class="arrow">↓</div>
       <div class="node act-main">c. 无移动增益且马匹 &gt; 预留量 → <span class="ret">USE_RESOURCE(快马/短程马)</span></div>
       <div class="arrow">↓</div>
@@ -249,7 +249,7 @@
             奇偶错峰命中 → <span class="ret">WAIT</span>（避免同帧创建窗口）；否则 <span class="ret">PROCESS</span></li>
         <li>计划=task 且已到任务站位 → <span class="ret">CLAIM_TASK</span>（独占对象，不让行）</li>
         <li>主动设卡机会（§6 条件全满足）→ <span class="ret">SET_GUARD(防守值6)</span></li>
-        <li>顺路领取（计划=task 或 slack&gt;80）：冰鉴上限2、快马/短程马各1；
+        <li>顺路领取（计划=task/resource 或 slack&gt;15）：冰鉴上限2、快马/短程马各1；
             错峰命中先 <span class="ret">WAIT</span> 一帧 → <span class="ret">CLAIM_RESOURCE</span></li>
         <li>赶路（目标 = 任务点 / 未验核→宫门 / 已验核→终点，寻路含阻挡惩罚）：<br>
             下一跳有障碍无卡：好果&gt;1 → <span class="ret">CLEAR</span> 否则 <span class="ret">WAIT</span><br>
@@ -334,7 +334,7 @@
 <tr><td>排队等待</td><td>对手正在处理我所在站点流程</td><td>WAIT 到它完成，OBJECT_BUSY 是免费的业务拒绝</td></tr>
 <tr><td>设卡预判</td><td>对手 currentProcess=SET_GUARD 在我下一跳（公开可见）</td><td>不上边！等卡成型后站在节点攻坚拆掉（半路被冻代价大一个数量级）</td></tr>
 <tr><td>冻结解冻</td><td>边上移动且下一跳有敌方有效卡（进度被服务端冻住）</td><td>连发 SQUAD_WEAKEN 拆卡（防6约30帧拆完 vs 风化180帧）</td></tr>
-<tr><td>停滞看门狗</td><td>MOVING 且 (边,进度) 连续 8 帧不变且无可见敌卡</td><td>改道本段起点其他邻点——任何未知原因的冻结最多损失 8 帧，不可能再冻到终场</td></tr>
+<tr><td>中边冻结（V3.12 削弱纪律）</td><td>目标节点敌卡冻住进度</td><td>卡主还站在卡节点上→不削弱（它 ≤3 好果原地补满防 6，6 人手白烧，replay36 实锤）；离开后按 12 帧间隔派削弱，保底留 2 人手防第二张卡（replay20 实锤）</td></tr>
 <tr><td>人手账本</td><td>inquire 缺 squadAvailable 字段</td><td>本地记账（8−已派出），防止削弱/探路被静默禁用</td></tr>
 <tr><td>任务黑名单</td><td>CLAIM_TASK 被拒（保护期/占用/过期等 6 种码）</td><td>拉黑 40 帧，不再撞墙</td></tr>
 <tr><td>交付后静默</td><td>delivered/retired</td><td>返回空动作，杜绝每次 −5 的交付后违规（含窗口牌）</td></tr>
@@ -359,9 +359,8 @@
 <tr><td>MIN_GOOD_RESERVE 好果底仓</td><td>5 篓</td><td>交付要求好果 &gt; 0，对抗投资不许掏空</td></tr>
 <tr><td>攻坚成本权重</td><td>好果 1.9 / 坏果 0.1</td><td>好果值 1.8 分/篓 + 平分决胜价值；坏果近乎废物</td></tr>
 <tr><td>SCOUT_MAX_ETA / GATE_SCOUT_FROM</td><td>40 帧 / 第 355 帧</td><td>标记寿命 45 帧；宫门验核最早 ~390 开放（曾浪费 6/8 人手在过期标记上）</td></tr>
-<tr><td>SCOUT/WEAKEN 重发间隔</td><td>25 / 12 帧</td><td>在途落地延迟 3~15 帧，防重复派人</td></tr>
-<tr><td>STALL_FRAMES 看门狗</td><td>8 帧</td><td>正常每帧至少走 ~700 移动量，8 帧零进度必为异常</td></tr>
-<tr><td>GUARD_* 设卡窗口</td><td>ETA∈[8,150] / slack&gt;80 / 容差15 / 重试40</td><td>见 §6 逐条注释</td></tr>
+<tr><td>SCOUT/WEAKEN 重发间隔</td><td>25 / 12 帧</td><td>在途落地延迟 3~15 帧，防重复派人；V3.12 起中边冻结分支同样受 12 帧间隔约束（曾 3 帧连发烧光 6 人手）</td></tr>
+<tr><td>GUARD_* 设卡窗口</td><td>ETA∈[8,150] / slack&gt;65 / 容差15 / 重试40</td><td>V3.12: 80→65——replay31 实测咽喉停靠 slack 分布 70~84，旧值把整档拦掉（V3.7 后 4 局 0 触发）；SAFETY_MARGIN 60 已内含保险</td></tr>
 <tr><td>马匹预留</td><td>1 匹（T06 在场/会刷 且 base&lt;110 且 r&lt;350 且非RUSH）</td><td>省 2 帧 vs 30 分任务</td></tr>
 <tr><td>任务档位</td><td>保 90 冲 110+</td><td>90 解锁满额送达 240 + 用时不折 + 里程碑 +35</td></tr>
 </table>
@@ -388,10 +387,11 @@
 <tr><td>3.8 claim-order</td><td><b>冰保卫（对手赶得上偷就先领资源再读任务条）；突破按真实耗时选削弱/强通（弃 slack 闸门）；回头迟滞（刚离开节点作首跳 +25 帧）</b></td><td>replay25 三宗罪：S03 读任务条时冰被落后 5 帧的对手偷走（r92）；slack&lt;0 跳过削弱选强通吃 100 帧（削弱只要 32）；走廊总价近似打平使 65 帧折返在绕路公式里"免费"。本局亮点：S02 窗口首胜、两次破卡+悬赏 30 —— 机制在运转，输在细节顺序</td></tr>
 <tr><td>3.9 trap-evidence</td><td><b>陷阱等待加双闸门：证据门（对手本局设过卡才设防，事件流+节点卡自动侦测）+ 地形门（只在咽喉类节点设防）</b></td><td>replay27（681:747）：开局全面领先（S02 窗口胜+冰保卫首胜+双任务），r96 起把跑在前面的 2613（历史零设卡）当埋伏者，S03/S07/S09 三次罚站共 90 帧，官道任务被横扫 90:180——对非设卡者的过度防御比陷阱本身更贵</td></tr>
 <tr><td>3.10 tail-farm</td><td><b>尾段蹲刷：无目标且余量&gt;110、里程碑未满时，站在任务候选点等刷新（预算 50 帧）；离路资源折扣下限 0.7→0.85</b></td><td>三局对真人（736:767 / 738:749 / 725:751）：任务全部集中在前 200 帧、尾段近 300 帧零任务——任务刷新跟在车队身后，领跑者吃冰、跟随者吃刷新；base 90→130 值 +55 分而快 40 帧只值~8 分，计分结构要求为任务留出时间</td></tr>
-<tr><td><b>3.11 follower-doctrine</b></td><td><b>蹲刷加跟随者闸门（领先时不蹲，保节奏防设卡者反超）；可行性硬约束改时间口径（价值帧膨胀曾把山冰线卡在 slack 外）；冰鉴 17→19（含阈值转坏保险）；任务竞争折扣加离路软化</b></td><td>vs 2614 输窗口后走水路鲜度输局：仿真证实水路+任务流是绝对分最优（山冰绕行诚实亏 14 分）——输起跑窗口后的正确画像是跟随者（蹲刷农任务），赢窗口时依旧双冰官道领跑；五图开局回归全部不变</td></tr>
+<tr><td>3.11 follower-doctrine</td><td>蹲刷加跟随者闸门（领先时不蹲，保节奏防设卡者反超）；可行性硬约束改时间口径（价值帧膨胀曾把山冰线卡在 slack 外）；冰鉴 17→19（含阈值转坏保险）；任务竞争折扣加离路软化</td><td>vs 2614 输窗口后走水路鲜度输局：仿真证实水路+任务流是绝对分最优（山冰绕行诚实亏 14 分）——输起跑窗口后的正确画像是跟随者（蹲刷农任务），赢窗口时依旧双冰官道领跑；五图开局回归全部不变</td></tr>
+<tr><td><b>3.12 choke-discipline</b></td><td><b>①拒绝反馈 join 修复：平台 ACTION_REJECTED 载荷无 action 字段，任务拉黑分支上线以来从未命中——改用上帧实际提交的主动作补齐；死 T04（障碍已被非 T04 清除）加可行性过滤。②中边削弱纪律：卡主在场不削弱、12 帧重发间隔、保底 2 人手。③删陷阱证据门（保留地形门+几何门+对峙上限）；删中边非法改道看门狗（8.2 移动中不能改道）。④GUARD_SLACK_MIN 80→65 复活主动设卡死分支</b></td><td>replay36 惨案 80:734 全链取证：S08 站 28 帧逐帧重试死 T04（payload 缺 action 致拉黑失效）→ r295 带着几何+地形全中的风险上边（首卡无前科被证据门放行）→ r315-317 三帧连发削光防 6 → 2614 站 S10 原地 3 好果补卡 → 冻 195 帧零交付。replay20 同构（38 帧重试 + S10/S11 连环冻 180 帧）。V3.12 仿真反事实：r294 改为 WAIT 不上边、卡主离开后 12 帧间隔削弱 r358 解冻（快 167 帧）、replay27 误伤 87→30 帧</td></tr>
 </table>
 
-<p class="foot">仓库 client/docs/strategy.html · 与代码同步于 main@3.11-follower-doctrine ·
+<p class="foot">仓库 client/docs/strategy.html · 与代码同步于 main@3.12-choke-discipline ·
 自测 <code>python3 selftest.py</code>（120 项）</p>
 </div>
 

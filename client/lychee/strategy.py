@@ -167,20 +167,27 @@ class PlannerStrategy(BaselineStrategy):
     MIN_GOOD_RESERVE = 5        # 攻坚投入好果时保留的底仓（交付要求好果 > 0）
     WEAKEN_RESEND_GAP = 12      # 同一设卡的削弱重发间隔（落地延迟 ~3-5 帧）
 
-    STALL_FRAMES = 8            # 移动进度停滞判定帧数（看门狗）
-
     # ---- 主动设卡（V3）----
     GUARD_NODE_TYPES = {"KEY_PASS", "PASS", "MOUNTAIN_PASS", "GATE"}  # 咽喉类节点
     GUARD_MIN_OPP_ETA = 8       # 对手至少 8 帧后才到（4 帧读条 + 生效余量）
     GUARD_MAX_OPP_ETA = 150     # 太远则风化/悬赏先到，白设
-    GUARD_SLACK_MIN = 80        # 自己交付余量充足才花这 4 帧
+    # V3.12：80 → 65。V3.7 修了 ETA 度量后 4 局仍 0 次设卡——replay31 领跑局
+    # 仿真：S10/S11 咽喉停靠帧 slack 分布 70~84，全被 80 拦掉（SAFETY_MARGIN
+    # 60 已内含一道保险，等效要求 140 帧真余量）。65 落在实测分布之下、
+    # 仍留 4 帧读条的 16 倍缓冲。
+    GUARD_SLACK_MIN = 65        # 自己交付余量充足才花这 4 帧
     GUARD_ROUTE_TOLERANCE = 15  # 判断该节点是否在对手高效路线上的容差（帧）
     GUARD_RETRY_GAP = 40        # 同一节点设卡重试间隔
 
-    # ---- 防中边陷阱（V3.5）----
+    # ---- 防中边陷阱（V3.5，V3.12 删证据门）----
     # 设卡必须站在节点上：对手占着/将先到我们的下一跳时，上边就可能被掐点
     # 冻结（实测连环两次：S10 花 6 人手解冻，S11 无人手可用冻到终场未交付）。
     # 它离开该节点后就永远无法在那里设卡 —— 等它走，留卡就站在节点上攻坚拆。
+    # 任务书 8.2：移动中只能 WAIT/续走/用马，不能回头——中边冻结在规则上
+    # 无解，预防是唯一手段。V3.9 曾加"设卡前科"证据门防误伤，但对手的第一
+    # 张卡必然没有前科（replay36: r295 几何+地形全中被前科门放行，冻 195 帧
+    # 零交付）；地形门已把误伤压到每局 ≤1 次咽喉等待（≤30 帧 ≈ 6.6 分），
+    # 对比冻结 180+ 帧 / 零交付 500 分级，陷阱概率 ≥5% 即回本 → 删证据门。
     TRAP_GUARD_FRAMES = 4       # 设卡读条帧数（对手到点后需要的成卡时间）
     TRAP_WAIT_MAX = 30          # 防对手赖着不走的对峙上限（帧）
     # 注意：不设"截止吃紧就赌一把"的例外 —— slack 越紧冻结越致命
@@ -203,11 +210,10 @@ class PlannerStrategy(BaselineStrategy):
         self._weaken_target = None       # 本帧主车队让 squad_action 去削弱的目标
         self._last_forced_node = None    # 上次强制通行到达节点（规则禁止重复）
         self._squad_spent = 0            # 本地人手账本（服务端字段缺失时兜底）
-        self._stall = (None, None, 0)    # (edgeId, progressMs, 连续停滞帧数)
         self._guard_sent = {}            # nodeId -> 设卡提交帧（防重试风暴）
         self._trap_wait = (None, 0)      # (等待的目标节点, 连续等待帧数)
-        self._opp_guards_seen = False    # 对手本局是否设过卡（陷阱风险的证据门）
         self._loiter_spent = 0           # 尾段蹲刷已用帧数（预算制）
+        self._last_main_action = None    # 上一帧提交的主车队动作（拒绝反馈的 join 键）
 
     # ---------- 每帧入口 ----------
 
@@ -245,6 +251,8 @@ class PlannerStrategy(BaselineStrategy):
                 and not state.enemy_guard(me["nextNodeId"])
                 and not any(a["action"] in P.MAIN_ACTION_TYPES for a in actions)):
             actions.append(P.a_move(me["nextNodeId"]))
+        self._last_main_action = next(
+            (a for a in actions if a["action"] in P.MAIN_ACTION_TYPES), None)
         return actions
 
     # ---------- 反馈：任务被拒时临时拉黑 ----------
@@ -259,45 +267,26 @@ class PlannerStrategy(BaselineStrategy):
             self.planner.back_until = state.round + 40
         self._weaken_target = None
 
-        # 对手设卡证据：事件流 或 任意节点上它的有效卡（陷阱等待的前提）
-        if not self._opp_guards_seen:
-            for e in state.events:
-                p = e.get("payload") or {}
-                if e.get("type") == "GUARD_SET" and p.get("playerId") == state.opp_id:
-                    self._opp_guards_seen = True
-                    break
-            else:
-                for node in state.nodes.values():
-                    g = node.get("guard")
-                    if g and g.get("ownerTeamId") \
-                            and g["ownerTeamId"] != state.my_team:
-                        self._opp_guards_seen = True
-                        break
-
-        # 移动进度停滞检测：MOVING 且 (edge, progress) 连续 N 帧不变
-        me = state.me
-        edge, prog = me.get("routeEdgeId"), me.get("edgeProgressMs")
-        if edge and me.get("state") == P.ST_MOVING:
-            last_edge, last_prog, n = self._stall
-            self._stall = (edge, prog,
-                           n + 1 if (edge, prog) == (last_edge, last_prog) else 0)
-        else:
-            self._stall = (None, None, 0)
-
         for e in state.my_events("FORCED_PASS_END"):
             p = e.get("payload") or {}
             node = p.get("nodeId") or p.get("targetNodeId")
             if node:
                 self._last_forced_node = node  # 规则：该节点不能再次强制通行
+        last = self._last_main_action or {}
         for action, code in state.my_rejections():
-            if action == "CLAIM_TASK" and code in (
+            # 平台 ACTION_REJECTED 载荷缺 action 字段（replay20/36 全为 None，
+            # 拉黑分支因此从未命中过）：用上一帧实际提交的主动作补齐
+            act = action or last.get("action")
+            if act == "CLAIM_TASK" and code in (
                     "TASK_REQUIREMENT_NOT_MET", "TASK_PROTECTED", "OBJECT_BUSY",
                     "TASK_EXPIRED", "TASK_NOT_FOUND", "WINDOW_DRAW_RETRY_LIMIT"):
+                tid = last.get("taskId")
                 proc = state.me.get("currentProcess") or {}
-                tid = proc.get("taskId")
+                tid = tid or proc.get("taskId")
                 # 拒绝发生在上一帧，没有可靠 taskId 时拉黑当前计划任务
-                plan = self.planner.plan(state)
-                tid = tid or (plan.task or {}).get("taskId")
+                if not tid:
+                    plan = self.planner.plan(state)
+                    tid = (plan.task or {}).get("taskId")
                 if tid:
                     self.planner.blacklist_task(tid, state.round + 40)
                     if self.log:
@@ -318,20 +307,20 @@ class PlannerStrategy(BaselineStrategy):
             # 边上主车队不能攻坚/强通（状态限制），但小分队动作不受限 -> 持续削弱。
             nxt = me.get("nextNodeId")
             if nxt and state.enemy_guard(nxt):
-                if state.phase != P.PHASE_RUSH and self._squad_avail(state) >= 2:
+                # 削弱纪律（V3.12）：
+                # - 卡主还站在卡节点上时不削——它 ≤3 好果就能原地补满防 6，
+                #   6 人手换一次清零的交换比恒亏（replay36: r315-317 连发削光
+                #   防 6，对手 r330 原地补卡，白冻到 r525）
+                # - 复用 WEAKEN_RESEND_GAP：削弱落地要 3-5 帧，连发只重复扣人手
+                # - 留 2 人手保底：第二张卡才是杀招（replay20: S10 烧光人手后
+                #   S11 再冻 180 帧到终场未交付）
+                if (state.phase != P.PHASE_RUSH
+                        and self._squad_avail(state) >= 4
+                        and not self._opp_at_node(state, nxt)
+                        and state.round - self._weaken_sent.get(nxt, -999)
+                        >= self.WEAKEN_RESEND_GAP):
                     self._weaken_target = nxt  # squad_action 本帧发 SQUAD_WEAKEN
                 return None
-            # 看门狗兜底：进度停滞 >=8 帧但看不到敌卡（数据异常/未知阻挡），
-            # 改道走本段起点的其他相邻节点，放弃当前进度总好过冻死到终场
-            if self._stall[2] >= self.STALL_FRAMES:
-                alt = self._reroute_from_edge(state, me, nxt)
-                if alt:
-                    if self.log:
-                        self.log.warning("stall watchdog: frozen %d frames on %s, "
-                                         "reroute to %s", self._stall[2],
-                                         me.get("routeEdgeId"), alt)
-                    self._stall = (None, None, 0)
-                    return P.a_move(alt)
             # 移动中只能用马类资源：没有移动增益就顺手上马（不耽误本帧推进）。
             # 马匹经济：T06 类任务要消耗整匹马，留足预留量才骑（详见 planner）
             res = me.get("resources") or {}
@@ -639,6 +628,14 @@ class PlannerStrategy(BaselineStrategy):
         return (state.round + state.player_id) % 2 == 1
 
     @staticmethod
+    def _opp_at_node(state, node_id):
+        """对手主车队正停靠在该节点上（能以 ≤3 好果原地补卡，削弱=喂饵）。"""
+        opp = state.opp
+        return bool(opp and not opp.get("delivered") and not opp.get("retired")
+                    and not opp.get("routeEdgeId")
+                    and opp.get("currentNodeId") == node_id)
+
+    @staticmethod
     def _opp_processing_here(state, node_id):
         """对手是否正在处理我们所在站点的流程（此时提交只会被拒，等它完成）。"""
         proc = state.opp.get("currentProcess") or {}
@@ -666,12 +663,11 @@ class PlannerStrategy(BaselineStrategy):
         opp = state.opp
         if not opp or opp.get("delivered") or opp.get("retired"):
             return give_up()
-        # 证据门（V3.9）：对手本局没设过卡就不当它是埋伏者 —— replay27 把
-        # 跑在前面的 2613（历史零设卡）当威胁，三次罚站共 90 帧，
-        # 官道任务被横扫（任务分 90:180）。首卡可能吃一次亏（约 36 帧
-        # 削弱解冻），远小于对非设卡者每局白送 90 帧。
-        if not self._opp_guards_seen:
-            return give_up()
+        # V3.12 删证据门：V3.9 曾要求"对手本局设过卡"才等待，但首卡必然
+        # 没有前科（replay36: 2614 全场第一张卡 r314 掐在我们上边后，几何+
+        # 地形全中仍被放行，冻 195 帧零交付）。replay27 型误伤由地形门兜底：
+        # 三段罚站中两段目标是普通驿站，本就不该等；剩余咽喉段误伤上限
+        # TRAP_WAIT_MAX（30 帧 ≈ 6.6 分）<< 冻结 180+ 帧。
         # 地形门：实战陷阱只发生在咽喉类节点（S10/S11），普通驿站不设防
         if state.node(nxt).get("nodeType") not in self.GUARD_NODE_TYPES:
             return give_up()
@@ -750,25 +746,6 @@ class PlannerStrategy(BaselineStrategy):
             self._squad_spent += 1
             return P.a_squad_scout(t)
         return None
-
-    def _reroute_from_edge(self, state, me, blocked_next):
-        """路线边上改道：从本段起点的其他合法相邻节点中，选一条仍能到
-        目标（宫门/终点）的最快替代路；没有可行替代返回 None。"""
-        seg_start = me.get("currentNodeId")
-        if not seg_start:
-            return None
-        target = state.terminal_node if me.get("verified") else state.gate_node
-        penalty = self.planner._penalty_fn(state)
-        ecost = self.planner._edge_cost_fn(state)
-        speed = state.my_speed()
-        best = None
-        for nb, _ in state.graph.neighbors(seg_start):
-            if nb == blocked_next or state.is_blocked(nb):
-                continue
-            eta, path = state.graph.shortest_path(nb, target, speed, penalty, ecost)
-            if path and (best is None or eta < best[1]):
-                best = (nb, eta)
-        return best[0] if best else None
 
     # ---------- 窗口 ----------
 

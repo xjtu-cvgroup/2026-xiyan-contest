@@ -667,7 +667,10 @@ def test_horse_economy():
 
 
 def test_watchdog():
-    """看门狗 + 人手账本兜底：字段缺失/看不到卡也不能冻死。"""
+    """人手账本兜底：squadAvailable 字段缺失也能派削弱。
+
+    V3.12 删除了停滞看门狗改道：任务书 8.2 明确移动中只能 WAIT/续走当前
+    目标/用马，中边 MOVE 改道是非法动作，该分支在真实服务端永远无法生效。"""
     ok = True
     with open(os.path.join(DOC_DIR, "start消息.json"), encoding="utf-8") as f:
         start = json.load(f)["msg_data"]
@@ -706,39 +709,18 @@ def test_watchdog():
                     for x in a),
                 json.dumps(a, ensure_ascii=False))
 
-    # 2) 看不到敌卡的冻结：8 帧停滞后看门狗改道
+    # 2) V3.12 回归：中边不再提交非法改道 MOVE（8.2 移动中不能改道，
+    #    该看门狗分支在真实服务端只会刷非法动作计数）
     gs2 = GameState(1001)
     gs2.on_start(start)
     st2 = PlannerStrategy()
-    moved = None
+    fired = False
     for i in range(12):
         gs2.on_inquire(frozen_inquire(320 + i, guard_visible=False, squad_field=6))
         a = st2.decide(gs2)
-        mv = [x for x in a if x["action"] == "MOVE"]
-        # 排除自动补的续走 MOVE(目标 S10)——看门狗改道目标一定不是 S10
-        mv = [x for x in mv if x["targetNodeId"] != "S10"]
-        if mv:
-            moved = (i, mv[0])
-            break
-    ok &= check("看门狗: 停滞后改道离开冻结边",
-                moved is not None and moved[1]["targetNodeId"] != "S10",
-                str(moved))
-
-    # 3) 正常推进时看门狗不动作
-    gs3 = GameState(1001)
-    gs3.on_start(start)
-    st3 = PlannerStrategy()
-    fired = False
-    for i in range(12):
-        d = frozen_inquire(320 + i, guard_visible=False, squad_field=6)
-        for p in d["players"]:
-            if p["playerId"] == 1001:
-                p["edgeProgressMs"] = 6000 + i * 1000   # 每帧在走
-        gs3.on_inquire(d)
-        a = st3.decide(gs3)
         if any(x["action"] == "MOVE" and x["targetNodeId"] != "S10" for x in a):
             fired = True
-    ok &= check("看门狗: 正常推进不误触发", not fired)
+    ok &= check("看门狗: 中边不发非法改道", not fired)
     return ok
 
 
@@ -810,6 +792,13 @@ def test_active_guard():
     a = PlannerStrategy().main_action(gs_at(good=8))
     ok &= check("设卡: 好果紧张不投资",
                 not (a and a["action"] == "SET_GUARD"), str(a))
+
+    # 7) V3.12 回归：实战咽喉停靠 slack 分布 70~84（replay31 实测），旧闸门
+    #    80 把整个档位拦掉（V3.7 后 4 局 0 触发的死分支）→ 65 后正常开卡
+    a = PlannerStrategy().main_action(gs_at(round_no=300))
+    ok &= check("设卡: slack 70 档位正常开卡",
+                a and a["action"] == "SET_GUARD" and a["targetNodeId"] == "S10",
+                str(a))
     return ok
 
 
@@ -1163,59 +1152,49 @@ def test_trap_proof():
         gs.on_inquire(d)
         return gs
 
-    def armed(st):
-        """V3.9 证据门：对手设过卡后陷阱等待才生效。"""
-        st._opp_guards_seen = True
-        return st
-
-    # 0) 证据门（V3.9 replay27 回归）：对手从未设卡 → 不当埋伏者，直接推进
-    #    （曾把跑在前面的 2613 当威胁，3×30 帧罚站，任务被横扫 90:180）
+    # 0) V3.12 删证据门回归：对手从未设卡，但它占着我们的咽喉下一跳 →
+    #    照样等待。首卡必然没有前科（replay36: 2614 全场首卡掐上边冻 195 帧
+    #    零交付），误伤上限 TRAP_WAIT_MAX 30 帧 << 冻结 180+ 帧
     a = PlannerStrategy().main_action(gs_tail())
-    ok &= check("防陷阱: 无设卡前科不罚站",
-                a and a["action"] == "MOVE" and a["targetNodeId"] == "S11", str(a))
+    ok &= check("防陷阱: 首卡也设防(无前科照等)",
+                a and a["action"] == "WAIT", str(a))
 
-    # 0b) 地形门：有前科但下一跳是普通驿站（非咽喉）→ 不等待
-    st = armed(PlannerStrategy())
+    # 0b) 地形门：下一跳是普通驿站（非咽喉）→ 不等待（replay27 误伤兜底：
+    #     三段罚站中两段目标 STATION，本就不该等）
     gs = gs_tail()
     for n in gs.nodes.values():
         if n["nodeId"] == "S11":
             n["nodeType"] = "STATION"
-    a = st.main_action(gs)
+    a = PlannerStrategy().main_action(gs)
     ok &= check("防陷阱: 普通驿站不设防",
                 a and a["action"] == "MOVE", str(a))
 
-    # 1) 有前科 + 对手正站在我们的下一跳（咽喉 S11）→ 不上边，等待
-    st = armed(PlannerStrategy())
-    a = st.main_action(gs_tail())
+    # 1) 对手正站在我们的下一跳（咽喉 S11）→ 不上边，等待
+    a = PlannerStrategy().main_action(gs_tail())
     ok &= check("防陷阱: 对手占下一跳时等待",
                 a and a["action"] == "WAIT", str(a))
 
-    # 2) 有前科 + 对手在赶往 S11 且明显先到 → 同样等待
-    a = armed(PlannerStrategy()).main_action(
+    # 2) 对手在赶往 S11 且明显先到 → 同样等待
+    a = PlannerStrategy().main_action(
         gs_tail(opp_cur="S12", opp_next="S11", opp_edge="E07"))
     ok &= check("防陷阱: 对手先到下一跳时等待",
                 a and a["action"] == "WAIT", str(a))
 
     # 3) 对手已离开（在 S12 且驶向 S13）→ 正常上边
-    a = armed(PlannerStrategy()).main_action(
+    a = PlannerStrategy().main_action(
         gs_tail(opp_cur="S12", opp_next="S13", opp_edge="E08"))
     ok &= check("防陷阱: 对手离开后正常推进",
                 a and a["action"] == "MOVE" and a["targetNodeId"] == "S11", str(a))
 
     # 4) 它留了卡 → 站在节点上攻坚拆（好果2×2+坏果2×3=10 ≥ 6）
-    a = armed(PlannerStrategy()).main_action(
+    a = PlannerStrategy().main_action(
         gs_tail(opp_cur="S12", opp_next="S13", opp_edge="E08", guard_def=6))
     ok &= check("防陷阱: 留卡则节点攻坚瞬拆",
                 a and a["action"] == "BREAK_GUARD" and a["targetNodeId"] == "S11",
                 str(a))
 
-    # 4b) 证据自动侦测：节点上出现对手的有效卡 → 前科标记自动置位
-    st = PlannerStrategy()
-    st.decide(gs_tail(opp_cur="S12", opp_next="S13", opp_edge="E08", guard_def=6))
-    ok &= check("防陷阱: 见卡自动记前科", st._opp_guards_seen, "")
-
     # 5) 对峙上限：连续等待 30 帧后硬闯，不陪它耗
-    st = armed(PlannerStrategy())
+    st = PlannerStrategy()
     last = None
     for i in range(35):
         last = st.main_action(gs_tail(round_no=380 + i))
@@ -1223,7 +1202,7 @@ def test_trap_proof():
                 last and last["action"] == "MOVE", str(last))
 
     # 6) 截止吃紧也不赌：slack 越紧冻结越致命（等待 10~30 帧 vs 冻结 180+ 帧）
-    a = armed(PlannerStrategy()).main_action(gs_tail(round_no=545))
+    a = PlannerStrategy().main_action(gs_tail(round_no=545))
     ok &= check("防陷阱: 截止吃紧仍不上险边",
                 a and a["action"] == "WAIT", str(a))
 
@@ -1232,7 +1211,7 @@ def test_trap_proof():
     for p in gs.players.values():
         if p["playerId"] != 1001:
             p["delivered"] = True
-    a = armed(PlannerStrategy()).main_action(gs)
+    a = PlannerStrategy().main_action(gs)
     ok &= check("防陷阱: 对手已交付不误等",
                 a and a["action"] == "MOVE", str(a))
     return ok
@@ -1546,6 +1525,150 @@ def test_tail_farm():
     return ok
 
 
+def test_reject_join():
+    """V3.12 P1 回归（replay20/36：ACTION_REJECTED 载荷无 action 字段，
+    拉黑分支从未命中；S08 逐帧重试障碍已清的死 T04 达 38/27 帧）。"""
+    ok = True
+    with open(os.path.join(DOC_DIR, "start消息.json"), encoding="utf-8") as f:
+        start = json.load(f)["msg_data"]
+    with open(os.path.join(DOC_DIR, "inquire消息.json"), encoding="utf-8") as f:
+        inquire = json.load(f)["msg_data"]
+
+    def gs_at(round_no, tasks, events=(), obstacle_nodes=()):
+        gs = GameState(1001)
+        gs.on_start(start)
+        d = json.loads(json.dumps(inquire))
+        d["round"] = round_no
+        d["contests"] = []
+        d["tasks"] = tasks
+        d["events"] = list(events)
+        d["weather"] = {"active": [], "forecast": []}
+        for p in d["players"]:
+            if p["playerId"] == 1001:
+                p.update(state="IDLE", currentNodeId="S08", nextNodeId=None,
+                         routeEdgeId=None, currentProcess=None, buffs=[],
+                         resources={}, freshness=90.0, goodFruit=90,
+                         badFruit=1, taskScore=120, squadAvailable=8)
+            else:
+                p.update(state="MOVING", currentNodeId="S09", nextNodeId="S10",
+                         routeEdgeId="E05", currentProcess=None,
+                         delivered=False, retired=False)
+        for n in d["nodes"]:
+            n["hasObstacle"] = n["nodeId"] in obstacle_nodes
+            n["guard"] = None
+            n["resourceStock"] = {}
+            n.pop("processType", None)
+            n["processRound"] = 0
+        gs.on_inquire(d)
+        return gs
+
+    dead_t04 = {"taskId": "T_009", "taskTemplateId": "T04", "nodeId": "S08",
+                "score": 30, "active": True, "completed": False, "failed": False,
+                "ownerPlayerId": 0, "expireRound": 999, "processRound": 6}
+    live_t04 = dict(dead_t04, taskId="T_010", nodeId="S06")
+
+    # 1) 障碍已清的 T04 不再被选为目标（规划层可行性过滤）
+    st = PlannerStrategy()
+    gs = gs_at(260, [dead_t04])
+    plan = st.planner.plan(gs)
+    ok &= check("拒绝join: 死T04不入计划",
+                plan.kind != "task" or (plan.task or {}).get("taskId") != "T_009",
+                repr(plan))
+
+    # 1b) 障碍仍在的 T04 正常可选（不要误杀活任务）
+    gs = gs_at(260, [live_t04], obstacle_nodes=("S06",))
+    plan = st.planner.plan(gs)
+    ok &= check("拒绝join: 活T04仍可做",
+                plan.kind == "task" and plan.task["taskId"] == "T_010",
+                repr(plan))
+
+    # 2) 载荷缺 action 字段的拒绝：按上一帧提交的主动作 join → 拉黑该任务
+    st = PlannerStrategy()
+    st._last_main_action = {"action": "CLAIM_TASK", "taskId": "T_777"}
+    rej = {"type": "ACTION_REJECTED",
+           "payload": {"playerId": 1001, "errorCode": "TASK_REQUIREMENT_NOT_MET"}}
+    st.decide(gs_at(261, [dead_t04], events=[rej]))
+    ok &= check("拒绝join: 无action字段也拉黑",
+                st.planner.blacklist.get("T_777", 0) > 261,
+                str(st.planner.blacklist))
+
+    # 3) 上一帧主动作不是 CLAIM_TASK 时，缺字段拒绝不误伤拉黑
+    st = PlannerStrategy()
+    st._last_main_action = {"action": "MOVE", "targetNodeId": "S10"}
+    st.decide(gs_at(262, [dead_t04], events=[rej]))
+    ok &= check("拒绝join: 非任务动作不误拉黑",
+                not st.planner.blacklist, str(st.planner.blacklist))
+    return ok
+
+
+def test_weaken_discipline():
+    """V3.12 P2 回归（replay36: r315-317 连发 3 削弱清零防6，卡主站在 S10
+    原地补卡，6 人手白烧还倒亏 16 帧；replay20: 人手烧光后 S11 二次冻结）。"""
+    ok = True
+    with open(os.path.join(DOC_DIR, "start消息.json"), encoding="utf-8") as f:
+        start = json.load(f)["msg_data"]
+    with open(os.path.join(DOC_DIR, "inquire消息.json"), encoding="utf-8") as f:
+        inquire = json.load(f)["msg_data"]
+
+    def frozen(round_no=320, squad=8, opp_at_guard=False):
+        gs = GameState(1001)
+        gs.on_start(start)
+        d = json.loads(json.dumps(inquire))
+        d["round"] = round_no
+        d["contests"], d["tasks"] = [], []
+        d["weather"] = {"active": [], "forecast": []}
+        for p in d["players"]:
+            if p["playerId"] == 1001:
+                p.update(state="MOVING", currentNodeId="S09", nextNodeId="S10",
+                         routeEdgeId="E05", currentProcess=None, buffs=[],
+                         squadAvailable=squad, resources={}, freshness=95.0,
+                         goodFruit=96, badFruit=1)
+            elif opp_at_guard:
+                p.update(state="IDLE", currentNodeId="S10", nextNodeId=None,
+                         routeEdgeId=None, currentProcess=None,
+                         delivered=False, retired=False)
+            else:
+                p.update(state="MOVING", currentNodeId="S10", nextNodeId="S11",
+                         routeEdgeId="E06", currentProcess=None,
+                         delivered=False, retired=False)
+        for n in d["nodes"]:
+            n["hasObstacle"] = False
+            n["resourceStock"] = {}
+            n["guard"] = ({"ownerTeamId": "BLUE", "defense": 6, "active": True}
+                          if n["nodeId"] == "S10" else None)
+        gs.on_inquire(d)
+        return gs
+
+    def weakens(actions):
+        return [x for x in actions if x["action"] == "SQUAD_WEAKEN"]
+
+    # 1) 卡主本人停靠在卡节点上 → 不削弱（它能原地补卡，削弱=喂饵）
+    a = PlannerStrategy().decide(frozen(opp_at_guard=True))
+    ok &= check("削弱纪律: 卡主在场不削弱", not weakens(a),
+                json.dumps(a, ensure_ascii=False))
+
+    # 2) 卡主已离开 → 正常削弱
+    st = PlannerStrategy()
+    a = st.decide(frozen(round_no=331))
+    ok &= check("削弱纪律: 卡主离开后削弱",
+                weakens(a) and weakens(a)[0]["targetNodeId"] == "S10",
+                json.dumps(a, ensure_ascii=False))
+
+    # 3) 重发间隔：同一张卡 12 帧内不连发（落地要 3-5 帧，连发白扣人手）
+    burst = sum(len(weakens(st.decide(frozen(round_no=331 + i))))
+                for i in range(1, PlannerStrategy.WEAKEN_RESEND_GAP))
+    ok &= check("削弱纪律: 间隔内不连发", burst == 0, f"burst={burst}")
+    a = st.decide(frozen(round_no=331 + PlannerStrategy.WEAKEN_RESEND_GAP))
+    ok &= check("削弱纪律: 到间隔后续派", bool(weakens(a)),
+                json.dumps(a, ensure_ascii=False))
+
+    # 4) 人手保底：仅剩 3 人手（花 2 剩 1 < 2）→ 不削，留给第二张卡
+    a = PlannerStrategy().decide(frozen(squad=3))
+    ok &= check("削弱纪律: 人手保底不掏空", not weakens(a),
+                json.dumps(a, ensure_ascii=False))
+    return ok
+
+
 def main():
     ok = test_codec()
     ok &= test_state_and_strategy()
@@ -1566,6 +1689,8 @@ def main():
     ok &= test_tempo_guard()
     ok &= test_replay25()
     ok &= test_tail_farm()
+    ok &= test_reject_join()
+    ok &= test_weaken_discipline()
     print()
     print("ALL PASS" if ok else "SOME FAILED")
     sys.exit(0 if ok else 1)

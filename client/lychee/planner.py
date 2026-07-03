@@ -308,6 +308,12 @@ class TaskPlanner:
             res = state.me.get("resources") or {}
             if not any(res.get(rt, 0) > 0 for rt in required):
                 return None
+        # T04 目标障碍已被非 T04 方式清除 → 该任务永久失败（任务书 5.2），
+        # 服务端仍标 active=true，提交只会吃 TASK_REQUIREMENT_NOT_MET
+        # （replay20/36：S08 站着逐帧重试死任务 38/27 帧）
+        if task.get("taskTemplateId") == "T04" \
+                and not state.has_obstacle(task.get("nodeId")):
+            return None
 
         g = state.graph
         pos, f_to = self._position_for(state, task, cur, speed, penalty, ecost)
