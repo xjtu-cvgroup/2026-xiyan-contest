@@ -167,6 +167,14 @@ class Plan:
 class TaskPlanner:
     def __init__(self, logger=None):
         self.log = logger
+        # 可调常数镜像为实例属性（V3.18）：镜像自博弈 A/B 时按实例覆盖，
+        # 模块全局会同时改到对局双方。语义与模块级默认值完全一致
+        self.RACE_BAND = RACE_BAND
+        self.RACE_FRAME_MULT = RACE_FRAME_MULT
+        self.SWITCH_MARGIN = SWITCH_MARGIN
+        self.FUNNEL_GUARD_PRIOR = FUNNEL_GUARD_PRIOR
+        self.OFFPATH_RACE_FLOOR = OFFPATH_RACE_FLOOR
+        self.SHADOW_CHOKE_PENALTY = SHADOW_CHOKE_PENALTY
         self.blacklist = {}   # taskId -> 解禁帧（吃到拒绝后临时拉黑）
         self._shadow_cache = (-1, frozenset())  # (round, 被对手抢先的节点集)
         self._opp_path_cache = (-1, frozenset())  # (round, 对手前进路线节点集)
@@ -249,7 +257,7 @@ class TaskPlanner:
         best_key = max(cands, key=lambda k: cands[k][0])
         held = self._committed
         if held in cands and held != best_key \
-                and cands[best_key][0] < cands[held][0] * SWITCH_MARGIN:
+                and cands[best_key][0] < cands[held][0] * self.SWITCH_MARGIN:
             best_key = held
         self._committed = best_key
         return best_key
@@ -284,7 +292,7 @@ class TaskPlanner:
                 oe = self._opp_eta(state, choke)
                 if oe != math.inf:
                     t_o = state.round + oe
-                    prior = 1.0 if self._guard_seen else FUNNEL_GUARD_PRIOR
+                    prior = 1.0 if self._guard_seen else self.FUNNEL_GUARD_PRIOR
                     toll_direct = self._funnel_toll(
                         state, choke, t_o, path, state.round)
                     ctx = (choke, t_o, prior, toll_direct)
@@ -442,7 +450,7 @@ class TaskPlanner:
                 return 1.0
             # 不在对手前进路线上的资源：它专程绕过来的概率低，折扣设下限
             if node_id not in opp_path:
-                d = max(d, OFFPATH_RACE_FLOOR)
+                d = max(d, self.OFFPATH_RACE_FLOOR)
             return d
 
         def stock_claimables(node):
@@ -593,7 +601,7 @@ class TaskPlanner:
         if opp_eta < f_to:
             d = CONTEST_RISK_DISCOUNT
             if pos not in self._opp_path_nodes(state):
-                d = max(d, OFFPATH_RACE_FLOOR)
+                d = max(d, self.OFFPATH_RACE_FLOOR)
             value *= d
 
         # 资源捆绑（V3.6）：任务点及其通往宫门沿途的可领资源计入任务估值。
@@ -655,7 +663,7 @@ class TaskPlanner:
                 choke, t_o, _, _ = ctx
                 my_eta = state.graph.all_frames(cur).get(choke, math.inf)
                 if my_eta != math.inf and \
-                        abs(state.round + my_eta - t_o) <= RACE_BAND:
+                        abs(state.round + my_eta - t_o) <= self.RACE_BAND:
                     active = True
         self._race_cache = (state.round, active)
         return active
@@ -678,7 +686,7 @@ class TaskPlanner:
         """
         v = FRESH_VALUE_PER_FRAME + TIME_SCORE_PER_FRAME
         if race_adjust and self.race_mode(state):
-            v *= RACE_FRAME_MULT
+            v *= self.RACE_FRAME_MULT
         return v
 
     @staticmethod
@@ -723,7 +731,7 @@ class TaskPlanner:
             p = time_penalty(nid)
             if nid in shadow:
                 node = state.node(nid)
-                p += (SHADOW_CHOKE_PENALTY
+                p += (self.SHADOW_CHOKE_PENALTY
                       if node.get("nodeType") in CHOKE_TYPES
                       else SHADOW_NODE_PENALTY)
             return p
