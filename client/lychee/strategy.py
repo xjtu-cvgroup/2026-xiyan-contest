@@ -297,6 +297,14 @@ class PlannerStrategy(BaselineStrategy):
     LOITER_MIN_SLACK = 110      # 蹲刷要求的最小交付余量（帧）
     LOITER_BASE_CAP = 110       # 任务基础分达到该值后不再蹲（末档里程碑已到手）
     LOITER_BUDGET = 50          # 整局蹲刷总预算（帧），有限下注
+    # S10 水路收租（V3.51）：任务分封顶且余量充足时，站在武关截对手
+    # 刷新任务；若对手小分队耗尽，再由既有设卡逻辑兑现长边冻结。
+    S10_TOLL_BASE = 150
+    S10_TOLL_MIN_SLACK = 90
+    S10_TOLL_MAX_OPP_ETA = 170
+    S10_TOLL_ROUTE_TOLERANCE = 20
+    S10_TOLL_BUDGET = 140
+    S10_TOLL_TASK_MAX_PROC = 5
 
     # ---- 情报（INTEL，V3.12）----
     INTEL_DISTANCE_LIMIT = 15   # 任务书 3.3.4：目标距离超过 15 时使用被拒
@@ -339,6 +347,7 @@ class PlannerStrategy(BaselineStrategy):
         self._opp_min_gate_eta = float("inf")   # 对手宫门 ETA 历史最小值
         self._opp_retreated = False      # 对手曾回头（ETA 显著回升过）
         self._loiter_spent = 0           # 尾段蹲刷已用帧数（预算制）
+        self._s10_toll_hold_spent = 0    # S10 终局驻守已用帧数（预算制）
         self._last_main_action = None    # 上一帧提交的主车队动作（拒绝反馈的 join 键）
         self._clear_sent = {}            # nodeId -> 小分队清障派出帧（防重试风暴）
         self._reinforce_sent = {}        # nodeId -> 小分队增援派出帧（防重试风暴）
@@ -801,6 +810,8 @@ class PlannerStrategy(BaselineStrategy):
             # 等 RUSH 的长空转正是情报最值钱的地方：355 帧后标宫门，验核 6→3
             return self._idle_upgrade(state, plan)
 
+        s10_toll_hold = self._s10_toll_hold_active(state, plan, cur)
+
         # 固定处理站点必须先处理完才能离站。
         # 首次仍打窗口争先手；一旦 S02 DOCK 出现 DRAW/重复抑制，就退回
         # 奇偶错峰，避免镜像对手把整局锁死在码头窗口。
@@ -822,6 +833,16 @@ class PlannerStrategy(BaselineStrategy):
         guard = self._guard_opportunity(state, cur, plan)
         if guard:
             return guard
+
+        # 水路领先局的 S10 终局模式：任务分已封顶时，脚下刷新任务对我方
+        # 可能是 0 分，但能截掉对手最后一档任务组件；无任务就驻守等待
+        # 对手进入可冻结窗口，不顺手领低价值资源打断。
+        if s10_toll_hold:
+            deny = self._s10_toll_denial_task(state, cur)
+            if deny:
+                return P.a_claim_task(deny["taskId"])
+            self._s10_toll_hold_spent += 1
+            return P.a_wait()
 
         # 任务：已在执行位置就开始读条（任务是独占对象，不让行，靠出牌博弈）。
         # V3.8 顺序修正：先抢会被偷的稀缺资源再做任务 —— replay25 我们在 S03
@@ -1096,6 +1117,11 @@ class PlannerStrategy(BaselineStrategy):
         opp = state.opp or {}
         if not opp or opp.get("delivered") or opp.get("retired"):
             return False
+        opp_task = opp.get("taskScore", 0) or 0
+        opp_squads = opp.get("squadAvailable")
+        freeze_option = opp_squads is not None and opp_squads <= 1
+        if opp_task >= self.S10_TOLL_BASE and not freeze_option:
+            return False
         if opp.get("currentNodeId") == cur and not opp.get("routeEdgeId"):
             return False
         return True
@@ -1246,6 +1272,65 @@ class PlannerStrategy(BaselineStrategy):
             self.log.info("loiter for task refresh @%s (%d/%d)",
                           cur, self._loiter_spent, self.LOITER_BUDGET)
         return True
+
+    def _s10_toll_hold_active(self, state, plan, cur):
+        """S10 收租驻守：只在 replay99 型水路领先终局打开。
+
+        这不是泛化蹲刷：必须已经任务分封顶、仍有充足交付 slack、对手未
+        交付且高效路仍经过 S10。收益来自截刷新任务和等待对手小分队耗尽
+        后的既有设卡冻结。
+        """
+        if cur != "S10" or not plan or plan.kind != "deliver":
+            return False
+        if state.me.get("verified") or state.me.get("taskScore", 0) < self.S10_TOLL_BASE:
+            return False
+        if plan.slack < self.S10_TOLL_MIN_SLACK:
+            return False
+        if self._s10_toll_hold_spent >= self.S10_TOLL_BUDGET:
+            return False
+        opp = state.opp or {}
+        if not opp or opp.get("delivered") or opp.get("retired"):
+            return False
+        opp_task = opp.get("taskScore", 0) or 0
+        opp_squads = opp.get("squadAvailable")
+        freeze_option = opp_squads is not None and opp_squads <= 1
+        if opp_task >= self.S10_TOLL_BASE and not freeze_option:
+            return False
+        if opp.get("currentNodeId") == cur and not opp.get("routeEdgeId"):
+            return False
+        opp_eta = self.planner._opp_eta(state, cur)
+        if not (0 < opp_eta <= self.S10_TOLL_MAX_OPP_ETA):
+            return False
+        opp_to_gate = self.planner._opp_eta(state, state.gate_node)
+        here_to_gate, path = state.graph.shortest_path(cur, state.gate_node,
+                                                       P.BASE_SPEED)
+        if not path or opp_to_gate == float("inf"):
+            return False
+        return opp_eta + here_to_gate <= opp_to_gate + self.S10_TOLL_ROUTE_TOLERANCE
+
+    def _s10_toll_denial_task(self, state, cur):
+        """驻守 S10 时，截掉对手仍有边际的脚下刷新任务。"""
+        if cur != "S10":
+            return None
+        opp = state.opp or {}
+        if (opp.get("taskScore", 0) or 0) >= self.S10_TOLL_BASE:
+            return None
+        opp_eta = self.planner._opp_eta(state, cur)
+        best = None
+        best_key = None
+        for t in state.claimable_tasks():
+            if t.get("nodeId") != cur or (t.get("score", 0) or 0) <= 0:
+                continue
+            proc = t.get("processRound", 4) or 4
+            if proc > self.S10_TOLL_TASK_MAX_PROC:
+                continue
+            if opp_eta <= proc:
+                continue
+            key = (t.get("score", 0) or 0, -proc)
+            if best is None or key > best_key:
+                best = t
+                best_key = key
+        return best
 
     def _same_node_low_score_task(self, state, plan, cur):
         """小步兜底：准备直送/蹲刷时，先吃脚下 90->120 档的短读条任务。"""
@@ -2244,6 +2329,8 @@ class PlannerStrategy(BaselineStrategy):
         mine, theirs = self._contest_points(state, contest)
         if mine >= 2 or theirs >= 2:
             return P.CARD_ABSTAIN
+        if self._dock_low_stake_abandon(state, contest):
+            return P.CARD_ABSTAIN
 
         # (牌, 成本折分)：成本 = 消耗资源的机会价值
         my_options = [(P.CARD_ABSTAIN, 0.0)]
@@ -2293,6 +2380,22 @@ class PlannerStrategy(BaselineStrategy):
         best_ev = scored[0][0]
         ties = [card for ev, card in scored if best_ev - ev <= self.CARD_TIE_EPS]
         return rng.choice(ties)
+
+    def _dock_low_stake_abandon(self, state, contest):
+        """S02 首次 DRAW 后的第二窗止损。
+
+        首窗仍争先手；一旦已经 DRAW 过，S02 的真实盘口通常只剩几帧，
+        而继续献贡会烧硬通货。镜像死锁由处理站错峰解决，不靠继续打牌。
+        """
+        key = self._window_pressure_key(contest)
+        if key != ("S02", P.CONTEST_DOCK):
+            return False
+        count, last_round = self._window_draw_pressure.get(key, (0, -999))
+        if count < 1 or state.round - last_round > self.WINDOW_DRAW_PRESSURE_DECAY:
+            return False
+        if state.has_move_buff():
+            return False
+        return True
 
     def _window_draw_break_card(self, state, contest, my_options, hist, beat):
         """重复平局后跳出镜像牌型；只处理已被证实卡住的 S02 固定处理窗。"""

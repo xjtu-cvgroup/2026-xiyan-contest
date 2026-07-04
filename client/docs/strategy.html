@@ -646,9 +646,13 @@ slack +30 帧，纯农画像豁免</b></td>
 取消 CARD_MIX_RATE 软权重混合，严格优势牌不再随机偏离；只在 EPS 平手集随机，
 S02 镜像平局仍交给 DRAW 后破局逻辑</b></td>
 <td>回应 replay99 第二窗决胜拍偏离献贡；暂不动动态盘口/整窗弃权，避免重开 S02 弃权反同步风险；selftest 全绿</td></tr>
+<tr><td><b>3.51 s10-toll-hold</b></td><td><b>水路领先赢法小步落地：
+S02 首次 DRAW 后第二窗低盘口弃权止损；任务分封顶且站住 S10 时驻守截胡对手刷新任务，
+无任务则等待对手进入人手耗尽后的冻结设卡窗口</b></td>
+<td>回应 replay99“水路少冰但领先权未变现”；不全局删除设卡，继续沿用 v3.49 对手小分队余额核算；selftest 加 S02/S10 钉子</td></tr>
 </table>
 
-<p class="foot">仓库 client/docs/strategy.html · 与代码同步于 3.50-card-dominated-mix-off ·
+<p class="foot">仓库 client/docs/strategy.html · 与代码同步于 3.51-s10-toll-hold ·
 自测 <code>python3 client/selftest.py</code></p>
 </div>
 

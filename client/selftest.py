@@ -440,6 +440,7 @@ def test_contention():
     random.seed(42)
     gs = mirror_state(1001, 44)
     contest = {"contestId": "C_X", "contestType": "DOCK",
+               "targetNodeId": "S02",
                "redPlayerId": 1001, "bluePlayerId": 2002}
     st = PlannerStrategy()
     picks = [st.pick_card(gs, contest) for _ in range(200)]
@@ -482,6 +483,11 @@ def test_contention():
     picks = {st.pick_card(gs, live) for _ in range(80)}
     ok &= check("出牌: 对手献贡画像下不随机偏离献贡",
                 picks == {P.CARD_XIAN_GONG}, f"{sorted(picks)}")
+    st = PlannerStrategy()
+    st._window_draw_pressure[("S02", P.CONTEST_DOCK)] = (1, gs.round - 1)
+    picks = {st.pick_card(gs, live) for _ in range(20)}
+    ok &= check("出牌: S02 首个DRAW后第二窗止损弃权",
+                picks == {P.CARD_ABSTAIN}, f"{sorted(picks)}")
 
     # ---- 移动中只有小分队动作时补显式 MOVE（防服务端暂停推进） ----
     # 场景: r360 在 E09 上移动、接近宫门 -> 触发探路，同包必须补 MOVE 保持推进
@@ -3379,8 +3385,8 @@ def test_card_profile():
          "payload": {"contestType": P.CONTEST_DOCK, "targetNodeId": "S02"}},
     ]
     st._absorb_feedback(s02)
-    ok &= check("画像: S02 连续平局后红方改打兵争破镜像",
-                st.pick_card(s02, deadlock_contest) == P.CARD_BING_ZHENG, "")
+    ok &= check("画像: S02 连续平局后止损弃权",
+                st.pick_card(s02, deadlock_contest) == P.CARD_ABSTAIN, "")
 
     # 3) 种子 RNG：同 matchId+playerId 的两个实例出牌序列完全一致
     #    （回放回归可复现；对手不知道种子派生方式，博弈价值不受影响）
@@ -4294,6 +4300,45 @@ def test_front_tempo_tail_follow():
     ok &= check("前段保速: S10 同点 90->120 任务要补",
                 plan.kind == "task" and plan.position == "S10",
                 repr(plan))
+
+    # replay99 型水路终局：我方已 150 且站住 S10，脚下 30 分任务对自己
+    # 是 0 边际，但能截掉对手最后一档任务组件；驻守模式应先截任务。
+    t_s10_deny = {"taskId": "T_S10_DENY", "taskTemplateId": "T01",
+                  "nodeId": "S10", "processRound": 4, "score": 30,
+                  "expireRound": 540, "active": True, "completed": False,
+                  "failed": False, "ownerPlayerId": 0,
+                  "protectionPlayerId": 0, "routeBucket": P.WATER}
+    gs = gs_replay93("S10", 150, (t_s10_deny,), "S09", "S10", "E05",
+                     opp_task_score=120)
+    gs.players[2002]["edgeProgressMs"] = 1000
+    gs.nodes["S10"]["guard"] = {"ownerTeamId": gs.my_team, "defense": 6,
+                                "maxDefense": 7, "active": True}
+    a = PlannerStrategy().main_action(gs, Plan("deliver", slack=130))
+    ok &= check("S10收租: 封顶后截胡对手任务波次",
+                a and a["action"] == "CLAIM_TASK"
+                and a["taskId"] == "T_S10_DENY", str(a))
+
+    gs = gs_replay93("S10", 150, (), "S09", "S10", "E05",
+                     opp_task_score=120)
+    gs.players[2002]["edgeProgressMs"] = 1000
+    gs.nodes["S10"]["guard"] = {"ownerTeamId": gs.my_team, "defense": 6,
+                                "maxDefense": 7, "active": True}
+    gs.nodes["S10"]["resourceStock"] = {P.INTEL: 1}
+    a = PlannerStrategy().main_action(gs, Plan("deliver", slack=130))
+    ok &= check("S10收租: 无任务时驻守不顺手领情报",
+                a and a["action"] == "WAIT", str(a))
+
+    gs = gs_replay93("S10", 150, (), "S09", "S10", "E05",
+                     opp_task_score=150)
+    gs.players[2002]["edgeProgressMs"] = 1000
+    gs.players[2002]["squadAvailable"] = 8
+    gs.nodes["S10"]["guard"] = {"ownerTeamId": gs.my_team, "defense": 6,
+                                "maxDefense": 7, "active": True}
+    st_no_hold = PlannerStrategy()
+    active = st_no_hold._s10_toll_hold_active(gs, Plan("deliver", slack=130),
+                                              "S10")
+    ok &= check("S10收租: 对手也封顶且人手充足则不驻守",
+                not active, str(active))
 
     t_s09_same = {"taskId": "T_S09_SAME_LOW", "taskTemplateId": "T01",
                   "nodeId": "S09", "processRound": 5, "score": 15,
