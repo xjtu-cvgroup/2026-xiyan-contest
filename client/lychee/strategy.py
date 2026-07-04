@@ -666,6 +666,10 @@ class PlannerStrategy(BaselineStrategy):
             # 情报各 2 帧读条在竞争带内是胜负帧，赢下漏斗后有的是空转帧补
             claim_list = self.RACE_CLAIM_ONLY \
                 if self.planner.race_mode(state) else self.CLAIM_EN_ROUTE
+            if self.planner._front_tempo_active(
+                    state, cur, me.get("taskScore", 0)):
+                claim_list = tuple(rt for rt in claim_list
+                                   if rt in self.RACE_CLAIM_ONLY)
             if plan.kind == "deliver" and (
                     state.round >= RUSH_EARLIEST
                     or self.planner.farm_rusher_pressure(state, cur)):

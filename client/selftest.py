@@ -1972,6 +1972,7 @@ def test_latent_mechanics():
 
     # ---- 文书 1: 顺路领取过所（充实 YAN_DIE 出牌池） ----
     gs = base_state(cur="S03", resources={})
+    gs.me["taskScore"] = 90  # 非前段追击态：旧的顺路文书策略仍保留
     gs.nodes["S03"]["resourceStock"] = {"PASS_TOKEN": 1}
     plan = st.planner.plan(gs)
     a = PlannerStrategy().main_action(gs, plan)
@@ -3157,6 +3158,88 @@ def test_farm_meta():
     return ok
 
 
+def test_front_tempo_tail_follow():
+    """V3.28：S03 被对手小幅抢先时尾随主路，不再读低进度/山线任务。"""
+    ok = True
+    with open(os.path.join(DOC_DIR, "start消息.json"), encoding="utf-8") as f:
+        start = json.load(f)["msg_data"]
+    with open(os.path.join(DOC_DIR, "inquire消息.json"), encoding="utf-8") as f:
+        inquire = json.load(f)["msg_data"]
+
+    def gs_front(bad=0, stock=False, tasks=True):
+        gs = GameState(1001)
+        gs.on_start(start)
+        d = json.loads(json.dumps(inquire))
+        d["round"], d["phase"] = 90, "NORMAL"
+        d["contests"] = []
+        d["weather"] = {"active": [], "forecast": []}
+        d["tasks"] = []
+        if tasks:
+            d["tasks"] = [
+                {"taskId": "T_S03", "taskTemplateId": "T01",
+                 "nodeId": "S03", "processRound": 3, "score": 30,
+                 "expireRound": 300, "active": True, "completed": False,
+                 "failed": False, "ownerPlayerId": 0,
+                 "protectionPlayerId": 0},
+                {"taskId": "T_S06", "taskTemplateId": "T04",
+                 "nodeId": "S06", "processRound": 6, "score": 30,
+                 "expireRound": 300, "active": True, "completed": False,
+                 "failed": False, "ownerPlayerId": 0,
+                 "protectionPlayerId": 0},
+            ]
+        total = gs.graph.edge_total_move(gs.graph.edges["E03"])
+        for p in d["players"]:
+            if p["playerId"] == 1001:
+                p.update(state="IDLE", currentNodeId="S03", nextNodeId=None,
+                         routeEdgeId=None, currentProcess=None, buffs=[],
+                         resources={}, freshness=98.0, goodFruit=90,
+                         badFruit=bad, taskScore=0, verified=False)
+            else:
+                p.update(state="MOVING", currentNodeId="S03", nextNodeId="S07",
+                         routeEdgeId="E03", edgeTotalMs=total,
+                         edgeProgressMs=6000, currentProcess=None, buffs=[],
+                         delivered=False, retired=False, taskScore=0)
+        for n in d["nodes"]:
+            n["hasObstacle"] = n["nodeId"] == "S06" and tasks
+            n["guard"] = None
+            n["resourceStock"] = {}
+            if stock and n["nodeId"] == "S03":
+                n["resourceStock"] = {P.ICE_BOX: 1, P.PASS_TOKEN: 1,
+                                      P.INTEL: 1}
+            n.pop("processType", None)
+            n["processRound"] = 0
+        gs.on_inquire(d)
+        return gs
+
+    st = PlannerStrategy()
+    gs = gs_front(tasks=True)
+    plan = st.planner.plan(gs)
+    ok &= check("前段尾随: S03/S06 低进度任务不再截停",
+                plan.kind != "task", repr(plan))
+    a = st.main_action(gs, plan)
+    ok &= check("前段尾随: 无关键资源时直接追 S07",
+                a and a["action"] == "MOVE" and a["targetNodeId"] == "S07",
+                f"{plan} -> {a}")
+
+    st2 = PlannerStrategy()
+    gs = gs_front(stock=True, tasks=False)
+    plan = st2.planner.plan(gs)
+    a = st2.main_action(gs, plan)
+    ok &= check("前段尾随: 顺路领取收缩到硬件资源",
+                a and a["action"] == "CLAIM_RESOURCE"
+                and a["resourceType"] == P.ICE_BOX,
+                f"{plan} -> {a}")
+
+    pl_poor = PlannerStrategy().planner
+    pen_poor = pl_poor._penalty_fn(gs_front(bad=0, tasks=False))
+    pl_rich = PlannerStrategy().planner
+    pen_rich = pl_rich._penalty_fn(gs_front(bad=2, tasks=False))
+    ok &= check("前段尾随: 可秒破时咽喉阴影降档",
+                pen_rich("S10") + 10 < pen_poor("S10"),
+                f"poor={pen_poor('S10'):.1f} rich={pen_rich('S10'):.1f}")
+    return ok
+
+
 def main():
     ok = test_codec()
     ok &= test_state_and_strategy()
@@ -3191,6 +3274,7 @@ def main():
     ok &= test_card_profile()
     ok &= test_opp_profile()
     ok &= test_farm_meta()
+    ok &= test_front_tempo_tail_follow()
     print()
     print("ALL PASS" if ok else "SOME FAILED")
     sys.exit(0 if ok else 1)

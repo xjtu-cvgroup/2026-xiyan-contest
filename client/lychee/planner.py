@@ -57,6 +57,22 @@ FORWARD_BIAS_CUT = 0.0      # >0 时改用阶跃：进度 < CUT 的节点吃 FLO
 FORWARD_BIAS_AUTO = 0.6     # 冲锋型对手在线识别命中时的地板（strategy.
                             # _fwd_rush_tick 按位置/行为置 forward_rush_opp，
                             # 不认对手 ID——地图会变对手会变，用户纠偏）
+# 前段推进保护（V3.28）：reports vs2986/vs2738 同构败因不是某个任务本身
+# 亏，而是 S03 原地/邻接任务 + 山线资源包把路线承诺拖进 S06/S08，
+# 对手则跳过 S03，在 S07/S10 官道沿途补齐 150 分并早 55+ 帧交付。
+# 对手只先走几帧时不该改道认怂，而是尾随主路；所以这里只拦低进度/
+# 山线停留，不拦官道跟随。过了中段后硬件资源价值上调，补回前面放弃的
+# 非关键经济。
+FRONT_TEMPO_ENABLED = True
+FRONT_TEMPO_PROGRESS_CUT = 0.22
+FRONT_TEMPO_BASE_CAP = 90
+FRONT_TEMPO_OPP_LEAD = 3
+FRONT_TEMPO_BLOCK_ROUTE_TYPES = {P.MOUNTAIN}
+LATE_RESOURCE_PROGRESS = 0.62
+LATE_RESOURCE_MULT = 1.25
+BREAK_GUARD_EXPECT_DEFENSE = 6
+BREAK_SHADOW_CHOKE_MULT = 0.35
+BREAK_FUNNEL_TAX_MULT = 0.45
 # 阻挡节点的寻路惩罚按真实处理代价估：会计入 ETA，不能虚高
 OBSTACLE_PENALTY = 10       # 清障 6 帧读条 + 1 好果 / 强通税 8 帧
 GUARD_PENALTY = 35          # 强通时间税 min(40, 10+防守值×5) 量级
@@ -290,6 +306,15 @@ class TaskPlanner:
         self.FORWARD_BIAS_FLOOR = FORWARD_BIAS_FLOOR
         self.FORWARD_BIAS_CUT = FORWARD_BIAS_CUT
         self.FORWARD_BIAS_AUTO = FORWARD_BIAS_AUTO
+        self.FRONT_TEMPO_ENABLED = FRONT_TEMPO_ENABLED
+        self.FRONT_TEMPO_PROGRESS_CUT = FRONT_TEMPO_PROGRESS_CUT
+        self.FRONT_TEMPO_BASE_CAP = FRONT_TEMPO_BASE_CAP
+        self.FRONT_TEMPO_OPP_LEAD = FRONT_TEMPO_OPP_LEAD
+        self.LATE_RESOURCE_PROGRESS = LATE_RESOURCE_PROGRESS
+        self.LATE_RESOURCE_MULT = LATE_RESOURCE_MULT
+        self.BREAK_GUARD_EXPECT_DEFENSE = BREAK_GUARD_EXPECT_DEFENSE
+        self.BREAK_SHADOW_CHOKE_MULT = BREAK_SHADOW_CHOKE_MULT
+        self.BREAK_FUNNEL_TAX_MULT = BREAK_FUNNEL_TAX_MULT
         self.forward_rush_opp = False    # strategy 在线识别结论
         self._fwd_total = None
         self.SHADOW_CHOKE_PENALTY = SHADOW_CHOKE_PENALTY
@@ -531,6 +556,10 @@ class TaskPlanner:
         d_dead = via[0] - toll_direct[0]
         d_tax = max(-FUNNEL_TAX_DELTA_CAP,
                     min(FUNNEL_TAX_DELTA_CAP, via[1] - toll_direct[1]))
+        if d_tax > 0 and self._can_break_expected_guard(state, choke):
+            # 有足够坏果/富余好果时，前方卡点不是满额强通税，而是到点秒拆。
+            # 仍保留死等差：若对手能在长边中途掐成卡，边上冻结风险不在这里消除。
+            d_tax *= self.BREAK_FUNNEL_TAX_MULT
         return (d_dead + d_tax) * prior
 
     # ================= 破关悬赏估值（V3.12） =================
@@ -634,7 +663,8 @@ class TaskPlanner:
         bonus, frames = 0.0, 0
         node = state.nodes.get(pos) or {}
         for rtype, value in stock_claimables(node):
-            v = value * race_discount(pos, my_raw.get(pos, 0))
+            v = self._resource_phase_value(state, pos, value) \
+                * race_discount(pos, my_raw.get(pos, 0))
             if pos in opp_path:
                 v *= DENIAL_FACTOR
             bonus += v
@@ -644,7 +674,8 @@ class TaskPlanner:
             nb_node = state.nodes.get(nb) or {}
             for rtype, value in stock_claimables(nb_node):
                 eta = my_raw.get(pos, 0) + frames + node_raw.get(nb, 0)
-                v = CHAIN_WEIGHT * value * race_discount(nb, eta)
+                v = CHAIN_WEIGHT * self._resource_phase_value(state, nb, value) \
+                    * race_discount(nb, eta)
                 if nb in opp_path:
                     v *= DENIAL_FACTOR
                 bonus += v
@@ -667,6 +698,8 @@ class TaskPlanner:
                 f_to, path = g.shortest_path(cur, node_id, speed, penalty, ecost)
                 if not path:
                     continue
+                if self._front_tempo_resource_blocked(state, cur, node_id, path):
+                    continue
                 f_to += self._backtrack_tax(state, cur, node_id)
                 f_back, back = g.shortest_path(node_id, state.gate_node, speed,
                                                penalty, ecost)
@@ -675,7 +708,8 @@ class TaskPlanner:
                 detour = max(0, f_to + f_back - to_gate) + CLAIM_FRAMES
                 if self._time_detour(state, cur, node_id) + CLAIM_FRAMES > slack:
                     continue  # 硬约束用时间口径
-                v = value * race_discount(node_id, my_raw.get(node_id, 0))
+                v = self._resource_phase_value(state, node_id, value) \
+                    * race_discount(node_id, my_raw.get(node_id, 0))
                 if node_id in opp_path:
                     v *= DENIAL_FACTOR      # 抢的是对手碗里的
                 # 链式加成：拿下该点后，去宫门路上的其他资源顺路半价计
@@ -689,7 +723,8 @@ class TaskPlanner:
                         d2 = race_discount(nb, eta2)
                         if nb in opp_path:
                             val2 = val2 * DENIAL_FACTOR
-                        chain += CHAIN_WEIGHT * val2 * d2
+                        chain += CHAIN_WEIGHT \
+                            * self._resource_phase_value(state, nb, val2) * d2
                 # 资源不计漏斗差（V3.16）也不计竞速溢价（V3.18）：资源面值
                 # ≤19，漏斗模型在竞速带附近的到达估计噪声（±2 帧出发差 →
                 # ±40 帧期望费）会淹没它们；路线级灾难（36/56/57 山路口袋）
@@ -732,6 +767,9 @@ class TaskPlanner:
         g = state.graph
         pos, f_to = self._position_for(state, task, cur, speed, penalty, ecost)
         if pos is None:
+            return None
+        if self._front_tempo_task_blocked(state, task, cur, pos, speed,
+                                          penalty, ecost, base):
             return None
         f_to += self._backtrack_tax(state, cur, pos)
 
@@ -932,13 +970,8 @@ class TaskPlanner:
             self._fwd_total = d if p else 0
         return self._fwd_total
 
-    def _forward_factor(self, state, node_id):
-        """地图进度系数：起点附近 → FLOOR，宫门方向 → 1.0（裸帧度量）。"""
-        floor = self.FORWARD_BIAS_FLOOR
-        if self.forward_rush_opp:
-            floor = min(floor, self.FORWARD_BIAS_AUTO)
-        if floor >= 1.0:
-            return 1.0
+    def _map_progress(self, state, node_id):
+        """节点到宫门的裸帧进度：起点 0，宫门 1。"""
         total = self._map_total(state)
         if not total:
             return 1.0
@@ -946,7 +979,111 @@ class TaskPlanner:
             node_id, state.gate_node, P.BASE_SPEED)
         if not path:
             return 1.0
-        progress = max(0.0, min(1.0, 1.0 - remain / total))
+        return max(0.0, min(1.0, 1.0 - remain / total))
+
+    def _front_tempo_active(self, state, cur, base=None):
+        """开局簇推进保护：对手只领先几帧时，先尾随主路再补经济。"""
+        if not self.FRONT_TEMPO_ENABLED or state.phase != P.PHASE_NORMAL:
+            return False
+        base = state.me.get("taskScore", 0) if base is None else base
+        if (base or 0) >= self.FRONT_TEMPO_BASE_CAP:
+            return False
+        opp = state.opp or {}
+        if opp.get("delivered") or opp.get("retired"):
+            return False
+        if self._map_progress(state, cur) >= self.FRONT_TEMPO_PROGRESS_CUT:
+            return False
+        if not self._opp_on_my_forward_path(state, cur):
+            return False
+        return self._opp_gate_lead(state, cur) >= self.FRONT_TEMPO_OPP_LEAD
+
+    def _opp_gate_lead(self, state, cur):
+        """对手相对我方到宫门的裸帧领先；正数=对手更快到宫门。"""
+        if not cur or not state.graph:
+            return 0.0
+        my_gate = state.graph.all_frames(cur).get(state.gate_node, math.inf)
+        opp_gate = self._opp_eta(state, state.gate_node)
+        if my_gate == math.inf or opp_gate == math.inf:
+            return 0.0
+        return my_gate - opp_gate
+
+    def _opp_on_my_forward_path(self, state, cur):
+        """对手当前位置/下一站是否在我方当前前路上；水路绕行不触发尾随。"""
+        opp = state.opp or {}
+        opp_pos = opp.get("nextNodeId") or opp.get("currentNodeId")
+        if not opp_pos or not cur or not state.graph:
+            return False
+        _, path = state.graph.shortest_path(cur, state.gate_node, P.BASE_SPEED)
+        return opp_pos in (path or [])[1:]
+
+    def _front_tempo_blocks_path(self, state, path):
+        """前期不为单点收益切入山线；官道/水路硬件链仍按原口径争。"""
+        if len(path or ()) < 2:
+            return False
+        for a, b in zip(path, path[1:]):
+            edge = state.graph.edge_between(a, b)
+            if edge and edge.get("routeType") in FRONT_TEMPO_BLOCK_ROUTE_TYPES:
+                return True
+        return False
+
+    def _front_tempo_task_blocked(self, state, task, cur, pos, speed,
+                                  penalty, ecost, base):
+        """早段路线承诺闸门：低进度/山线任务先让，等 S07/S10 波次补分。"""
+        if not self._front_tempo_active(state, cur, base):
+            return False
+        _, path = state.graph.shortest_path(cur, pos, speed, penalty, ecost)
+        if self._front_tempo_blocks_path(state, path):
+            return True
+        task_node = task.get("nodeId") or pos
+        progress = min(self._map_progress(state, pos),
+                       self._map_progress(state, task_node))
+        return progress < self.FRONT_TEMPO_PROGRESS_CUT
+
+    def _front_tempo_resource_blocked(self, state, cur, node_id, path):
+        """早段不专程钻支线拿资源；贴着对手主路的硬件资源仍可争。"""
+        if not self._front_tempo_active(state, cur):
+            return False
+        if node_id == cur:
+            return False
+        if self._front_tempo_blocks_path(state, path):
+            return True
+        if self._map_progress(state, node_id) < self.FRONT_TEMPO_PROGRESS_CUT \
+                and node_id not in self._opp_path_nodes(state):
+            return True
+        return False
+
+    def _break_capacity(self, state):
+        """当前可立即投入的攻坚值：坏果优先，好果保留交付底仓。"""
+        me = state.me
+        good = me.get("goodFruit", 0) or 0
+        bad = me.get("badFruit", 0) or 0
+        return min(2, max(0, good - BOUNTY_GOOD_RESERVE)) * 2 \
+            + min(2, bad) * 3
+
+    def _expected_guard_defense(self, state, node_id):
+        if state.node(node_id).get("nodeType") in CHOKE_TYPES:
+            return self.BREAK_GUARD_EXPECT_DEFENSE
+        return 4
+
+    def _can_break_expected_guard(self, state, node_id=None):
+        defense = self.BREAK_GUARD_EXPECT_DEFENSE if node_id is None \
+            else self._expected_guard_defense(state, node_id)
+        return self._break_capacity(state) >= defense
+
+    def _resource_phase_value(self, state, node_id, value):
+        """中后段硬件资源加权：前段保推进，后段补鲜度/速度。"""
+        if self._map_progress(state, node_id) >= self.LATE_RESOURCE_PROGRESS:
+            return value * self.LATE_RESOURCE_MULT
+        return value
+
+    def _forward_factor(self, state, node_id):
+        """地图进度系数：起点附近 → FLOOR，宫门方向 → 1.0（裸帧度量）。"""
+        floor = self.FORWARD_BIAS_FLOOR
+        if self.forward_rush_opp:
+            floor = min(floor, self.FORWARD_BIAS_AUTO)
+        if floor >= 1.0:
+            return 1.0
+        progress = self._map_progress(state, node_id)
         if self.FORWARD_BIAS_CUT > 0:
             return floor if progress < self.FORWARD_BIAS_CUT else 1.0
         return floor + (1.0 - floor) * progress
@@ -1071,9 +1208,14 @@ class TaskPlanner:
             p = time_penalty(nid)
             if nid in shadow:
                 node = state.node(nid)
-                p += (self.SHADOW_CHOKE_PENALTY
-                      if node.get("nodeType") in CHOKE_TYPES
-                      else SHADOW_NODE_PENALTY)
+                if node.get("nodeType") in CHOKE_TYPES:
+                    shadow_pen = self.SHADOW_CHOKE_PENALTY
+                    if self._can_break_expected_guard(state, nid):
+                        shadow_pen = max(SHADOW_NODE_PENALTY,
+                                         shadow_pen * self.BREAK_SHADOW_CHOKE_MULT)
+                    p += shadow_pen
+                else:
+                    p += SHADOW_NODE_PENALTY
             return p
         return penalty
 
