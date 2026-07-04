@@ -125,6 +125,7 @@ class WardenStrategy(BaselineStrategy):
             # 首帧建计划（不吃 start 消息的不全数据）：清障/标记/关隘一次成型
             self._plans_ready = True
             self._build_plans(state)
+        self._maybe_fallback_gate(state)
 
         actions = []
         contests = state.my_open_contests()
@@ -149,6 +150,32 @@ class WardenStrategy(BaselineStrategy):
                             for a in actions)):
             actions.append(P.a_move(me["nextNodeId"]))
         return actions
+
+    def _maybe_fallback_gate(self, state):
+        """对手强闯关隘（FORCED_PASSING 转运期 ~110 帧不可中断）或已越关
+        → 果断转场宫门 S14 重筑墙：两走廊唯一汇合点、押不错边，且我们
+        坐在自己验核点上，离场需求 ~22 帧，墙可焊到收盘。"""
+        camp = self.camp_node
+        gate = state.gate_node
+        if not camp or camp == gate:
+            return
+        opp = state.opp
+        if not opp or opp.get("delivered") or opp.get("retired"):
+            return
+        proc = opp.get("currentProcess") or {}
+        forcing = (opp.get("state") == P.ST_FORCED_PASSING
+                   or (proc.get("action") or proc.get("type")) == "FORCED_PASS") \
+            and (proc.get("targetNodeId") in (camp, None))
+        pos = opp.get("nextNodeId") or opp.get("currentNodeId")
+        breached = False
+        if pos and pos != camp:
+            _, pth = state.graph.shortest_path(pos, gate, P.BASE_SPEED)
+            breached = bool(pth) and camp not in pth   # 它去宫门已不经过关隘
+        if forcing or breached:
+            if self.log:
+                self.log.info("warden: fallback to gate wall (%s)",
+                              "forced-pass" if forcing else "breached")
+            self.camp_node = gate
 
     # ================= 窗口防守 =================
 
@@ -226,10 +253,26 @@ class WardenStrategy(BaselineStrategy):
                 return P.a_deliver()
             return P.a_wait()
         if me.get("verified"):
+            if cur == gate and self.camp_node == gate \
+                    and not self._should_leave(state, cur):
+                guard = self._reactive_guard(state, cur)
+                if guard:
+                    return guard
+                task = self._farm_here(state, cur)
+                if task:
+                    return task
+                return P.a_wait()      # 已验核仍守宫门：墙焊到死线再走
             return self._advance(state, cur, terminal)
         if cur == gate:
             if state.phase == P.PHASE_RUSH:
                 return P.a_verify_gate()
+            if self.camp_node == gate:
+                guard = self._reactive_guard(state, cur)
+                if guard:
+                    return guard
+                task = self._farm_here(state, cur)
+                if task:
+                    return task
             return P.a_wait()
 
         # ---- 固定处理站（途中驿站/码头/水驿必须处理完才能走）----
@@ -334,7 +377,8 @@ class WardenStrategy(BaselineStrategy):
         if g and g.get("ownerTeamId") \
                 and g.get("active", g.get("defense", 0) > 0):
             return False
-        cost = 1 + self.GUARD_EXTRA        # 关键关隘底价 1
+        extra = 1 if node_id == state.gate_node else self.GUARD_EXTRA
+        cost = 1 + extra                   # 关键关隘/宫门底价 1
         if state.me.get("goodFruit", 0) - cost < self.FRUIT_RESERVE:
             return False
         return state.round - self._guard_sent.get(node_id, -999) \
@@ -375,9 +419,10 @@ class WardenStrategy(BaselineStrategy):
         if not self._guardable(state, cur):
             return None
         self._guard_sent[cur] = state.round
+        extra = 1 if cur == state.gate_node else self.GUARD_EXTRA
         if self.log:
             self.log.info("warden: reactive guard @%s (opp inbound)", cur)
-        return P.a_set_guard(cur, self.GUARD_EXTRA)
+        return P.a_set_guard(cur, extra)
 
     def _depart_guard(self, state, cur):
         """临别卡：离场时对手仍在逼近就再挡一手。"""
@@ -389,9 +434,10 @@ class WardenStrategy(BaselineStrategy):
         if not self._guardable(state, cur):
             return None
         self._guard_sent[cur] = state.round
+        extra = 1 if cur == state.gate_node else self.GUARD_EXTRA
         if self.log:
             self.log.info("warden: parting guard @%s", cur)
-        return P.a_set_guard(cur, self.GUARD_EXTRA)
+        return P.a_set_guard(cur, extra)
 
     def _farm_here(self, state, cur):
         me = state.me
