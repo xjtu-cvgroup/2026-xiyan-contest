@@ -498,6 +498,8 @@ class WardenStrategy(BaselineStrategy):
             opp_here = (opp and not opp.get("routeEdgeId")
                         and opp.get("currentNodeId") == cur
                         and not (opp.get("currentProcess") or {}))
+            # 让行期顺手标脚下（处理 4→2，后手赤字 9→4）
+            self._farm_target = cur
             # 让行边：pid 小的偶帧起手、pid 大的奇帧——互补保证不撞车
             side = 0 if state.player_id < (state.opp_id or 0) else 1
             if opp_here and state.round % 2 != side:
@@ -536,15 +538,32 @@ class WardenStrategy(BaselineStrategy):
                 continue
             best, best_eta = t["nodeId"], eta
         if best is None:
-            # 无可追实例 → 驻守最近的任务刷新候选点吃下一波
+            # 无可追实例 → 驻守刷新候选点吃下一波。分桶原则：先手 4 帧
+            # 只在争同一实例时值钱——只选"我比对手近"的点，它先出发
+            # 的先手作用于我们不去的桶，赤字归零；全被占回退任意最近
             cands = set()
             for nodes in (state.task_candidates or {}).values():
                 cands.update(nodes)
+            opp = state.opp
+            opp_pos = opp and (opp.get("nextNodeId")
+                               or opp.get("currentNodeId"))
+            fb, fb_eta = None, float("inf")
             for nid in cands:
                 eta, path = state.graph.shortest_path(
                     cur, nid, state.my_speed())
-                if path and eta < best_eta:
+                if not path:
+                    continue
+                if eta < fb_eta:
+                    fb, fb_eta = nid, eta
+                if opp_pos:
+                    oeta, opath = state.graph.shortest_path(
+                        opp_pos, nid, P.BASE_SPEED)
+                    if opath and oeta <= eta:
+                        continue          # 它更近：让给它，别追尾
+                if eta < best_eta:
                     best, best_eta = nid, eta
+            if best is None:
+                best, best_eta = fb, fb_eta
         self._farm_target = best
         if best and best != cur:
             return self._advance(state, cur, best)
