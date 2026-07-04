@@ -475,8 +475,15 @@ class WardenStrategy(BaselineStrategy):
         pos = opp.get("nextNodeId") or opp.get("currentNodeId")
         if not pos:
             return True
-        need = self._route_need(state, pos, horse_bonus=self.HORSE_BONUS)
-        return need <= remain      # 任务书精确账：它数学死即死，秒转农
+        to_gate, p1 = state.graph.shortest_path(
+            pos, state.gate_node, P.BASE_SPEED)
+        gate_term, p2 = state.graph.shortest_path(
+            state.gate_node, state.terminal_node, P.BASE_SPEED)
+        if not p1 or not p2:
+            return False
+        need = (to_gate + gate_term) * self.OPP_SPEED_MARGIN \
+            + GATE_VERIFY_FRAMES + DELIVER_FRAMES
+        return need <= remain      # 零缓冲：它数学死即死，秒让抢农起跑
 
     def _farm_endgame(self, state, cur):
         """交付双死后的任务分收割：让行出站 → 追最近可达任务 →
@@ -545,29 +552,15 @@ class WardenStrategy(BaselineStrategy):
 
     # ---- 收官判定 ----
 
-    HORSE_BONUS = 12           # 任务书上限：快马20帧×+200 + 短马14×+150
-                               # + 疾行令(仅RUSH)15×+300 ≈ 全程至多省 ~12 帧
-
-    def _route_need(self, state, pos, horse_bonus=0):
-        """按任务书精确核算 pos→终点 的交付需求帧数：
-        边程(基速) + Σ沿途处理站处理帧 + 2帧/站进出 + 验核6 + 交付2。"""
-        g = state.graph
-        to_gate, p1 = g.shortest_path(pos, state.gate_node, P.BASE_SPEED)
-        gate_term, p2 = g.shortest_path(state.gate_node, state.terminal_node,
-                                        P.BASE_SPEED)
-        if not p1 or not p2:
-            return 9999
-        proc = 0
-        for nid in list(p1[1:]) + list(p2[1:-1]):
-            nd = state.node(nid)
-            if nd.get("processType") and nd.get("processType") != "VERIFY" \
-                    and (nd.get("processRound") or 0) > 0:
-                proc += (nd.get("processRound") or 0) + 2
-        return max(0, to_gate + gate_term + proc
-                   + GATE_VERIFY_FRAMES + DELIVER_FRAMES - horse_bonus)
-
     def _my_need(self, state, cur):
-        return self._route_need(state, cur, horse_bonus=0)
+        g = state.graph
+        to_gate, p1 = g.shortest_path(cur, state.gate_node, state.my_speed())
+        gate_term, p2 = g.shortest_path(state.gate_node, state.terminal_node,
+                                        state.my_speed())
+        if not p1 or not p2:
+            return 999
+        return (to_gate + GATE_VERIFY_FRAMES + gate_term + DELIVER_FRAMES
+                + STATION_PAD)
 
     def _should_leave(self, state, cur):
         rnd = state.round
@@ -584,10 +577,14 @@ class WardenStrategy(BaselineStrategy):
         if True:
             pos = opp.get("nextNodeId") or opp.get("currentNodeId")
             if pos:
-                opp_need = self._route_need(state, pos,
-                                            horse_bonus=self.HORSE_BONUS)
-                if True:
-                    if opp_need > remain:
+                to_gate, p1 = state.graph.shortest_path(
+                    pos, state.gate_node, P.BASE_SPEED)
+                gate_term, p2 = state.graph.shortest_path(
+                    state.gate_node, state.terminal_node, P.BASE_SPEED)
+                if p1 and p2:
+                    opp_need = (to_gate + gate_term) * self.OPP_SPEED_MARGIN \
+                        + GATE_VERIFY_FRAMES + DELIVER_FRAMES
+                    if opp_need > remain + self.OPP_DEAD_BUFFER:
                         if self.log:
                             self.log.info(
                                 "warden: opp mathematically dead "
