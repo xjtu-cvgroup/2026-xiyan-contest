@@ -169,12 +169,9 @@ class PlannerStrategy(BaselineStrategy):
     # 实锤：人手在探路/边上削弱里买穿后，走廊第二张卡只能干等风化
     SQUAD_CORRIDOR_RESERVE = 4
     GATE_SCOUT_FROM = 355       # 宫门验核最早 ~390 帧，此前派的标记必然过期
-    # 顺路领取清单：冰鉴/马之外补上文书（充实验牒 YAN_DIE 出牌池，克强行 QIANG_XING，
-    # 此前从不主动领导致这张克制牌常年打不出）。情报默认不在清单：领取 2 帧
-    # + 使用 1 帧最多省 3 帧，节奏局常是负收益；S03 开局打包/camper 慢局
-    # 由 _should_claim_intel_en_route 动态加入，已持有时仍可在空转帧/读条前使用。
-    CLAIM_EN_ROUTE = (P.ICE_BOX, P.FAST_HORSE, P.SHORT_HORSE,
-                      P.PASS_TOKEN, P.OFFICIAL_PERMIT)
+    # 顺路领取清单：默认只拿确定收益高的冰鉴/马。文书类出牌池收益不稳定，
+    # 2 帧读条在小分差局会反噬；情报仍由 _should_claim_intel_en_route 动态加入。
+    CLAIM_EN_ROUTE = (P.ICE_BOX, P.FAST_HORSE, P.SHORT_HORSE)
     # 竞速模式下的收缩清单（V3.18）：只领交付硬件与速度资源
     RACE_CLAIM_ONLY = (P.ICE_BOX, P.FAST_HORSE, P.SHORT_HORSE)
     CLAIM_LIMIT = {P.ICE_BOX: 2}    # 冰鉴多多益善（+10 鲜度 ≈ 18 分），其余各 1
@@ -853,10 +850,9 @@ class PlannerStrategy(BaselineStrategy):
                 claim_list = tuple(rt for rt in claim_list
                                    if rt in self.RACE_CLAIM_ONLY)
             if self.planner.race_cliff(state):
-                # 悬崖带（V3.21）：2 帧读条也是胜负帧——冰/马也不顺手领。
-                # 只影响这个 ~60 帧窗口的路过领取；冰链作为规划目标的口径
-                # （race_adjust=False）不受影响，追猎照常
-                claim_list = ()
+                # 悬崖带内只保留冰鉴：S07→宫门后常有 RUSH 等待窗，冰鉴
+                # 的确定鲜度收益可覆盖 2 帧读条；文书/情报/马仍交给规划目标。
+                claim_list = tuple(rt for rt in claim_list if rt == P.ICE_BOX)
             for rt in claim_list:
                 limit = self.CLAIM_LIMIT.get(rt, 1)
                 if stock.get(rt, 0) > 0 and res.get(rt, 0) < limit:

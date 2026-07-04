@@ -2128,15 +2128,15 @@ def test_latent_mechanics():
     a = PlannerStrategy().main_action(gs, plan)
     ok &= check("情报: 没情报就老实 WAIT", a == {"action": "WAIT"}, str(a))
 
-    # ---- 文书 1: 顺路领取过所（充实 YAN_DIE 出牌池） ----
+    # ---- 文书 1: 不再默认顺路领取文书（2 帧读条收益不稳定，小分差局反噬） ----
     gs = base_state(cur="S03", resources={})
-    gs.me["taskScore"] = 90  # 非前段追击态：旧的顺路文书策略仍保留
+    gs.me["taskScore"] = 90
     gs.nodes["S03"]["resourceStock"] = {"PASS_TOKEN": 1}
     plan = st.planner.plan(gs)
     a = PlannerStrategy().main_action(gs, plan)
-    ok &= check("文书: 顺路领过所",
-                a and a["action"] == "CLAIM_RESOURCE"
-                and a["resourceType"] == "PASS_TOKEN", str(a))
+    ok &= check("文书: 不默认顺路领过所",
+                not (a and a.get("action") == "CLAIM_RESOURCE"
+                     and a.get("resourceType") == "PASS_TOKEN"), str(a))
 
     # ---- 情报 3: 不主动顺路领取情报；只有已持有时才利用空转/预热收益 ----
     gs = base_state(cur="S06", resources={})
@@ -2765,8 +2765,14 @@ def test_race_cliff():
                 not TaskPlanner().race_cliff(gs_cliff(
                     opp_task=90, opp_moving=("S07", "S05", "E_X", 20))), "")
 
-    # （行为级"带内顺路领取清空"无单元观察点：冰/马都会先被 planner 立为
-    #   资源目标走 plan 分支，en-route 清空只影响非目标资源的路过领取）
+    gs_ice = gs_cliff(my_pos="S07", opp_pos="S05")
+    gs_ice.nodes["S07"]["resourceStock"] = {"ICE_BOX": 1}
+    a = PlannerStrategy().main_action(gs_ice, Plan("deliver", slack=180))
+    ok &= check("悬崖: 带内仍允许顺路冰鉴",
+                a and a["action"] == "CLAIM_RESOURCE"
+                and a["resourceType"] == "ICE_BOX", str(a))
+
+    # 文书/情报仍不在悬崖带顺手领；冰鉴作为确定鲜度收益单独保留。
     return ok
 
 
