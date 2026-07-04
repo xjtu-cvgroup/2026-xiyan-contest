@@ -190,7 +190,7 @@ class PlannerStrategy(BaselineStrategy):
     EDGE_WEAKEN_RESERVE = 4     # 边冻结常规保留：两次削弱弹药
     EDGE_WEAKEN_RESCUE_AVAIL = 2    # 已卡死在关键口边上时，允许动用最后一组
     EDGE_WEAKEN_RESCUE_DEFENSE = 5  # 第一刀/风化后再救，不碰满防新卡
-    EDGE_WEAKEN_RESCUE_ROUND = 300  # S10/S11 段以后才触发，避免前段误烧人手
+    EDGE_WEAKEN_RESCUE_ROUND = 220  # 中盘以后被卡死时，最后一组人手也要救命
 
     # ---- 主动设卡（V3）----
     # 咽喉类节点 + 宫前驿（V3.28：2839 的二卡就落在 S13 PALACE_STATION，
@@ -244,6 +244,7 @@ class PlannerStrategy(BaselineStrategy):
     GUARD_BOUNTY_EXPOSE_ETA = 30  # 30 帧后破卡会生成/结算悬赏，领先局避开送分卡
     GUARD_MIN_ARRIVAL_DEFENSE = 3
     GUARD_REAR_MIN_ARRIVAL_DEFENSE = 4
+    GUARD_PARTING_SLACK = -40   # S10 所有权/临别卡按硬截止算，允许吃掉安全垫
 
     # ---- 防中边陷阱（V3.5，V3.12 删证据门）----
     # 设卡必须站在节点上：对手占着/将先到我们的下一跳时，上边就可能被掐点
@@ -276,6 +277,8 @@ class PlannerStrategy(BaselineStrategy):
     TRAP_CONVERGE_ORDINARY = False  # 实验开关：收敛分支是否也防普通节点
                                 # （无界版被电池证伪 camper 34/48；有界
                                 # 变体的配对对照见 trap-gate 实验脚本）
+    TRAP_ORDINARY_CONVERGE_ETA = 24  # 普通节点长边收敛窄门：对手快先到才让行
+    TRAP_ORDINARY_CONVERGE_EDGE = 25 # 我方边足够长，对手 4 帧起卡追得上才等
     TRAP_CAMPED_ORDINARY = True     # 驻扎分支防普通节点（V3.22 主开关，
                                 # 语料=2839 第 4 局 S09 掐踏边）
     TRAP_WAIT_MAX = 30          # 陷阱等待的日志告警阈值（V3.15 起不再硬闯：
@@ -289,6 +292,8 @@ class PlannerStrategy(BaselineStrategy):
     # 绕路差价就改道，总代价 ≤ 事后最优的 2 倍；绕不开的真漏斗口照旧等待
     TRAP_AVOID_PENALTY = 900    # 改道承诺期间被避节点的寻路附加帧数
     TRAP_AVOID_WINDOW = 120     # 改道承诺的有效窗口（帧），对手离开即提前解除
+    TRAP_DEADLINE_ESCAPE_SLACK = -20
+    TRAP_DEADLINE_ESCAPE_WAIT = 45
 
     # ---- 尾段蹲刷（V3.10）----
     # 任务刷新跟在车队身后：领跑者吃冰，跟随者吃刷新（29/30/31 三局对手
@@ -297,13 +302,14 @@ class PlannerStrategy(BaselineStrategy):
     LOITER_MIN_SLACK = 110      # 蹲刷要求的最小交付余量（帧）
     LOITER_BASE_CAP = 110       # 任务基础分达到该值后不再蹲（末档里程碑已到手）
     LOITER_BUDGET = 50          # 整局蹲刷总预算（帧），有限下注
-    # S10 水路收租（V3.51）：任务分封顶且余量充足时，站在武关截对手
-    # 刷新任务；若对手小分队耗尽，再由既有设卡逻辑兑现长边冻结。
-    S10_TOLL_BASE = 150
-    S10_TOLL_MIN_SLACK = 90
+    # S10 水路收租（V3.51/V3.52）：120 后先占武关就是一阶胜负条件；
+    # 站住截任务波次，或等对手踏边后由临别/身体设卡冻结兑现。
+    S10_TOLL_BASE = 120
+    S10_TOLL_DENY_BASE = 150
+    S10_TOLL_MIN_SLACK = -40
     S10_TOLL_MAX_OPP_ETA = 170
     S10_TOLL_ROUTE_TOLERANCE = 20
-    S10_TOLL_BUDGET = 140
+    S10_TOLL_BUDGET = 220
     S10_TOLL_TASK_MAX_PROC = 5
 
     # ---- 情报（INTEL，V3.12）----
@@ -733,10 +739,11 @@ class PlannerStrategy(BaselineStrategy):
                 node_type = state.node(nxt).get("nodeType")
                 rescue_weaken = (
                     last_weaken > -999
-                    and node_type in ("KEY_PASS", "PASS")
+                    and node_type not in ("START", "FINISH")
                     and (guard.get("defense", 0) or 0) <= self.EDGE_WEAKEN_RESCUE_DEFENSE
                     and state.round >= self.EDGE_WEAKEN_RESCUE_ROUND
                     and avail >= self.EDGE_WEAKEN_RESCUE_AVAIL
+                    and (not plan or plan.slack <= self.GUARD_SLACK_MIN)
                 )
                 if (state.phase != P.PHASE_RUSH
                         and (avail >= self.EDGE_WEAKEN_RESERVE or rescue_weaken)
@@ -1012,9 +1019,10 @@ class PlannerStrategy(BaselineStrategy):
             state, cur, opp_eta)
         denial_guard = self._certain_denial_guard_opportunity(
             state, cur, opp_eta)
+        parting_guard = self._parting_guard_opportunity(state, cur, opp_eta)
         rear_guard = catchup_guard or score_lead_guard or denial_guard \
             or self._rear_guard_opportunity(state, cur, opp_eta)
-        if not (choke_guard or rear_guard):
+        if not (choke_guard or rear_guard or parting_guard):
             return None
         if rear_guard and not choke_guard and \
                 opp_eta + here_to_gate > opp_to_gate + self.GUARD_REAR_ROUTE_TOLERANCE:
@@ -1041,6 +1049,8 @@ class PlannerStrategy(BaselineStrategy):
             slack_min = (self.GUARD_REAR_RUSH_SLACK
                          if state.phase == P.PHASE_RUSH
                          else self.GUARD_REAR_SLACK)
+        if parting_guard:
+            slack_min = min(slack_min, self.GUARD_PARTING_SLACK)
         if plan.slack < slack_min:
             return None
 
@@ -1060,6 +1070,7 @@ class PlannerStrategy(BaselineStrategy):
                 < min_arrival_def):
             return None
         if (not catchup_guard
+                and not parting_guard
                 and self._guard_bounty_exposure(state, cur, opp_eta, extra)):
             return None
         self._guard_sent[cur] = state.round
@@ -1120,7 +1131,7 @@ class PlannerStrategy(BaselineStrategy):
         opp_task = opp.get("taskScore", 0) or 0
         opp_squads = opp.get("squadAvailable")
         freeze_option = opp_squads is not None and opp_squads <= 1
-        if opp_task >= self.S10_TOLL_BASE and not freeze_option:
+        if opp_task >= self.S10_TOLL_DENY_BASE and not freeze_option:
             return False
         if opp.get("currentNodeId") == cur and not opp.get("routeEdgeId"):
             return False
@@ -1182,6 +1193,24 @@ class PlannerStrategy(BaselineStrategy):
             return True
         return (self._opp_ordinary_guard_seen
                 or self.planner.farm_rusher_pressure(state, cur))
+
+    def _parting_guard_opportunity(self, state, cur, opp_eta):
+        """离站临别卡：对手已经在来当前节点的边上，离开前先把门焊上。
+
+        replay 2026-07-04T235919：对手在 S09 读完站务后立卡再走，
+        我方已在 S07->S09 长边上，最终被 115 帧卡税拖到未交付。这个门
+        只看公开几何：对手 nextNode 是当前点、我们 4 帧内来得及成卡。
+        """
+        opp = state.opp or {}
+        if not opp.get("routeEdgeId") or opp.get("nextNodeId") != cur:
+            return False
+        if state.node(cur).get("nodeType") in ("START", "FINISH"):
+            return False
+        if cur == "S10" and (state.me.get("taskScore", 0) or 0) >= self.S10_TOLL_BASE:
+            return opp_eta > self.TRAP_GUARD_FRAMES
+        if (state.me.get("taskScore", 0) or 0) < 120 or state.round < 220:
+            return False
+        return opp_eta > self.TRAP_GUARD_FRAMES
 
     def _catchup_merge_guard_opportunity(self, state, cur, opp_eta):
         """任务分明显落后时，把普通合流点抢先到位转化为对手通行税。"""
@@ -1276,9 +1305,8 @@ class PlannerStrategy(BaselineStrategy):
     def _s10_toll_hold_active(self, state, plan, cur):
         """S10 收租驻守：只在 replay99 型水路领先终局打开。
 
-        这不是泛化蹲刷：必须已经任务分封顶、仍有充足交付 slack、对手未
-        交付且高效路仍经过 S10。收益来自截刷新任务和等待对手小分队耗尽
-        后的既有设卡冻结。
+        这不是泛化蹲刷：必须已经拿到 120+ 任务分、对手未交付且高效路仍
+        经过 S10。收益来自截刷新任务和等待对手踏边后的临别/身体设卡冻结。
         """
         if cur != "S10" or not plan or plan.kind != "deliver":
             return False
@@ -1294,7 +1322,7 @@ class PlannerStrategy(BaselineStrategy):
         opp_task = opp.get("taskScore", 0) or 0
         opp_squads = opp.get("squadAvailable")
         freeze_option = opp_squads is not None and opp_squads <= 1
-        if opp_task >= self.S10_TOLL_BASE and not freeze_option:
+        if opp_task >= self.S10_TOLL_DENY_BASE and not freeze_option:
             return False
         if opp.get("currentNodeId") == cur and not opp.get("routeEdgeId"):
             return False
@@ -1313,7 +1341,7 @@ class PlannerStrategy(BaselineStrategy):
         if cur != "S10":
             return None
         opp = state.opp or {}
-        if (opp.get("taskScore", 0) or 0) >= self.S10_TOLL_BASE:
+        if (opp.get("taskScore", 0) or 0) >= self.S10_TOLL_DENY_BASE:
             return None
         opp_eta = self.planner._opp_eta(state, cur)
         best = None
@@ -1895,7 +1923,8 @@ class PlannerStrategy(BaselineStrategy):
             risk = True        # 它正站在我们的下一跳上
         elif opp_next == nxt and (not ordinary or (
                 self.TRAP_CONVERGE_ORDINARY
-                and self._ordinary_converge_threat(state))):
+                and self._ordinary_converge_threat(state))
+                or self._ordinary_long_edge_converge_threat(state, cur, nxt)):
             # 它正赶往我们的下一跳（仅咽喉）：若它先到且来得及成卡，同样危险
             opp_eta = self.planner._opp_eta(state, nxt)
             edge = state.graph.edge_between(cur, nxt)
@@ -1951,6 +1980,8 @@ class PlannerStrategy(BaselineStrategy):
         # 触发点早 ~55 帧。等待→它起卡→节点上强通，仍是唯一有界解）
         if not self._opp_can_guard(state, nxt):
             return give_up()
+        if self._trap_deadline_escape(state, plan, nxt, ordinary):
+            return give_up()
         # V3.15 删对峙上限硬闯（闸门过期复盘）：V3.5 的 30 帧上限防的是
         # "对手赖着不走白耗我们"，但两类风险场景它都给错答案——
         # · 汇聚中（replay56 直接死因）：r276 起等待，r305 上限到点硬闯 71 帧
@@ -1968,6 +1999,38 @@ class PlannerStrategy(BaselineStrategy):
         if self.log and n in (self.TRAP_WAIT_MAX, self.TRAP_WAIT_MAX * 3):
             self.log.info("trap wait at %s reached %d frames (opp %s)",
                           nxt, n, "camped" if camped else "converging")
+        return True
+
+    def _ordinary_long_edge_converge_threat(self, state, cur, nxt):
+        """普通节点窄门防掐边：只管 replay235919 的 S07->S09 长边形态。"""
+        if state.node(nxt).get("nodeType") in self.GUARD_NODE_TYPES:
+            return False
+        if nxt not in ("S09", "S11"):
+            return False
+        opp = state.opp or {}
+        if opp.get("nextNodeId") != nxt or not opp.get("routeEdgeId"):
+            return False
+        edge = state.graph.edge_between(cur, nxt)
+        our_eta = state.graph.edge_frames(edge, state.my_speed()) if edge else 0
+        opp_eta = self.planner._opp_eta(state, nxt)
+        if not math.isfinite(opp_eta):
+            return False
+        return (our_eta >= self.TRAP_ORDINARY_CONVERGE_EDGE
+                and opp_eta <= self.TRAP_ORDINARY_CONVERGE_ETA)
+
+    def _trap_deadline_escape(self, state, plan, nxt, ordinary):
+        """咽喉等待的死线逃逸：等下去确定未交付时，给赌边一个出口。"""
+        if ordinary or not plan or plan.kind != "deliver":
+            return False
+        if state.phase != P.PHASE_RUSH:
+            return False
+        if plan.slack > self.TRAP_DEADLINE_ESCAPE_SLACK:
+            return False
+        node, waited = self._trap_wait
+        if node != nxt or waited < self.TRAP_DEADLINE_ESCAPE_WAIT:
+            return False
+        if state.enemy_guard(nxt) or self._opp_setting_guard(state, nxt):
+            return False
         return True
 
     def _farmer_converge_release(self, state, nxt, camped, ordinary):
@@ -2126,6 +2189,8 @@ class PlannerStrategy(BaselineStrategy):
         penalty = self.planner._penalty_fn(state)
         speed = state.my_speed()
         for t in targets:
+            if not self._s02_fork_scout_allowed(state, cur, t):
+                continue
             if self.planner._has_our_scout_mark(state, t):
                 continue
             if state.round - self._scout_sent.get(t, -999) < self.SCOUT_RESEND_GAP:
@@ -2157,6 +2222,19 @@ class PlannerStrategy(BaselineStrategy):
                 self._squad_spent += 2
                 return P.a_squad_clear(clear_target)
         return None
+
+    def _s02_fork_scout_allowed(self, state, cur, target):
+        """S02 官道/水路未承诺前，不连续预投两个互斥分支。"""
+        if cur != "S02" or target not in ("S03", "S04"):
+            return True
+        if state.me.get("routeEdgeId"):
+            return True
+        key = ("S02", P.CONTEST_DOCK)
+        count, last_round = self._window_draw_pressure.get(key, (0, -999))
+        if count > 0 and state.round - last_round <= self.WINDOW_DRAW_PRESSURE_DECAY:
+            return False
+        other = "S04" if target == "S03" else "S03"
+        return other not in self._scout_sent
 
     def _can_spend_squad(self, state, cost):
         avail = self._squad_avail(state)

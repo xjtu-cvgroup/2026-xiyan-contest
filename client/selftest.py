@@ -1563,6 +1563,26 @@ def test_trap_proof():
     ok &= check("防陷阱: 对手先到下一跳时等待",
                 a and a["action"] == "WAIT", str(a))
 
+    # 2b) replay235919：普通节点也有窄窗口收敛掐边风险。我方长边将进
+    #     S09，对手很快先到 S09；多等十几帧可躲 100+ 帧临别卡税。
+    gs = gs_tail(opp_cur="S12", opp_next="S11", opp_edge="E07")
+    for n in gs.nodes.values():
+        if n["nodeId"] == "S11":
+            n["nodeType"] = "STATION"
+    a = PlannerStrategy().main_action(gs)
+    ok &= check("防陷阱: 普通长边收敛也短等让过客先离站",
+                a and a["action"] == "WAIT", str(a))
+
+    # 2c) 死线逃逸：咽喉已经等穿余量时，继续等=确定未交付，允许赌边。
+    st_escape = PlannerStrategy()
+    st_escape._trap_wait = ("S11", st_escape.TRAP_DEADLINE_ESCAPE_WAIT)
+    gs = gs_tail()
+    gs.phase = P.PHASE_RUSH
+    a = st_escape.main_action(gs, Plan("deliver", slack=-30))
+    ok &= check("防陷阱: 咽喉等待烧穿死线后赌边逃逸",
+                a and a["action"] == "MOVE" and a["targetNodeId"] == "S11",
+                str(a))
+
     # 3) 对手已离开（在 S12 且驶向 S13）→ 正常上边
     a = PlannerStrategy().main_action(
         gs_tail(opp_cur="S12", opp_next="S13", opp_edge="E08"))
@@ -2436,6 +2456,39 @@ def test_corridor_reserve():
     ok &= check("人手预留: 削弱不受底仓限制",
                 a and a["action"] == "SQUAD_WEAKEN" and a["targetNodeId"] == "S14",
                 str(a))
+
+    # replay235919：临别卡已把我们挡在长边/边口，前两刀后只剩最后 2
+    # 人手；此时底仓应转为救命弹药，不能账上留人、车队等风化到输。
+    gs = gs_at(2)
+    gs.players[1001].update(state="MOVING", currentNodeId="S07",
+                            nextNodeId="S09", routeEdgeId="E04",
+                            edgeProgressMs=20000, edgeTotalMs=63480,
+                            verified=False)
+    gs.nodes["S09"]["guard"] = {"ownerTeamId": "BLUE", "defense": 4,
+                                "maxDefense": 6, "active": True}
+    st = PlannerStrategy()
+    st._weaken_sent["S09"] = 240
+    st.main_action(gs, Plan("deliver", slack=40))
+    a = st.squad_action(gs, Plan("deliver", slack=40))
+    ok &= check("人手预留: 临别卡死线局动用最后2人削弱",
+                a and a["action"] == "SQUAD_WEAKEN" and a["targetNodeId"] == "S09",
+                str(a))
+
+    gs = gs_at(8)
+    gs.players[1001].update(currentNodeId="S02", nextNodeId=None,
+                            routeEdgeId=None)
+    st = PlannerStrategy()
+    ok &= check("S02探路: 首个计划分支允许预探",
+                st._s02_fork_scout_allowed(gs, "S02", "S03"), "")
+    st._scout_sent["S04"] = 50
+    ok &= check("S02探路: 未承诺前不反向预投互斥分支",
+                not st._s02_fork_scout_allowed(gs, "S02", "S03"),
+                str(st._scout_sent))
+    st = PlannerStrategy()
+    st._window_draw_pressure[("S02", P.CONTEST_DOCK)] = (1, gs.round - 1)
+    ok &= check("S02探路: DRAW压力后不再预探分叉",
+                not st._s02_fork_scout_allowed(gs, "S02", "S03"),
+                str(st._window_draw_pressure))
     return ok
 
 
@@ -4327,6 +4380,23 @@ def test_front_tempo_tail_follow():
     a = PlannerStrategy().main_action(gs, Plan("deliver", slack=130))
     ok &= check("S10收租: 无任务时驻守不顺手领情报",
                 a and a["action"] == "WAIT", str(a))
+
+    gs = gs_replay93("S10", 120, (), "S09", "S10", "E05",
+                     opp_task_score=120)
+    gs.players[2002]["edgeProgressMs"] = 1000
+    gs.nodes["S10"]["guard"] = {"ownerTeamId": gs.my_team, "defense": 6,
+                                "maxDefense": 7, "active": True}
+    a = PlannerStrategy().main_action(gs, Plan("deliver", slack=40))
+    ok &= check("S10收租: 120分后也驻守武关所有权",
+                a and a["action"] == "WAIT", str(a))
+
+    gs = gs_replay93("S10", 120, (), "S09", "S10", "E05",
+                     opp_task_score=120)
+    gs.players[2002]["edgeProgressMs"] = 1000
+    a = PlannerStrategy().main_action(gs, Plan("deliver", slack=-30))
+    ok &= check("S10收租: 对手踏边时按硬截止临别设卡",
+                a and a["action"] == "SET_GUARD" and a["targetNodeId"] == "S10",
+                str(a))
 
     gs = gs_replay93("S10", 150, (), "S09", "S10", "E05",
                      opp_task_score=150)
