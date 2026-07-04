@@ -85,6 +85,30 @@ SWITCH_MARGIN = 1.15
 # 进入/退出条件全部公开可算：过完咽喉（前方无 KEY_PASS）或差距拉开自然退出
 RACE_BAND = 25
 RACE_FRAME_MULT = 1.75
+# 悬崖带（V3.21）：竞速带内且关隘已近时，帧价从边际损耗切换为悬崖斜率。
+# 立项证据：随机化 camper 四个结构性死局里 10/15/23 完全同构——S07 一停
+# （两个 30 分顺路任务，~14 帧）把走廊进入从"同帧进边"变成"落后 18~20
+# 帧"，赢局画像（+165 均值）翻成 -326~-586。漏斗竞速是悬崖函数：落后
+# ≤4 帧（对手设卡读条）仍安全免疫，多 1 帧就是死等+满防税起步（6.2.1）。
+# 死局实测斜率：胜负画像差 500~700 分摊在 ~20 帧的顺路停留上 ≈ 25~35
+# 分/帧，取中值 30。刻度校验：顺路 30 分任务的边际值高达 93~99（跨里程
+# 碑 + 任务系数抬用时分），4 帧读条 ≈ 23 分/帧——悬崖价必须高于它才咬
+# 得动（首版取 10 被实测证伪：cliff=1 时任务照领，死局原样复现）。
+# 带外一切照旧，资源目标口径（race_adjust=False，冰链血泪资产）不动。
+RACE_CLIFF_ETA = 125        # 咽喉 ETA 在此内才算"近"（S07 决策点 ~119；
+                            # 更远处未来方差主导，一帧不构成悬崖信息）
+RACE_CLIFF_LEAD = 10        # 领先出安全垫（读条 4 + 余量）后不抢：带内
+                            # 领先方顺路任务是把领先烧成落后的第一步，但
+                            # 领先 >10 帧时 6 帧任务翻不了盘
+RACE_CLIFF_TRAIL = 60       # 落后侧悬崖延伸：落后度量有锚点漂移 + t_o
+                            # 裸 ETA 双重偏差（~55 帧级），且对手没起卡
+                            # 前门就没关；真落到 60 外基本追不回，转农
+RACE_CLIFF_OPP_FARM = 30    # 对手在途 taskScore ≥ 此值 → 它一路在农任务
+                            # 不是在抢关，悬崖不成立（行为证据，与 V3.18
+                            # 出牌频率画像同级；A/B 实测不加这道门 farmer
+                            # 局 48/48→42/48、镜像均分 -53——弃经济抢一场
+                            # 不存在的竞速。语料里的抢关者到关前分数恒 0）
+RACE_CLIFF_FRAME_VALUE = 30.0
 
 # 漏斗定价（V3.16）：全图汇于关键关隘（武关 S10 类），谁后到谁挨卡。
 # 对手先到时，我们过漏斗的真实代价随"到达时机"剧烈变化（replay57/60 实测）：
@@ -171,6 +195,12 @@ class TaskPlanner:
         # 模块全局会同时改到对局双方。语义与模块级默认值完全一致
         self.RACE_BAND = RACE_BAND
         self.RACE_FRAME_MULT = RACE_FRAME_MULT
+        self.RACE_CLIFF_ENABLED = True
+        self.RACE_CLIFF_ETA = RACE_CLIFF_ETA
+        self.RACE_CLIFF_LEAD = RACE_CLIFF_LEAD
+        self.RACE_CLIFF_TRAIL = RACE_CLIFF_TRAIL
+        self.RACE_CLIFF_OPP_FARM = RACE_CLIFF_OPP_FARM
+        self.RACE_CLIFF_FRAME_VALUE = RACE_CLIFF_FRAME_VALUE
         self.SWITCH_MARGIN = SWITCH_MARGIN
         self.FUNNEL_GUARD_PRIOR = FUNNEL_GUARD_PRIOR
         self.OFFPATH_RACE_FLOOR = OFFPATH_RACE_FLOOR
@@ -187,6 +217,8 @@ class TaskPlanner:
         self._guard_seen = False       # 对手本局设过卡（漏斗先验升为 1.0，粘性）
         self._funnel_cache = (None, None)  # ((round, cur), (choke, t_o, prior, toll_direct))
         self._race_cache = (-1, False)     # (round, 竞速模式是否激活)
+        self._cliff_cache = (-1, False)    # (round, 悬崖带是否激活)
+        self._cliff_choke = None           # 悬崖带激活时的咽喉节点
         self._committed = None             # 目标粘性：当前承诺目标的键
         # 回头迟滞（V3.8）：刚离开的节点在窗口期内作为目标首跳要付额外代价。
         # replay25：走廊总价近似打平让 65 帧真实折返在绕路公式里"免费"，
@@ -607,6 +639,11 @@ class TaskPlanner:
                                             penalty, ecost)
         if not back_path:
             return None
+
+        # （V3.21 校准注：曾试过更狠的悬崖带任务闸门——带内只放行严格
+        # 关后的任务。被证伪：seed23 类深链死局（起卡延迟+晚动身+二卡）
+        # 救不回来，反而把赢局分数拉低 ~120（跨里程碑任务在领先不宽裕的
+        # 局里被误杀）。悬崖价 30/帧 + 顺路领取清空已是净收益最优点）
         detour = max(0, f_to + f_back - to_gate)
         total_frames = detour + proc
         # 硬约束用时间口径（可行性看时间，优劣看价值）
@@ -690,6 +727,45 @@ class TaskPlanner:
         self._race_cache = (state.round, active)
         return active
 
+    def race_cliff(self, state):
+        """悬崖带：咽喉已近、尚无敌卡、我们没有安全领先——带内一帧≈胜负帧。
+
+        与 race_mode 解耦（V3.21 校准）：race_mode 的 ±25 对称带在尾侧
+        太窄——落后度量在长边上有 +1/帧的锚点漂移、t_o 是不含对手停留的
+        裸 ETA（双重偏差可达 ~55 帧），seed23 实测在真实可争的局面里
+        "落后 26"被判出带，悬崖关闭后顺路任务复活、死局原样复现。
+        规则语义上，只要对手还没在咽喉起卡，门就没关：早到 1 帧就少
+        1 帧死等/税差，落后侧的悬崖一直延伸到 RACE_CLIFF_TRAIL。
+        它一起卡，悬崖已定（转入漏斗定价/攻坚经济），立即退出。
+        进入/退出全由公开状态决定，与对手意愿无关。
+        """
+        if self._cliff_cache[0] == state.round:
+            return self._cliff_cache[1]
+        active = False
+        opp = state.opp or {}
+        farming = (opp.get("taskScore") or 0) >= self.RACE_CLIFF_OPP_FARM
+        if self.RACE_CLIFF_ENABLED and not farming:
+            cur = self._anchor_node(state)
+            ctx = self._funnel_ctx(state, cur, self._penalty_fn(state),
+                                   self._edge_cost_fn(state)) if cur else None
+            if ctx:
+                choke, t_o, _, _ = ctx
+                g = state.node(choke).get("guard")
+                guarded = bool(g and g.get("ownerTeamId")
+                               and g.get("ownerTeamId") != state.my_team
+                               and g.get("active", g.get("defense", 0) > 0))
+                my_eta = state.graph.all_frames(cur).get(choke, math.inf)
+                if not guarded and my_eta != math.inf \
+                        and my_eta <= self.RACE_CLIFF_ETA:
+                    lead = t_o - (state.round + my_eta)   # >0 = 我们先到
+                    if -self.RACE_CLIFF_TRAIL <= lead <= self.RACE_CLIFF_LEAD:
+                        active = True
+                        self._cliff_choke = choke
+        if not active:
+            self._cliff_choke = None
+        self._cliff_cache = (state.round, active)
+        return active
+
     # ================= 帧价值与辅助 =================
 
     def _frame_value(self, state, eta_direct, race_adjust=True):
@@ -709,6 +785,8 @@ class TaskPlanner:
         v = FRESH_VALUE_PER_FRAME + TIME_SCORE_PER_FRAME
         if race_adjust and self.race_mode(state):
             v *= self.RACE_FRAME_MULT
+            if self.race_cliff(state):
+                v = max(v, self.RACE_CLIFF_FRAME_VALUE)
         return v
 
     @staticmethod

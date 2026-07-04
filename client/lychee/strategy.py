@@ -569,6 +569,11 @@ class PlannerStrategy(BaselineStrategy):
             # 情报各 2 帧读条在竞争带内是胜负帧，赢下漏斗后有的是空转帧补
             claim_list = self.RACE_CLAIM_ONLY \
                 if self.planner.race_mode(state) else self.CLAIM_EN_ROUTE
+            if self.planner.race_cliff(state):
+                # 悬崖带（V3.21）：2 帧读条也是胜负帧——冰/马也不顺手领。
+                # 只影响这个 ~60 帧窗口的路过领取；冰链作为规划目标的口径
+                # （race_adjust=False）不受影响，追猎照常
+                claim_list = ()
             for rt in claim_list:
                 limit = self.CLAIM_LIMIT.get(rt, 1)
                 if stock.get(rt, 0) > 0 and res.get(rt, 0) < limit:

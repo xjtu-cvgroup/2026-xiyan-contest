@@ -2,9 +2,10 @@
 """全形态回归矩阵（V3.20 起每轮收尾必跑）：python3 regress.py
 
 镜像 12 局 / 确定性 camper 48 局 / 随机化 camper 48 局 / rusher 24 局 /
-farmer 48 局，输出各形态胜率、margin、未交付清单与画像命中分布。历史
-基线见 docs/opp-profile-2026-07-04.md 与 docs/guard-audit-2026-07-04.md
-附表——数字回退即回归。
+farmer 48 局，输出各形态胜率、margin、未交付清单与画像命中分布。
+现行基线（V3.21，见 docs/race-cliff-2026-07-04.md §四）：镜像 5/1/6
+-2.2；定 camper 48/48 +179.1；随机 camper 42/48 +200.2 未交付 {4,23}；
+farmer 48/48 +224.9；rusher 24/24 +320.2。数字回退即回归。
 """
 import os
 import sys

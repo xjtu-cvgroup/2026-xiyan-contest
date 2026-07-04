@@ -2260,6 +2260,102 @@ def test_race_tempo():
     return ok
 
 
+def test_race_cliff():
+    """V3.21 悬崖带：咽喉近 + 尚无敌卡 + 非安全领先 → 帧价切换为悬崖斜率。
+
+    立项：随机化 camper 四死局中 10/15 同构——S07 顺路停留 ~14 帧把
+    "同帧进边"（免疫）变成"落后 18~20 帧"（死等+满防税起步），漏斗竞速
+    是悬崖函数而非线性。悬崖价 30/帧咬掉带内顺路任务与领取，两局翻盘
+    且赢局逐位无损。与 race_mode 解耦：±25 对称带在尾侧有 ~55 帧的
+    度量偏差（锚点漂移 + t_o 裸 ETA），落后侧延伸到 60。"""
+    ok = True
+    with open(os.path.join(DOC_DIR, "start消息.json"), encoding="utf-8") as f:
+        start = json.load(f)["msg_data"]
+    with open(os.path.join(DOC_DIR, "inquire消息.json"), encoding="utf-8") as f:
+        inquire = json.load(f)["msg_data"]
+    from lychee.planner import (TaskPlanner, FRESH_VALUE_PER_FRAME,
+                                TIME_SCORE_PER_FRAME, RACE_CLIFF_FRAME_VALUE)
+
+    def gs_cliff(my_pos="S07", opp_pos="S05", round_no=160, guard_s10=None,
+                 ice_at=None, opp_task=0):
+        gs = GameState(1001)
+        gs.on_start(start)
+        d = json.loads(json.dumps(inquire))
+        d["round"] = round_no
+        d["contests"], d["tasks"] = [], []
+        d["weather"] = {"active": [], "forecast": []}
+        for p in d["players"]:
+            if p["playerId"] == 1001:
+                p.update(state="IDLE", currentNodeId=my_pos, nextNodeId=None,
+                         routeEdgeId=None, currentProcess=None, buffs=[],
+                         resources={}, freshness=95.0, goodFruit=90,
+                         badFruit=0, taskScore=45)
+            else:
+                p.update(state="IDLE", currentNodeId=opp_pos, nextNodeId=None,
+                         routeEdgeId=None, currentProcess=None,
+                         delivered=False, retired=False,
+                         taskScore=opp_task)
+        for n in d["nodes"]:
+            n["hasObstacle"] = False
+            n["guard"] = guard_s10 if n["nodeId"] == "S10" else None
+            n["resourceStock"] = ({"FAST_HORSE": 1}
+                                  if n["nodeId"] == ice_at else {})
+            n.pop("processType", None)
+            n["processRound"] = 0
+        gs.on_inquire(d)
+        return gs
+
+    # 1) 正例：我 S07（ETA 119 ≤ 125）、对手 S05（差 ~4）、S10 无卡 → 激活，
+    #    帧价切换为悬崖斜率（资源目标口径豁免不变）
+    gs = gs_cliff()
+    pl = TaskPlanner()
+    ok &= check("悬崖: 关前竞争带内激活", pl.race_cliff(gs), "")
+    fv = pl._frame_value(gs, 100)
+    ok &= check("悬崖: 带内帧价为悬崖斜率",
+                abs(fv - RACE_CLIFF_FRAME_VALUE) < 1e-9, f"fv={fv}")
+    base_fv = FRESH_VALUE_PER_FRAME + TIME_SCORE_PER_FRAME
+    ok &= check("悬崖: 资源目标口径仍豁免",
+                abs(pl._frame_value(gs, 100, race_adjust=False)
+                    - base_fv) < 1e-9, "")
+
+    # 2) 安全领先豁免：我 S09（56）、对手 S05（115）→ 领先 59 > 10，不悬崖
+    ok &= check("悬崖: 安全领先不悬崖",
+                not TaskPlanner().race_cliff(gs_cliff(my_pos="S09",
+                                                      opp_pos="S05")), "")
+    # 3) 深落后出带：对手已到咽喉（差 -119 < -60）→ 转入攻坚/漏斗经济
+    ok &= check("悬崖: 深落后出带",
+                not TaskPlanner().race_cliff(gs_cliff(my_pos="S07",
+                                                      opp_pos="S10")), "")
+    # 3b) 落后但在尾侧延伸内（我 S07 vs 对手 S09，差 ~-63+... 实取 S05→
+    #     对手 S09: t_o=+56, 我 119 → 差 -63 恰在界外；用对手 S07 同位=0）
+    ok &= check("悬崖: 同位平手在带内",
+                TaskPlanner().race_cliff(gs_cliff(my_pos="S07",
+                                                  opp_pos="S07")), "")
+    # 4) 咽喉已有敌卡 → 悬崖已定，退出（转常规漏斗定价）
+    ok &= check("悬崖: 敌卡落地即退出",
+                not TaskPlanner().race_cliff(gs_cliff(
+                    guard_s10={"ownerTeamId": "BLUE", "defense": 6,
+                               "active": True})), "")
+    # 5) 咽喉尚远不悬崖：S03（ETA ~194 > 125）竞速带内但未来方差主导
+    ok &= check("悬崖: 关远处不悬崖（竞速带内）",
+                not TaskPlanner().race_cliff(gs_cliff(my_pos="S03",
+                                                      opp_pos="S03")), "")
+    # 6) 开关
+    pl6 = TaskPlanner()
+    pl6.RACE_CLIFF_ENABLED = False
+    ok &= check("悬崖: 开关关闭回落", not pl6.race_cliff(gs_cliff()), "")
+    # 6b) 对手在途农任务（taskScore ≥ 30）→ 它不是在抢关，不悬崖
+    #     （A/B 实锤：无此门 farmer 局 48/48→42/48、镜像均分 -53）
+    ok &= check("悬崖: 对手在途农任务不悬崖",
+                not TaskPlanner().race_cliff(gs_cliff(opp_task=60)), "")
+
+    # （行为级"带内顺路领取清空"无单元观察点：冰/马都会先被 planner 立为
+    #   资源目标走 plan 分支（race_adjust=False 豁免口径，V3.16 冰链 +
+    #   T06 马匹经济，刻意保留），en-route 清空只影响非目标资源的路过
+    #   领取——该效果由竞技场 cliff A/B（seed10/15 翻盘）背书）
+    return ok
+
+
 def test_target_stickiness():
     """V3.18 目标粘性：换目标要求 15% 净值优势，消除同级目标间的震荡。"""
     ok = True
@@ -2571,6 +2667,7 @@ def main():
     ok &= test_corridor_reserve()
     ok &= test_lenient_frame()
     ok &= test_race_tempo()
+    ok &= test_race_cliff()
     ok &= test_target_stickiness()
     ok &= test_trap_ransom()
     ok &= test_card_profile()
