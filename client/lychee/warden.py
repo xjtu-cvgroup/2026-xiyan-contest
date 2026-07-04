@@ -68,6 +68,7 @@ class WardenStrategy(BaselineStrategy):
         self._squad_spent = 0
         self._dead_since = None    # 双死判定首次成立的帧（懦夫博弈滞后）
         self._score_farm_mode = False  # S02 锁死/RUSH 后只抢任务分，不再奔终点
+        self._s02_won_window = False   # 我方赢下 S02 窗口：处理完必须抢 S10
 
     # ================= 初始化 =================
 
@@ -152,6 +153,27 @@ class WardenStrategy(BaselineStrategy):
                             for a in actions)):
             actions.append(P.a_move(me["nextNodeId"]))
         return actions
+
+    def _absorb_feedback(self, state):
+        super()._absorb_feedback(state)
+        for e in state.my_events("DOCK_CONTEST_WIN", "WINDOW_CONTEST_END",
+                                 "PROCESS_COMPLETE", "PROCESS_COMPLETED",
+                                 "VERIFY_GATE_COMPLETE",
+                                 "VERIFY_GATE_COMPLETED"):
+            p = e.get("payload") or {}
+            target = p.get("targetNodeId") or p.get("nodeId")
+            etype = e.get("type")
+            if target == "S02" and etype in ("PROCESS_COMPLETE",
+                                             "PROCESS_COMPLETED"):
+                self._processed_here = True
+            if target == "S02" and etype == "DOCK_CONTEST_WIN" \
+                    and p.get("playerId") == state.player_id:
+                self._s02_won_window = True
+            if etype == "WINDOW_CONTEST_END" \
+                    and p.get("winnerPlayerId") == state.player_id \
+                    and (target == "S02"
+                         or p.get("contestType") == P.CONTEST_DOCK):
+                self._s02_won_window = True
 
     def _maybe_fallback_gate(self, state):
         """当前墙被买穿/正在被攻坚/已失去必经性 → 转场宫门 S14 重筑墙。
@@ -256,6 +278,8 @@ class WardenStrategy(BaselineStrategy):
         # ---- 农任务终局（S02 镜像锁死等场景）----
         # 我方交付已不可能：分数只剩未交付任务分可挣。但对手还活着时
         # 必须继续争（让行=放它出去交付）；对手也死了才让行转农
+        if cur == "S02" and self._s02_won_window and self._processed_here:
+            return self._advance(state, cur, camp)
         if self._score_farm_mode and not me.get("verified"):
             return self._farm_endgame(state, cur)
         if self._s02_lock_hold(state, cur):

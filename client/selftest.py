@@ -4518,13 +4518,14 @@ def test_warden_strategy():
     def gs_at(cur, opp_cur="S09", opp_next=None, opp_edge=None,
               opp_process=None,
               round_no=320, phase=P.PHASE_NORMAL, verified=False,
-              task_score=0, tasks=()):
+              task_score=0, tasks=(), events=()):
         gs = GameState(1001)
         gs.on_start(start)
         d = json.loads(json.dumps(inquire))
         d["round"] = round_no
         d["phase"] = phase
         d["contests"], d["tasks"] = [], list(tasks)
+        d["events"] = list(events)
         d["weather"] = {"active": [], "forecast": []}
         for p in d["players"]:
             if p["playerId"] == 1001:
@@ -4573,6 +4574,24 @@ def test_warden_strategy():
     ok &= check("warden: S02已完成后不原地等待，直奔S10",
                 a and a["action"] == "MOVE" and a.get("targetNodeId") != "S02",
                 str(a))
+
+    st = WardenStrategy()
+    st.camp_node = "S10"
+    st._plans_ready = True
+    st._score_farm_mode = True
+    gs = gs_at("S02", opp_cur="S02", round_no=49,
+               events=({"type": "DOCK_CONTEST_WIN",
+                        "payload": {"playerId": 1001,
+                                    "targetNodeId": "S02"}},
+                       {"type": "PROCESS_COMPLETE",
+                        "payload": {"playerId": 1001,
+                                    "targetNodeId": "S02"}}))
+    acts = st.decide(gs)
+    main = next((x for x in acts if x["action"] in P.MAIN_ACTION_TYPES), None)
+    ok &= check("warden: S02胜窗完成后覆盖转农，必须去S10",
+                main and main["action"] == "MOVE"
+                and main["targetNodeId"] == "S04",
+                str(acts))
 
     t_back = {"taskId": "T_BACK", "taskTemplateId": "T01",
               "nodeId": "S05", "processRound": 4, "score": 30,
