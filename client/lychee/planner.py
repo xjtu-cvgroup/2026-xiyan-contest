@@ -64,7 +64,11 @@ FORWARD_BIAS_AUTO = 0.6     # 冲锋型对手在线识别命中时的地板（st
 # 山线停留，不拦官道跟随。过了中段后硬件资源价值上调，补回前面放弃的
 # 非关键经济。V3.32 审计：陪练电池无 2986 官道型代表，子系统实测净负，
 # 全量门默认关闭；V3.35 只恢复山路线轻门，覆盖平台 lose 批次里最稳定的
-# "已有基础分后被 S06/S08 山路拖走"负样本。
+# "已有基础分后被 S06/S08 山路拖走"负样本。V3.37：平台 15 局 6 败
+# 进一步说明问题不是"偏好官道"，而是对手已提交前段走廊后，我们仍为
+# 眼前任务切到另一条走廊；新增证据驱动的走廊跟随轻门。为避免复刻
+# camper/toller 死形，只拦"需要离站移动"的反切任务，水路不作为跟随
+# 证据，脚下顺手任务仍按估值系统自己决策。
 FRONT_TEMPO_ENABLED = False
 FRONT_TEMPO_MOUNTAIN_RECOVERY = True
 FRONT_TEMPO_PROGRESS_CUT = 0.22
@@ -74,6 +78,14 @@ FRONT_TEMPO_BLOCK_ROUTE_TYPES = {P.MOUNTAIN}
 FRONT_TEMPO_KEEP_LEAD_TRAIL = -30
 FRONT_TEMPO_KEYPASS_BASE_CAP = 120
 FRONT_TEMPO_KEYPASS_TASK_ROUTES = {P.ROAD}
+FRONT_TEMPO_CORRIDOR_FOLLOW = True
+FRONT_TEMPO_CORRIDOR_BASE_CAP = 150
+FRONT_TEMPO_CORRIDOR_ROUTES = {P.ROAD, P.MOUNTAIN}
+FRONT_TEMPO_CORRIDOR_NODES = {
+    "S04": P.WATER, "S05": P.WATER,
+    "S06": P.MOUNTAIN, "S08": P.MOUNTAIN,
+    "S07": P.ROAD, "S09": P.ROAD,
+}
 LATE_RESOURCE_PROGRESS = 0.62
 LATE_RESOURCE_MULT = 1.25
 ICE_AMMO_TARGET_BAD = 1
@@ -341,6 +353,8 @@ class TaskPlanner:
         self.FRONT_TEMPO_OPP_LEAD = FRONT_TEMPO_OPP_LEAD
         self.FRONT_TEMPO_KEEP_LEAD_TRAIL = FRONT_TEMPO_KEEP_LEAD_TRAIL
         self.FRONT_TEMPO_KEYPASS_BASE_CAP = FRONT_TEMPO_KEYPASS_BASE_CAP
+        self.FRONT_TEMPO_CORRIDOR_FOLLOW = FRONT_TEMPO_CORRIDOR_FOLLOW
+        self.FRONT_TEMPO_CORRIDOR_BASE_CAP = FRONT_TEMPO_CORRIDOR_BASE_CAP
         self.LATE_RESOURCE_PROGRESS = LATE_RESOURCE_PROGRESS
         self.LATE_RESOURCE_MULT = LATE_RESOURCE_MULT
         self.ICE_AMMO_TARGET_BAD = ICE_AMMO_TARGET_BAD
@@ -1137,6 +1151,66 @@ class TaskPlanner:
                 return edge.get("routeType")
         return None
 
+    def _opp_committed_corridor(self, state):
+        """对手前段已用移动/站位暴露的走廊；未知时不猜。"""
+        opp = state.opp or {}
+        if not opp or opp.get("delivered") or opp.get("retired"):
+            return None
+        def node_corridor(node_id):
+            if node_id not in FRONT_TEMPO_CORRIDOR_NODES:
+                return None
+            if not self._key_pass_ahead(state, node_id):
+                return None
+            rt = FRONT_TEMPO_CORRIDOR_NODES[node_id]
+            return rt if rt in FRONT_TEMPO_CORRIDOR_ROUTES else None
+        edge_id = opp.get("routeEdgeId")
+        if edge_id and edge_id in state.graph.edges:
+            rt = state.graph.edges[edge_id].get("routeType")
+            if rt in FRONT_TEMPO_CORRIDOR_ROUTES:
+                return rt
+            return node_corridor(opp.get("nextNodeId")) \
+                or node_corridor(opp.get("currentNodeId"))
+        return node_corridor(opp.get("currentNodeId"))
+
+    def _candidate_corridor(self, state, task, cur, pos, speed, penalty,
+                            ecost):
+        bucket = self._task_route_bucket(state, task, pos)
+        if bucket in FRONT_TEMPO_CORRIDOR_ROUTES:
+            return bucket
+        _, path = state.graph.shortest_path(cur, pos, speed, penalty, ecost)
+        path = path or ()
+        for a, b in zip(path, path[1:]):
+            edge = state.graph.edge_between(a, b)
+            rt = edge.get("routeType") if edge else None
+            if rt in FRONT_TEMPO_CORRIDOR_ROUTES:
+                return rt
+        return None
+
+    def _front_tempo_corridor_follow_blocked(self, state, task, cur, pos,
+                                             speed, penalty, ecost, base):
+        """首关前跟随对手已提交走廊，别在岔路口把路权农掉。"""
+        if not self.FRONT_TEMPO_CORRIDOR_FOLLOW:
+            return False
+        if pos == cur:
+            return False
+        if state.phase != P.PHASE_NORMAL or self.opp_profile == "camper":
+            return False
+        base = state.me.get("taskScore", 0) if base is None else base
+        if (base or 0) >= self.FRONT_TEMPO_CORRIDOR_BASE_CAP:
+            return False
+        if not self._key_pass_ahead(state, cur, penalty, ecost):
+            return False
+        if not self._front_tempo_contested(state, cur):
+            return False
+        opp_route = self._opp_committed_corridor(state)
+        if opp_route is None:
+            return False
+        cand_route = self._candidate_corridor(state, task, cur, pos, speed,
+                                              penalty, ecost)
+        if cand_route is None:
+            return False
+        return cand_route != opp_route
+
     def _keypass_tempo_task_blocked(self, state, task, cur, pos, speed,
                                     penalty, ecost, base):
         """首个关键关前的节奏闸门：120 分够进 S10，非官道先让。"""
@@ -1154,6 +1228,9 @@ class TaskPlanner:
     def _front_tempo_task_blocked(self, state, task, cur, pos, speed,
                                   penalty, ecost, base):
         """早段路线承诺闸门：低进度/山线任务先让，等 S07/S10 波次补分。"""
+        if self._front_tempo_corridor_follow_blocked(
+                state, task, cur, pos, speed, penalty, ecost, base):
+            return True
         if not self._front_tempo_active(state, cur, base):
             return self._front_tempo_mountain_recovery_blocked(
                 state, task, cur, pos, speed, penalty, ecost, base)
