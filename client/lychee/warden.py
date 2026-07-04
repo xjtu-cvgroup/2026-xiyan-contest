@@ -172,6 +172,8 @@ class WardenStrategy(BaselineStrategy):
         if pos and pos != camp:
             _, pth = state.graph.shortest_path(pos, gate, P.BASE_SPEED)
             breached = bool(pth) and camp not in pth   # 它去宫门已不经过关隘
+        if forcing:
+            self._last_inbound = state.round   # 转运=正在逼近，别当埋伏流
         if forcing or breached:
             if self.log:
                 self.log.info("warden: fallback to gate wall (%s)",
@@ -608,7 +610,8 @@ class WardenStrategy(BaselineStrategy):
         #    S14 掐我们踏边的形态），多留一张防4卡的风化税提前动身
         pad = self.EXIT_PAD
         if state.round - getattr(self, "_last_inbound", 0) > 120 \
-                and cur == self.camp_node:
+                and cur == self.camp_node \
+                and cur != state.gate_node:   # 宫门→S15 边规则禁卡，无伏可防
             pad += 90
         if remain <= self._my_need(state, cur) + pad:
             return True
