@@ -229,6 +229,13 @@ class PlannerStrategy(BaselineStrategy):
     GUARD_SCORE_LEAD_SLACK = 25
     GUARD_SCORE_LEAD_TASK_MIN = 90
     GUARD_SCORE_LEAD_TASK_GAP = 30
+    # 确定必经拒止卡（V3.41）：比 3.40 再激进半档。普通合流点若
+    # 已确认在对手高效路径上、对手 45 帧内到达，且对手至少小幅任务分
+    # 领先，就把 4 帧读条兑现成通行税，而不是等到 90:60 这种强信号。
+    GUARD_DENIAL_OPP_ETA = 45
+    GUARD_DENIAL_SLACK = 20
+    GUARD_DENIAL_TASK_MIN = 60
+    GUARD_DENIAL_TASK_GAP = 15
     GUARD_BOUNTY_EXPOSE_ETA = 30  # 30 帧后破卡会生成/结算悬赏，领先局避开送分卡
 
     # ---- 防中边陷阱（V3.5，V3.12 删证据门）----
@@ -290,7 +297,7 @@ class PlannerStrategy(BaselineStrategy):
     # ---- 小分队远程清障（V3.12）----
     SQUAD_CLEAR_RESEND_GAP = 18   # 落地延迟上限 15 帧 + 余量，防重复派人
 
-    # ---- 小分队增援（V3.12）----
+    # ---- 小分队增援（V3.12 / V3.41）----
     REINFORCE_DEFENSE_FLOOR = 4    # 自家设卡防守值跌破该值才续
     REINFORCE_RESEND_GAP = 30      # 同一节点续防重试间隔
 
@@ -914,7 +921,9 @@ class PlannerStrategy(BaselineStrategy):
         catchup_guard = self._catchup_merge_guard_opportunity(state, cur, opp_eta)
         score_lead_guard = self._score_lead_merge_guard_opportunity(
             state, cur, opp_eta)
-        rear_guard = catchup_guard or score_lead_guard \
+        denial_guard = self._certain_denial_guard_opportunity(
+            state, cur, opp_eta)
+        rear_guard = catchup_guard or score_lead_guard or denial_guard \
             or self._rear_guard_opportunity(state, cur, opp_eta)
         if not (choke_guard or rear_guard):
             return None
@@ -932,6 +941,8 @@ class PlannerStrategy(BaselineStrategy):
             slack_min = self.GUARD_CATCHUP_SLACK
         elif score_lead_guard:
             slack_min = self.GUARD_SCORE_LEAD_SLACK
+        elif denial_guard:
+            slack_min = self.GUARD_DENIAL_SLACK
         elif rear_guard and not choke_guard:
             slack_min = (self.GUARD_REAR_RUSH_SLACK
                          if state.phase == P.PHASE_RUSH
@@ -1066,6 +1077,21 @@ class PlannerStrategy(BaselineStrategy):
         if opp_task < self.GUARD_SCORE_LEAD_TASK_MIN:
             return False
         if opp_task - me_task < self.GUARD_SCORE_LEAD_TASK_GAP:
+            return False
+        return self.planner._key_pass_ahead(state, cur)
+
+    def _certain_denial_guard_opportunity(self, state, cur, opp_eta):
+        """普通必经点的轻量拒止卡：小幅落后也不白放对手过合流口。"""
+        node_type = state.node(cur).get("nodeType")
+        if node_type in self.GUARD_NODE_TYPES or node_type in ("START", "FINISH"):
+            return False
+        if opp_eta > self.GUARD_DENIAL_OPP_ETA:
+            return False
+        me_task = state.me.get("taskScore", 0) or 0
+        opp_task = state.opp.get("taskScore", 0) or 0
+        if opp_task < self.GUARD_DENIAL_TASK_MIN:
+            return False
+        if opp_task - me_task < self.GUARD_DENIAL_TASK_GAP:
             return False
         return self.planner._key_pass_ahead(state, cur)
 
@@ -1737,9 +1763,8 @@ class PlannerStrategy(BaselineStrategy):
             self._squad_spent += 1
             return P.a_squad_scout(t)
 
-        # 续防自家设卡（V3.12）：只在落后时续——领先时故意不续，让快风化的卡
-        # 自然失效，别把它续到破关悬赏 30/60 帧的触发线上，被拆时反倒给
-        # 对手送追分分（悬赏只在攻破方总分更低时结算，见 6.3.3）
+        # 续防自家设卡：常规仍只在落后时续；领先局只有在对手正在攻坚
+        # 该卡时才用富余人手补防，并且必须完整吃到 +2（不补超上限）。
         if avail >= 2 and can_spend(2):
             reinforce_target = self._reinforce_opportunity(state)
             if reinforce_target:
@@ -1760,9 +1785,7 @@ class PlannerStrategy(BaselineStrategy):
         return None
 
     def _reinforce_opportunity(self, state):
-        """给自己还有效的设卡续防守值，仅在落后时（见上方注释的悬赏风险）。"""
-        if not state.is_behind():
-            return None
+        """给自己还有效的设卡续防守值，领先时仅救正在被攻坚的关键卡。"""
         opp = state.opp
         if not opp or opp.get("delivered") or opp.get("retired"):
             return None
@@ -1772,15 +1795,41 @@ class PlannerStrategy(BaselineStrategy):
             if not g or g.get("ownerTeamId") != state.my_team:
                 continue
             defense = g.get("defense", 0) or 0
-            if defense <= 0 or defense >= self.REINFORCE_DEFENSE_FLOOR:
+            max_defense = g.get("maxDefense") or self._node_guard_cap(state, node_id)
+            if defense <= 0 or defense + 2 > max_defense:
                 continue
             if state.round - self._reinforce_sent.get(node_id, -999) < self.REINFORCE_RESEND_GAP:
                 continue
-            opp_eta = self.planner._opp_eta(state, node_id)
-            if not (self.GUARD_MIN_OPP_ETA <= opp_eta <= self.GUARD_MAX_OPP_ETA):
-                continue  # 对手已经绕开或还远得很，续了也是浪费人手
+            attack_now = self._opp_breaking_our_guard(state, node_id)
+            if state.is_behind():
+                if defense >= self.REINFORCE_DEFENSE_FLOOR and not attack_now:
+                    continue
+            elif not attack_now:
+                continue
+            if not attack_now:
+                opp_eta = self.planner._opp_eta(state, node_id)
+                if not (self.GUARD_MIN_OPP_ETA <= opp_eta <= self.GUARD_MAX_OPP_ETA):
+                    continue  # 对手已经绕开或还远得很，续了也是浪费人手
             return node_id
         return None
+
+    @staticmethod
+    def _opp_breaking_our_guard(state, node_id):
+        proc = state.opp.get("currentProcess") or {}
+        return proc.get("targetNodeId") == node_id and \
+            (proc.get("action") or proc.get("type")) == "BREAK_GUARD"
+
+    @staticmethod
+    def _node_guard_cap(state, node_id):
+        node = state.node(node_id)
+        node_type = node.get("nodeType")
+        if node_type == "GATE":
+            return 4
+        if state.has_obstacle(node_id):
+            return 5
+        if node_type == "KEY_PASS":
+            return 7
+        return 6
 
     def _squad_clear_opportunity(self, state, plan):
         """本队去任务/资源/终点路上被障碍挡住的下一个节点；没有则 None。

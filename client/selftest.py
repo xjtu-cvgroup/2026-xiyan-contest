@@ -2124,7 +2124,7 @@ def test_latent_mechanics():
     ok &= check("续防: 落后时给自家风化中的卡续命",
                 a == {"action": "SQUAD_REINFORCE", "targetNodeId": "S10"}, str(a))
 
-    # ---- 续防 2: 领先时不续——别把卡续到悬赏触发线上送对手追分分 ----
+    # ---- 续防 2: 领先常规不续——别把卡续到悬赏触发线上送对手追分分 ----
     gs = base_state(cur="S13", my_score=700, opp_score=600)
     gs.nodes["S10"]["guard"] = {"ownerTeamId": "RED", "defense": 2,
                                 "maxDefense": 6, "active": True}
@@ -2134,8 +2134,35 @@ def test_latent_mechanics():
     st3 = PlannerStrategy()
     st3._guard_sent = {"S10": 1}
     a = st3.squad_action(gs, Plan("deliver", slack=200))
-    ok &= check("续防: 领先时不续（无主动撤卡手段，只能不主动养大悬赏敞口）",
+    ok &= check("续防: 领先但未被攻坚时不续",
                 a is None, str(a))
+    # ---- 续防 3: 领先时若对手正在攻坚我方卡，用富余人手补防 ----
+    gs = base_state(cur="S13", my_score=700, opp_score=600)
+    gs.nodes["S10"]["guard"] = {"ownerTeamId": "RED", "defense": 4,
+                                "maxDefense": 7, "active": True}
+    for p in gs.players.values():
+        if p["playerId"] != 1001:
+            p.update(currentNodeId="S09", nextNodeId=None, routeEdgeId=None,
+                     currentProcess={"action": "BREAK_GUARD",
+                                     "targetNodeId": "S10"})
+    st4 = PlannerStrategy()
+    st4._guard_sent = {"S10": 1}
+    a = st4.squad_action(gs, Plan("deliver", slack=200))
+    ok &= check("续防: 领先且对手正攻坚时补防",
+                a == {"action": "SQUAD_REINFORCE", "targetNodeId": "S10"}, str(a))
+    # ---- 续防 4: 不补超上限；只剩 1 点空间也不花 2 人手换半次收益 ----
+    gs = base_state(cur="S13", my_score=700, opp_score=600)
+    gs.nodes["S10"]["guard"] = {"ownerTeamId": "RED", "defense": 6,
+                                "maxDefense": 7, "active": True}
+    for p in gs.players.values():
+        if p["playerId"] != 1001:
+            p.update(currentNodeId="S09", nextNodeId=None, routeEdgeId=None,
+                     currentProcess={"action": "BREAK_GUARD",
+                                     "targetNodeId": "S10"})
+    st5 = PlannerStrategy()
+    st5._guard_sent = {"S10": 1}
+    a = st5.squad_action(gs, Plan("deliver", slack=200))
+    ok &= check("续防: 不为超上限补防浪费人手", a is None, str(a))
 
     # ---- 宫门设卡成本: S14 防守值上限 4（6.2.1），extra=1 即拉满，
     # extra=2 超上限那篓不提防守且不返还，纯白烧 ----
@@ -2465,6 +2492,14 @@ def test_race_tempo():
                 and a["targetNodeId"] == "S09", str(a))
     gs = gs_race(my_pos="S09", round_no=225, task_score=60,
                  opp_task_score=75,
+                 opp_moving=("S07", "S09", "E04", 26))
+    a = PlannerStrategy()._guard_opportunity(gs, "S09",
+                                             Plan("deliver", slack=25))
+    ok &= check("竞速: 小幅任务领先但必经时也设拒止卡",
+                a is not None and a["action"] == "SET_GUARD"
+                and a["targetNodeId"] == "S09", str(a))
+    gs = gs_race(my_pos="S09", round_no=225, task_score=60,
+                 opp_task_score=70,
                  opp_moving=("S07", "S09", "E04", 26))
     a = PlannerStrategy()._guard_opportunity(gs, "S09",
                                              Plan("deliver", slack=35))

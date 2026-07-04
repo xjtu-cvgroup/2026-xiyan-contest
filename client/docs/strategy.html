@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>荔枝争运战 · 完整策略文档 (BUILD 3.40-lose4-counterplay)</title>
+<title>荔枝争运战 · 完整策略文档 (BUILD 3.41-aggressive-denial-reinforce)</title>
 <style>
   .viz-root {
     --surface-1: #fcfcfb;
@@ -96,7 +96,7 @@
 <div class="viz-root">
 
 <h1>《一骑红尘：荔枝争运战》完整策略文档</h1>
-<p class="sub">客户端 <code>PlannerStrategy</code> · <span class="badge">BUILD 3.40-lose4-counterplay</span>
+<p class="sub">客户端 <code>PlannerStrategy</code> · <span class="badge">BUILD 3.41-aggressive-denial-reinforce</span>
    · 自测 + smoke 哨兵覆盖 · 生成于 2026-07-04</p>
 
 <div class="toc">
@@ -254,8 +254,8 @@
             <span class="ret">VERIFY_GATE</span>；非 RUSH → <span class="ret">WAIT</span></li>
         <li>固定处理站未完成：对手正在处理本站 → <span class="ret">情报空转帧</span>（V3.12：有 INTEL 就
             顺手标本站，见下）；否则 <span class="ret">PROCESS</span></li>
-        <li>计划=task 且已到任务站位 → <span class="ret">CLAIM_TASK</span>（独占对象，不让行）</li>
         <li>主动设卡机会（§6 条件全满足）→ <span class="ret">SET_GUARD(防守值6)</span></li>
+        <li>计划=task 且已到任务站位 → <span class="ret">CLAIM_TASK</span>（独占对象，不让行）</li>
         <li>顺路领取（计划=task/resource/bounty 或 slack&gt;15）：冰鉴上限2，快马/短程马/过所/官凭/
             情报各1（V3.12 补上文书与情报）；错峰命中先 <span class="ret">WAIT</span> 一帧 →
             <span class="ret">CLAIM_RESOURCE</span></li>
@@ -306,12 +306,14 @@
   <div class="node decision">全部条件（按序短路）：<br>
     ① 非 RUSH 且 slack &gt; 80（自己交付无忧）<br>
     ② 对手存在且未交付未退赛<br>
-    ③ 当前节点是咽喉类型 {KEY_PASS 关键关隘, PASS 关隘, MOUNTAIN_PASS 栈道, GATE 宫门}，非 S15<br>
+    ③ 当前节点是咽喉类型 {KEY_PASS, PASS, MOUNTAIN_PASS, GATE, PALACE_STATION}，
+       或普通合流点满足追分/高分/确定必经拒止门，非 S15<br>
     ④ 节点当前无有效卡（谁的都算）；同节点重试间隔 40 帧<br>
     ⑤ 本队有效卡 &lt; 2（上限 2，第 3 张顶掉最早的）<br>
     ⑥ 对手到本节点 ETA ∈ [8, 150] 帧（8=读条4帧+生效余量；150=再远卡先风化/生悬赏）<br>
     ⑦ 本节点在对手去宫门的高效路线上（经此绕路 ≤ 15 帧容差）<br>
-    ⑧ 好果 − 底价(关隘/宫门1) − 额外2 &gt; 底仓5（投不满防守值 6 就不投）</div>
+    ⑧ 普通确定拒止门：对手任务分 ≥60 且领先 ≥15、45 帧内必经、前方仍有关键关；
+       好果 − 底价(关隘/宫门1) − 额外2 &gt; 底仓5（投不满防守值 6 就不投）</div>
   <div class="arrow">↓ 全满足</div>
   <div class="node act-main"><span class="ret">SET_GUARD(extraGoodFruit=2)</span> → 防守值 6 ·
     关键关隘防6首次风化 45 帧后 · 阻断对手 MOVE，逼其进入 §5 的代价选择</div>
@@ -330,9 +332,10 @@
     通过条件：目标无本队有效标记 · 同目标重发间隔 25 帧 · 到目标 ETA ≤ 40 帧（否则标记先过期）<br>
     <small>效果：探路标记使该点处理帧数 −3（最低2）——宫门验核 6→3，读条任务同理</small></div>
   <div class="arrow">↓ 无探路需求，人手≥2</div>
-  <div class="node act-squad">优先级 3（V3.12）—— <span class="ret">SQUAD_REINFORCE(续防)</span>：
+  <div class="node act-squad">优先级 3（V3.12/V3.41）—— <span class="ret">SQUAD_REINFORCE(续防)</span>：
     仅 is_behind() 时给自家风化中（防守值&lt;4）的设卡续 +2，且对手 ETA∈[8,150] 仍会经过；
-    领先时故意不续——没有主动撤卡手段，唯一能做的是不主动把卡续到悬赏 30/60 帧触发线上送对手追分分</div>
+    领先时只在对手正在 BREAK_GUARD 攻坚该卡、且 defense+2≤maxDefense 时用富余人手补防，
+    不为只剩 1 点上限空间的卡白烧人手</div>
   <div class="arrow">↓ 无续防需求，人手≥2</div>
   <div class="node act-squad">优先级 4（V3.12）—— <span class="ret">SQUAD_CLEAR(远程清障)</span>：
     去任务/资源/交付目标路上撞见非 T04 障碍就派（主车队不用绕路/自己 CLEAR）；
@@ -399,7 +402,7 @@
 <tr><td>任务档位</td><td>保 90 冲 110+</td><td>90 解锁满额送达 240 + 用时不折 + 里程碑 +35</td></tr>
 <tr><td>悬赏追分门（V3.12）</td><td>只在 totalScore 落后时追；单次攻坚上限好果2+坏果2=10 防守值</td><td>6.3.3：攻破方总分需低于设卡方才计分，领先时打了也白打；车轮战式硬拆不专程绕路，留给挡路时顺手打</td></tr>
 <tr><td>情报距离上限</td><td>15（任务书 3.3.4 硬规则）</td><td>空转帧顺手用：排队/防陷阱/蹲刷等注定 WAIT 的帧不占移动时间</td></tr>
-<tr><td>续防门（V3.12）</td><td>仅 is_behind() 时续；防守值&lt;4 才续；对手 ETA∈[8,150]</td><td>领先时故意不续——没有主动撤卡手段，唯一能做的是不主动把自家卡续到悬赏 30/60 帧触发线上</td></tr>
+<tr><td>续防门（V3.41）</td><td>落后：防守值&lt;4 且对手 ETA∈[8,150]；领先：仅对手正在攻坚且 defense+2≤maxDefense</td><td>常规仍防养大悬赏敞口；攻坚中补防是实时阻塞收益，且不补超上限浪费人手</td></tr>
 <tr><td>远程清障重发间隔</td><td>18 帧</td><td>落地延迟上限 15 帧 + 余量，防重复派人；绝不碰自己在做的 T04 目标</td></tr>
 </table>
 
@@ -631,9 +634,13 @@ slack +30 帧，纯农画像豁免</b></td>
 允许短窗口同点补卡，避免 S10 r286 卡被三削后因重试间隔放走对手；RUSH 将开且可破预期门卡时，不再在宫门外白等；
 后段走廊情报恢复为拒止资源，只在 S10/S11/S13 等关口顺路领取</b></td>
 <td>针对 2931 的 S09 不设卡、S10 被突破后不补卡，以及 2696 宫门外空等；selftest 加钉子，smoke 保持全绿</td></tr>
+<tr><td><b>3.41 aggressive-denial-reinforce</b></td><td><b>拒止卡再激进半档 + 领先攻坚续防：普通必经合流点从
+90:60 强信号放宽到对手任务分 ≥60 且领先 ≥15、45 帧内必经、前方仍有关键关；领先局若对手正在攻坚我方有效卡，
+且 defense+2 不超过 maxDefense，使用富余小分队增援补防</b></td>
+<td>回应“必经点正收益设卡”和“领先时补关卡防御”；不击穿走廊人手底仓，不为超上限/半收益增援浪费人手；selftest + smoke 全绿</td></tr>
 </table>
 
-<p class="foot">仓库 client/docs/strategy.html · 与代码同步于 feat/v3.40-lose4-counterplay ·
+<p class="foot">仓库 client/docs/strategy.html · 与代码同步于 feat/v3.41-aggressive-denial-reinforce ·
 自测 <code>python3 selftest.py</code> · 哨兵 <code>python3 smoke.py</code>（含 roadfarmer）</p>
 </div>
 
