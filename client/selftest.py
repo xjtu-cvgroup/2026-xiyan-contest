@@ -4629,6 +4629,29 @@ def test_warden_strategy():
                 a and a["action"] == "MOVE" and a["targetNodeId"] == "S03",
                 str(a))
 
+    t_blocked = {"taskId": "T_BLOCKED", "taskTemplateId": "T01",
+                 "nodeId": "S06", "processRound": 6, "score": 90,
+                 "expireRound": 520, "active": True, "completed": False,
+                 "failed": False, "ownerPlayerId": 0,
+                 "protectionPlayerId": 0}
+    t_safe = {"taskId": "T_SAFE", "taskTemplateId": "T01",
+              "nodeId": "S07", "processRound": 4, "score": 30,
+              "expireRound": 600, "active": True, "completed": False,
+              "failed": False, "ownerPlayerId": 0,
+              "protectionPlayerId": 0}
+    st = WardenStrategy()
+    st.camp_node = "S10"
+    st._plans_ready = True
+    st._score_farm_mode = True
+    gs = gs_at("S03", round_no=421, phase=P.PHASE_RUSH,
+               task_score=60, tasks=(t_blocked, t_safe))
+    gs.nodes["S06"]["hasObstacle"] = True
+    a = st.main_action(gs)
+    ok &= check("warden: 转农不为高分障碍任务强制通行",
+                a and a["action"] != "FORCED_PASS"
+                and a.get("targetNodeId") not in ("S06", "S02"),
+                str(a))
+
     t_s10 = {"taskId": "T_S10", "taskTemplateId": "T01",
              "nodeId": "S10", "processRound": 4, "score": 30,
              "expireRound": 520, "active": True, "completed": False,

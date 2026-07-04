@@ -397,14 +397,15 @@ class WardenStrategy(BaselineStrategy):
         return self._advance(state, cur, gate)
 
     def _advance(self, state, cur, target):
-        """朝 target 走一步：障碍优先强通（税 8 免冻），敌卡一击可破
-        则攻坚、否则强通——守望者永不等待。"""
+        """朝 target 走一步。竞速/封锁期强通免冻，转农期不为刷分强通。"""
         me = state.me
         nxt = state.graph.next_hop(cur, target, state.my_speed())
         if nxt is None:
             return P.a_wait()
         g = state.enemy_guard(nxt)
         if g:
+            if self._score_farm_mode:
+                return P.a_wait()
             good, bad = me.get("goodFruit", 0), me.get("badFruit", 0) or 0
             gf = min(2, max(0, good - self.FRUIT_RESERVE))
             bf = min(2, bad)
@@ -412,6 +413,8 @@ class WardenStrategy(BaselineStrategy):
                 return P.a_break_guard(nxt, gf, bf)
             return P.a_forced_pass(nxt)
         if state.has_obstacle(nxt):
+            if self._score_farm_mode:
+                return P.a_wait()
             return P.a_forced_pass(nxt)      # 固定 8 帧税，无窗口，免冻
         return P.a_move(nxt)
 
@@ -548,11 +551,29 @@ class WardenStrategy(BaselineStrategy):
         for t in state.claimable_tasks():
             if t.get("nodeId") != cur:
                 continue
-            tpl = t.get("taskTemplateId")
-            if tpl == "T04" or (tpl == "T06" and not has_horse):
+            if self._farm_task_blocked(state, t, has_horse):
                 continue
             return P.a_claim_task(t["taskId"])
         return self._claim_en_route(state, cur)
+
+    def _farm_task_blocked(self, state, task, has_horse):
+        """刷分模式只吃确定净赚任务，不为清障/障碍点烧主车强通税。"""
+        tpl = task.get("taskTemplateId")
+        if tpl == "T04" or (tpl == "T06" and not has_horse):
+            return True
+        labels = (tpl, task.get("name"), task.get("taskName"),
+                  task.get("taskTemplateName"), task.get("templateName"))
+        if any("清障" in str(x) for x in labels if x):
+            return True
+        nid = task.get("nodeId")
+        return bool(nid and state.has_obstacle(nid))
+
+    def _farm_path_blocked(self, state, path):
+        """刷分路线不走下一跳强通；宁可换桶也不把 60+ 帧砸进障碍。"""
+        if not path or len(path) < 2:
+            return False
+        nxt = path[1]
+        return bool(state.has_obstacle(nxt) or state.enemy_guard(nxt))
 
     # ---- 农任务终局 ----
 
@@ -626,12 +647,13 @@ class WardenStrategy(BaselineStrategy):
         opp = state.opp
         opp_pos = opp and (opp.get("nextNodeId") or opp.get("currentNodeId"))
         for t in state.claimable_tasks():
-            tpl = t.get("taskTemplateId")
-            if tpl == "T04" or (tpl == "T06" and not has_horse):
+            if self._farm_task_blocked(state, t, has_horse):
                 continue
             eta, path = state.graph.shortest_path(
                 cur, t["nodeId"], state.my_speed())
             if not path:
+                continue
+            if self._farm_path_blocked(state, path):
                 continue
             if self._farm_backtrack_step(state, cur, path):
                 continue
@@ -665,10 +687,13 @@ class WardenStrategy(BaselineStrategy):
                     cur, nid, state.my_speed())
                 if not path:
                     continue
+                if self._farm_path_blocked(state, path):
+                    continue
                 if state.round + eta > state.duration_round:
                     continue
-                rank = (1 if self._farm_backtrack_step(state, cur, path)
-                        else 0, eta)
+                if self._farm_backtrack_step(state, cur, path):
+                    continue
+                rank = (0, eta)
                 if fb_rank is None or rank < fb_rank:
                     fb, fb_rank = nid, rank
                 if opp_pos:
