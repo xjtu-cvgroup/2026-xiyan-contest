@@ -109,6 +109,23 @@ RACE_CLIFF_OPP_FARM = 30    # 对手在途 taskScore ≥ 此值 → 它一路在
                             # 局 48/48→42/48、镜像均分 -53——弃经济抢一场
                             # 不存在的竞速。语料里的脚本抢关者到关前分数恒 0）
 RACE_CLIFF_FRAME_VALUE = 30.0
+# 边农边冲压力（V3.24）：平台 2986/2738 不是纯 rusher，而是官道高速
+# 农到 120/150 后继续贴宫门推进。不能把它们重新拉进全局悬崖价
+# （mirror/toller 回归会爆），只把该信号用于局部压山路、短等观察、
+# 以及普通汇入点先手卡。
+FARM_RUSH_TASK = 90
+FARM_RUSH_GATE_ETA = 300
+FARM_RUSH_GATE_MARGIN = 10
+FARM_RUSH_PROGRESS_EPS = 4
+FARM_RUSH_MOUNTAIN_PENALTY = 45
+
+# 尾段任务底线：90->120 的综合边际约 45 分，强过领先 6~10 帧直接送。
+# 只在过完第一道 KEY_PASS 后给近身/顺路任务开绿灯；关前补分会把走廊
+# 先手烧掉（toller seed12 复盘），仍交给常规估值。
+TASK_FLOOR_BASE = 120
+TASK_FLOOR_MIN_BASE = 90
+TASK_FLOOR_MAX_FRAMES = 16
+TASK_FLOOR_BONUS = 80.0
 
 # 漏斗定价（V3.16）：全图汇于关键关隘（武关 S10 类），谁后到谁挨卡。
 # 对手先到时，我们过漏斗的真实代价随"到达时机"剧烈变化（replay57/60 实测）：
@@ -265,6 +282,13 @@ class TaskPlanner:
                                 slack, speed, penalty, ecost)
             if ev and ev[0] > 0:
                 cands[("task", t["taskId"])] = (ev[0], ("task", t, ev[1], None))
+            floor_ev = self._evaluate(state, t, cur, base, to_gate, eta_direct,
+                                      slack, speed, penalty, ecost,
+                                      task_floor=True)
+            if floor_ev and floor_ev[0] > 0:
+                cands[("task_floor", t["taskId"])] = (
+                    floor_ev[0] + TASK_FLOOR_BONUS,
+                    ("task", t, floor_ev[1], None))
 
         # 资源提货目标与任务同台竞价（冰鉴 17 分 vs 任务 45~99 分 vs 绕路成本）
         for node_id, rtype, net in self._resource_targets(
@@ -599,8 +623,14 @@ class TaskPlanner:
     # ================= 估值 =================
 
     def _evaluate(self, state, task, cur, base, to_gate, eta_direct,
-                  slack, speed, penalty, ecost=None):
+                  slack, speed, penalty, ecost=None, task_floor=False):
         """返回 (净收益, 停靠节点)；不可行返回 None。"""
+        if task_floor and not (
+                TASK_FLOOR_MIN_BASE <= base < TASK_FLOOR_BASE
+                and state.phase == P.PHASE_NORMAL
+                and not self.race_cliff(state)
+                and not self._key_pass_ahead(state, cur, penalty, ecost)):
+            return None
         # 资源前置：如 T06 启动时要消耗 1 匹马；缺前置资源跑过去只会被拒
         # （requiredResourceTypes 语义为「任一满足」，如 快马/短程马 二选一）。
         # start.taskTemplates 可能为空，T06 按任务书 5.2 硬规则兜底。
@@ -647,7 +677,10 @@ class TaskPlanner:
         detour = max(0, f_to + f_back - to_gate)
         total_frames = detour + proc
         # 硬约束用时间口径（可行性看时间，优劣看价值）
-        if self._time_detour(state, cur, pos) + proc > slack:
+        time_frames = self._time_detour(state, cur, pos) + proc
+        if time_frames > slack:
+            return None
+        if task_floor and time_frames > TASK_FLOOR_MAX_FRAMES:
             return None
 
         value = marginal_task_value(base, task.get("score", 0))
@@ -670,12 +703,13 @@ class TaskPlanner:
         if self._time_detour(state, cur, pos) + proc + bframes > slack:
             bundle, bframes = 0.0, 0  # 余量装不下捆绑就只按裸任务估
 
-        cost = (total_frames + bframes) * self._frame_value(state, eta_direct)
+        fv = self._frame_value(state, eta_direct,
+                               race_adjust=not task_floor)
+        cost = (total_frames + bframes) * fv
         # 漏斗定价（V3.16）：绕路改变到达关键关隘的时机，死等/满防税/躲税
         # 的差额计入净值（replay57 山路死等+满税 vs replay60 水路零死等半税）
         funnel = self._funnel_delta(state, cur, pos, proc + bframes,
-                                    penalty, ecost) \
-            * self._frame_value(state, eta_direct)
+                                    penalty, ecost) * fv
         net = value + bundle - cost - funnel
         return (net, pos) if net > 0 else None
 
@@ -698,6 +732,15 @@ class TaskPlanner:
         if not path:
             return None, None
         return node, f
+
+    def _key_pass_ahead(self, state, cur, penalty=None, ecost=None):
+        """当前到宫门的规划路线上是否还有未过的 KEY_PASS。"""
+        if not cur or not state.graph:
+            return False
+        _, path = state.graph.shortest_path(cur, state.gate_node, P.BASE_SPEED,
+                                            penalty, ecost)
+        return any(state.node(n).get("nodeType") == "KEY_PASS"
+                   for n in (path or [])[1:])
 
     # ================= 竞速模式（V3.18） =================
 
@@ -741,11 +784,9 @@ class TaskPlanner:
         """
         if self._cliff_cache[0] == state.round:
             return self._cliff_cache[1]
-        # （V3.22 证伪注：曾试"推进判据"——对手边农边向宫门净推进 ≥18/30
-        # 帧时取消农任务豁免，想覆盖 2839 式"在途 90 分仍领跑"。电池否决：
-        # 走向下一个任务点的农夫也被判成赶路者，镜像 -18 / farmer 48→40 /
-        # toller 48→42，三形态齐跌。"悬崖对边农边抢关者失效"保留在观察
-        # 清单，等真实回放里出现可分离信号再动）
+        # （V3.22/V3.24 证伪注：高任务推进者不进悬崖。曾试"推进判据"、
+        # 又试 V3.24 的 farm_rusher_pressure 复活悬崖，都会误杀
+        # mirror/toller。边农边冲只做局部压山路/短等，不改全局帧价。）
         active = False
         opp = state.opp or {}
         farming = (opp.get("taskScore") or 0) >= self.RACE_CLIFF_OPP_FARM
@@ -793,6 +834,34 @@ class TaskPlanner:
             if self.race_cliff(state):
                 v = max(v, self.RACE_CLIFF_FRAME_VALUE)
         return v
+
+    def farm_rusher_pressure(self, state, cur=None):
+        """对手是“边农边冲”而非纯 farmer：高任务分且宫门 ETA 已形成压力。"""
+        opp = state.opp or {}
+        if not opp or opp.get("delivered") or opp.get("retired") or not state.graph:
+            return False
+        if (opp.get("taskScore") or 0) < FARM_RUSH_TASK:
+            return False
+        cur = cur or self._anchor_node(state)
+        if not cur:
+            return False
+        my_gate = state.graph.all_frames(cur).get(state.gate_node, math.inf)
+        opp_gate = self._opp_eta(state, state.gate_node)
+        if my_gate == math.inf or opp_gate == math.inf:
+            return False
+        if opp_gate > FARM_RUSH_GATE_ETA:
+            return False
+        if opp_gate > my_gate + FARM_RUSH_GATE_MARGIN:
+            return False
+        # 移动中的对手必须朝宫门净推进；否则很可能只是 farmer 追任务路过。
+        if opp.get("routeEdgeId") and opp.get("currentNodeId") and opp.get("nextNodeId"):
+            dist = state.graph.all_frames(opp["currentNodeId"])
+            cur_gate = dist.get(state.gate_node, math.inf)
+            next_gate = state.graph.all_frames(opp["nextNodeId"]).get(
+                state.gate_node, math.inf)
+            if next_gate + FARM_RUSH_PROGRESS_EPS >= cur_gate:
+                return False
+        return True
 
     @staticmethod
     def _anchor_node(state):
@@ -920,6 +989,7 @@ class TaskPlanner:
         "水路更保鲜"在雨中反转；酷暑全图等比放大差距。
         """
         time_cost = self._time_edge_cost_fn(state)
+        farm_pressure = self.farm_rusher_pressure(state)
         active_types = {w.get("type") for w in (state.weather or {}).get("active") or []}
 
         def edge_cost(edge, base_frames):
@@ -930,7 +1000,10 @@ class TaskPlanner:
                 region = max(region, WEATHER_FRESH_REGION.get((wt, rt), 1.0))
             scale = 1.5 if P.HOT in active_types else 1.0
             mult = 1.0 + (decay * region - P.IDLE_FRESH_DECAY) * scale * 1.8 / _FV
-            return time_cost(edge, base_frames) * mult
+            cost = time_cost(edge, base_frames) * mult
+            if farm_pressure and rt == P.MOUNTAIN:
+                cost += FARM_RUSH_MOUNTAIN_PENALTY
+            return cost
         return edge_cost
 
     @staticmethod

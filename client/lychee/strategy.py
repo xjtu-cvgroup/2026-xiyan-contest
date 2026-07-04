@@ -10,7 +10,7 @@ import random
 
 from . import protocol as P
 from .planner import (TaskPlanner, FUNNEL_FIRST_WEATHER,
-                      FUNNEL_WEATHER_GAP)
+                      FUNNEL_WEATHER_GAP, RUSH_EARLIEST)
 
 
 class Strategy:
@@ -194,6 +194,10 @@ class PlannerStrategy(BaselineStrategy):
     # 的同款打法：r314 立卡后边卡边农）。热窗口降到 25，仍留 6 倍读条缓冲
     GUARD_SLACK_HOT = 25
     GUARD_HOT_OPP_ETA = 60      # 对手到本关隘的 ETA 在此内算"热"
+    GUARD_REAR_OPP_ETA = 130    # 普通汇入点回手卡窗口（路径必经时）
+    GUARD_REAR_SLACK = 45       # 普通汇入点成本低，但仍要保交付余量
+    GUARD_REAR_RUSH_SLACK = 20  # RUSH 起点二卡：只在仍有读条余量时兑现
+    GUARD_REAR_TYPES = {"PALACE_STATION"}  # 普通点默认只放宫前驿这类尾段关键点
 
     # ---- 防中边陷阱（V3.5，V3.12 删证据门）----
     # 设卡必须站在节点上：对手占着/将先到我们的下一跳时，上边就可能被掐点
@@ -208,13 +212,14 @@ class PlannerStrategy(BaselineStrategy):
     TRAP_ORDINARY_WAIT = 45     # 普通节点驻扎等待预算（V3.22）：农夫型
                                 # 久驻不狙击，等满即硬闯；45 ≈ 它一次任务
                                 # 波次间隔的量级，也 < 被掐的冻结代价
-    TRAP_CONVERGE_ORDINARY = False  # 实验开关：收敛分支是否也防普通节点
-                                # （无界版被电池证伪 camper 34/48；有界
-                                # 变体的配对对照见 trap-gate 实验脚本）
+    TRAP_CONVERGE_ORDINARY = False  # 收敛分支仍只防咽喉；普通节点防守交给
+                                # 驻扎等待 + 我方同路先到反手卡，避免全图误等
     TRAP_CAMPED_ORDINARY = True     # 驻扎分支防普通节点（V3.22 主开关，
                                 # 语料=2839 第 4 局 S09 掐踏边）
     TRAP_WAIT_MAX = 30          # 陷阱等待的日志告警阈值（V3.15 起不再硬闯：
                                 # replay56 上限到点硬闯 71 帧长边被 r314 掐点冻死）
+    TRAP_FARM_RUSH_WAIT = 12    # 边农边冲且无设卡证据：等 12 帧观察是否起卡，
+                                # 不起卡就抢边，避免 S08 40+ 帧乌龟等待
     # 注意：不设"截止吃紧就赌一把"的例外 —— slack 越紧冻结越致命
     # （等待成本 10~30 帧 vs 冻结成本 180+ 帧），对峙上限已兜底防赖
     # 陷阱等待的租买止损（V3.18）：V3.15 删对峙上限后等待无上界，蹲点者
@@ -271,6 +276,7 @@ class PlannerStrategy(BaselineStrategy):
         self._reinforce_sent = {}        # nodeId -> 小分队增援派出帧（防重试风暴）
         self._opp_profile = "unknown"    # 对手画像（V3.20）：unknown/camper，粘性
         self._prof_idle_choke = 0        # 对手在 KEY_PASS 闲置驻扎的累计帧数
+        self._opp_ordinary_guard_seen = False
 
     # ---------- 每帧入口 ----------
 
@@ -350,6 +356,8 @@ class PlannerStrategy(BaselineStrategy):
         for node_id in state.nodes:
             if state.enemy_guard(node_id):
                 self._guard_first_seen.setdefault(node_id, state.round)
+                if state.node(node_id).get("nodeType") not in self.GUARD_NODE_TYPES:
+                    self._opp_ordinary_guard_seen = True
 
         # 租买改道承诺提前解除：对手离开被避节点（或已交付/退赛）后该走廊
         # 已干净，不再为一个不存在的威胁多绕路
@@ -552,6 +560,11 @@ class PlannerStrategy(BaselineStrategy):
                 return warm
             return P.a_process()
 
+        # 主动设卡：同路且我们先到时，先兑现设卡权再做脚下经济。
+        guard = self._guard_opportunity(state, cur, plan)
+        if guard:
+            return guard
+
         # 任务：已在执行位置就开始读条（任务是独占对象，不让行，靠出牌博弈）。
         # V3.8 顺序修正：先抢会被偷的稀缺资源再做任务 —— replay25 我们在 S03
         # 读任务条时，落后 5 帧的对手把冰从眼皮底下领走（r92），任务不会跑、
@@ -566,11 +579,6 @@ class PlannerStrategy(BaselineStrategy):
         if plan.kind == "resource" and cur == plan.position:
             return P.a_claim_resource(cur, plan.resource)
 
-        # 主动设卡：领先通过咽喉节点时，回手一张卡挡住身后的对手
-        guard = self._guard_opportunity(state, cur, plan)
-        if guard:
-            return guard
-
         # 顺路领取（余量闸门 15：领取只花 2 帧读条，换 +18 分几乎恒值；
         # 阴影惩罚会压低 slack，这里的闸门只挡真正的临门一脚）
         if plan.kind in ("task", "resource") or plan.slack > 15:
@@ -579,6 +587,11 @@ class PlannerStrategy(BaselineStrategy):
             # 情报各 2 帧读条在竞争带内是胜负帧，赢下漏斗后有的是空转帧补
             claim_list = self.RACE_CLAIM_ONLY \
                 if self.planner.race_mode(state) else self.CLAIM_EN_ROUTE
+            if plan.kind == "deliver" and (
+                    state.round >= RUSH_EARLIEST
+                    or self.planner.farm_rusher_pressure(state, cur)):
+                claim_list = tuple(rt for rt in claim_list
+                                   if rt in self.RACE_CLAIM_ONLY)
             if self.planner.race_cliff(state):
                 # 悬崖带（V3.21）：2 帧读条也是胜负帧——冰/马也不顺手领。
                 # 只影响这个 ~60 帧窗口的路过领取；冰链作为规划目标的口径
@@ -635,13 +648,9 @@ class PlannerStrategy(BaselineStrategy):
 
     def _guard_opportunity(self, state, cur, plan):
         me, opp = state.me, state.opp
-        if state.phase == P.PHASE_RUSH:
-            return None
         if not opp or opp.get("delivered") or opp.get("retired"):
             return None
         node = state.node(cur)
-        if node.get("nodeType") not in self.GUARD_NODE_TYPES:
-            return None
         if cur == state.terminal_node:
             return None  # S15 禁止设卡
         g = node.get("guard")
@@ -664,20 +673,30 @@ class PlannerStrategy(BaselineStrategy):
         opp_eta = self.planner._opp_eta(state, cur)
         if not (self.GUARD_MIN_OPP_ETA <= opp_eta <= self.GUARD_MAX_OPP_ETA):
             return None
-        # slack 闸门分档（V3.18）：常规 65；关键关隘上对手正被漏斗汇过来
-        # （热窗口）时降到 25——刚赢的竞速要立刻兑现，让它吃我们吃过的苦
-        slack_min = self.GUARD_SLACK_MIN
-        if node.get("nodeType") == "KEY_PASS" \
-                and opp_eta <= self.GUARD_HOT_OPP_ETA:
-            slack_min = self.GUARD_SLACK_HOT
-        if plan.slack < slack_min:
-            return None
         # 两侧都用含边上余量的同一度量（V3.7：度量不一致曾让该检查恒假）
         opp_to_gate = self.planner._opp_eta(state, state.gate_node)
         here_to_gate, p2 = g_graph.shortest_path(cur, state.gate_node, P.BASE_SPEED)
         if not p2 or opp_to_gate == float("inf") or \
                 opp_eta + here_to_gate > opp_to_gate + self.GUARD_ROUTE_TOLERANCE:
             return None  # 绕开我们这里更快，卡了也白卡
+
+        node_type = node.get("nodeType")
+        choke_guard = node_type in self.GUARD_NODE_TYPES
+        rear_guard = self._rear_guard_opportunity(state, cur, opp_eta)
+        if not (choke_guard or rear_guard):
+            return None
+        # slack 闸门分档（V3.18/V3.23）：常规 65；关键关隘热窗口 25；
+        # 普通汇入点只在路径必经的反手卡场景降低门槛；RUSH 起点二卡再放宽。
+        slack_min = self.GUARD_SLACK_MIN
+        if choke_guard and node_type == "KEY_PASS" \
+                and opp_eta <= self.GUARD_HOT_OPP_ETA:
+            slack_min = self.GUARD_SLACK_HOT
+        elif rear_guard and not choke_guard:
+            slack_min = (self.GUARD_REAR_RUSH_SLACK
+                         if state.phase == P.PHASE_RUSH
+                         else self.GUARD_REAR_SLACK)
+        if plan.slack < slack_min:
+            return None
 
         # 成本：关键关隘/宫门底价 1 好果 + 额外好果按节点防守值上限投满不投溢
         # （防 2 的卡 30 帧就风化半残，不值底价；投不满就不投）。
@@ -692,6 +711,18 @@ class PlannerStrategy(BaselineStrategy):
         if self.log:
             self.log.info("set guard @%s extra=%d (opp eta=%d)", cur, extra, opp_eta)
         return P.a_set_guard(cur, extra)
+
+    def _rear_guard_opportunity(self, state, cur, opp_eta):
+        """普通汇入点/RUSH 起点反手卡：路径必经且我们来得及读条。"""
+        node_type = state.node(cur).get("nodeType")
+        if node_type in self.GUARD_NODE_TYPES or node_type in ("START", "FINISH"):
+            return False
+        if opp_eta > self.GUARD_REAR_OPP_ETA:
+            return False
+        if node_type in self.GUARD_REAR_TYPES:
+            return True
+        return (self._opp_ordinary_guard_seen
+                or self.planner.farm_rusher_pressure(state, cur))
 
     def _my_active_guards(self, state):
         n = 0
@@ -1094,7 +1125,9 @@ class PlannerStrategy(BaselineStrategy):
             if edge and our_edge <= self.TRAP_GUARD_FRAMES:
                 return give_up()
             risk = True        # 它正站在我们的下一跳上
-        elif opp_next == nxt and (not ordinary or self.TRAP_CONVERGE_ORDINARY):
+        elif opp_next == nxt and (not ordinary or (
+                self.TRAP_CONVERGE_ORDINARY
+                and self._ordinary_converge_threat(state))):
             # 它正赶往我们的下一跳（仅咽喉）：若它先到且来得及成卡，同样危险
             opp_eta = self.planner._opp_eta(state, nxt)
             edge = state.graph.edge_between(cur, nxt)
@@ -1110,6 +1143,10 @@ class PlannerStrategy(BaselineStrategy):
         if ordinary:
             _, n_wait = self._trap_wait
             if self._trap_wait[0] == nxt and n_wait >= self.TRAP_ORDINARY_WAIT:
+                return give_up()
+        elif self._farm_rusher_probe_release(state, cur, nxt):
+            _, n_wait = self._trap_wait
+            if self._trap_wait[0] == nxt and n_wait >= self.TRAP_FARM_RUSH_WAIT:
                 return give_up()
         # 无弹药豁免（V3.20）：中边冻结的前提是对手真能落卡——设卡每队
         # 同时至多 2 张，KEY_PASS 还要 1 好果底价。配额用满/掏不出底价时
@@ -1139,6 +1176,26 @@ class PlannerStrategy(BaselineStrategy):
             self.log.info("trap wait at %s reached %d frames (opp %s)",
                           nxt, n, "camped" if camped else "converging")
         return True
+
+    def _ordinary_converge_threat(self, state):
+        """普通节点收敛掐边只在设卡型/强推进信号下成立。"""
+        return self._opp_ordinary_guard_seen or self.planner.race_cliff(state)
+
+    def _farm_rusher_probe_release(self, state, cur, nxt):
+        """山路口袋遇无设卡证据的边农边冲者：短等观察，未起卡则抢边。"""
+        edge = state.graph.edge_between(cur, nxt)
+        mountain_escape = (state.node(cur).get("nodeType") == "MOUNTAIN_PASS"
+                           or (edge and edge.get("routeType") == P.MOUNTAIN))
+        if not mountain_escape:
+            return False
+        if self._opp_profile == "camper" or self._opp_ordinary_guard_seen:
+            return False
+        if state.enemy_guard(nxt) or self._opp_setting_guard(state, nxt):
+            return False
+        for node_id in state.nodes:
+            if state.enemy_guard(node_id):
+                return False
+        return self.planner.farm_rusher_pressure(state)
 
     def _trap_reroute(self, state, cur, blocked, target):
         """陷阱等待的租买止损（V3.18）：等待帧数 ≥ 换走廊的绕路差价时改道。

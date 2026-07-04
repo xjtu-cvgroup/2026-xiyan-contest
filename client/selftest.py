@@ -955,9 +955,9 @@ def test_active_guard():
     ok &= check("设卡: 已有2卡不再设",
                 not (a and a["action"] == "SET_GUARD"), str(a))
 
-    # 4) RUSH 阶段 -> 专心交付不设卡
+    # 4) RUSH 阶段远离宫门的武关点仍专心交付；S13 起点二卡另有回归钉子
     a = PlannerStrategy().main_action(gs_at(round_no=460, phase="RUSH"))
-    ok &= check("设卡: RUSH 不设卡",
+    ok &= check("设卡: RUSH 远端不过度设卡",
                 not (a and a["action"] == "SET_GUARD"), str(a))
 
     # 5) 该节点已有卡（谁的都算）-> 不设
@@ -1689,7 +1689,7 @@ def test_tail_farm():
     ok &= check("蹲刷: 候选点上等任务刷新",
                 a and a["action"] == "WAIT", str(a))
 
-    # 1b) 领先时不蹲（跟随者闸门）：对手在身后 → 保节奏推进
+    # 1b) 领先时不蹲（跟随者闸门）：对手在身后 → 保节奏，推进或设卡
     gs = gs_tail2()
     for p in gs.players.values():
         if p["playerId"] != 1001:
@@ -1697,7 +1697,7 @@ def test_tail_farm():
                      edgeTotalMs=55200, edgeProgressMs=9000)
     a = PlannerStrategy().main_action(gs)
     ok &= check("蹲刷: 领先时保节奏不蹲",
-                a and a["action"] == "MOVE", str(a))
+                a and a["action"] in ("MOVE", "SET_GUARD"), str(a))
 
     # 2) 任务基础分已到 110 → 不蹲，直接推进
     a = PlannerStrategy().main_action(gs_tail2(base=110))
@@ -1757,9 +1757,9 @@ def test_reject_join():
                          resources={}, freshness=90.0, goodFruit=90,
                          badFruit=1, taskScore=120, squadAvailable=8)
             else:
-                p.update(state="MOVING", currentNodeId="S09", nextNodeId="S10",
-                         routeEdgeId="E05", currentProcess=None,
-                         delivered=False, retired=False)
+                p.update(state="IDLE", currentNodeId="S01", nextNodeId=None,
+                         routeEdgeId=None, currentProcess=None,
+                         delivered=True, retired=False)
         for n in d["nodes"]:
             n["hasObstacle"] = n["nodeId"] in obstacle_nodes
             n["guard"] = None
@@ -2161,11 +2161,13 @@ def test_race_tempo():
                                 FRESH_VALUE_PER_FRAME, TIME_SCORE_PER_FRAME)
 
     def gs_race(my_pos="S02", opp_pos="S03", my_moving=None, resources=None,
-                round_no=60, opp_delivered=False, task_score=45):
+                round_no=60, opp_delivered=False, task_score=45,
+                phase="NORMAL", opp_task_score=0, opp_moving=None):
         gs = GameState(1001)
         gs.on_start(start)
         d = json.loads(json.dumps(inquire))
         d["round"] = round_no
+        d["phase"] = phase
         d["contests"], d["tasks"] = [], []
         d["weather"] = {"active": [], "forecast": []}
         for p in d["players"]:
@@ -2182,9 +2184,18 @@ def test_race_tempo():
                              resources=resources or {}, freshness=95.0,
                              goodFruit=90, badFruit=0, taskScore=task_score)
             else:
-                p.update(state="IDLE", currentNodeId=opp_pos, nextNodeId=None,
-                         routeEdgeId=None, currentProcess=None,
-                         delivered=opp_delivered, retired=False)
+                if opp_moving:
+                    cur_o, next_o, edge_id, remain = opp_moving
+                    p.update(state="MOVING", currentNodeId=cur_o,
+                             nextNodeId=next_o, routeEdgeId=edge_id,
+                             edgeTotalMs=remain * 1000, edgeProgressMs=0,
+                             currentProcess=None, delivered=opp_delivered,
+                             retired=False, taskScore=opp_task_score)
+                else:
+                    p.update(state="IDLE", currentNodeId=opp_pos, nextNodeId=None,
+                             routeEdgeId=None, currentProcess=None,
+                             delivered=opp_delivered, retired=False,
+                             taskScore=opp_task_score)
         for n in d["nodes"]:
             n["hasObstacle"] = False
             n["guard"] = None
@@ -2259,6 +2270,50 @@ def test_race_tempo():
     gs = gs_race(my_pos="S11", opp_pos="S10", round_no=200)
     a = PlannerStrategy()._guard_opportunity(gs, "S11", Plan("deliver", slack=40))
     ok &= check("竞速: 普通咽喉不吃热折扣", a is None, str(a))
+    # 8) 普通汇入点反手卡：对手已展示普通点卡手后，S09 同路先到可回手
+    st = PlannerStrategy()
+    st._opp_ordinary_guard_seen = True
+    gs = gs_race(my_pos="S09", opp_pos="S07", round_no=200)
+    a = st._guard_opportunity(gs, "S09", Plan("deliver", slack=50))
+    ok &= check("竞速: 已识别普通点卡手后可反手卡",
+                a is not None and a["action"] == "SET_GUARD"
+                and a["targetNodeId"] == "S09", str(a))
+    # 8b) 同路先到时，设卡优先级高于脚下任务读条
+    gs = gs_race(my_pos="S09", opp_pos="S07", round_no=200)
+    gs.tasks = [{"taskId": "T_GUARD_FIRST", "taskTemplateId": "T01",
+                 "nodeId": "S09", "processRound": 4, "score": 30,
+                 "expireRound": 999, "active": True, "completed": False,
+                 "failed": False, "ownerPlayerId": 0}]
+    st = PlannerStrategy()
+    st._opp_ordinary_guard_seen = True
+    a = st.main_action(gs)
+    ok &= check("竞速: 同路先到设卡优先于脚下任务",
+                a is not None and a["action"] == "SET_GUARD"
+                and a["targetNodeId"] == "S09", str(a))
+    # 9) RUSH 起点二卡：规则允许 SET_GUARD，只保留交付余量底线
+    gs = gs_race(my_pos="S13", opp_pos="S11", round_no=452, phase="RUSH")
+    a = PlannerStrategy()._guard_opportunity(gs, "S13",
+                                             Plan("deliver", slack=25))
+    ok &= check("竞速: RUSH 起点允许二卡",
+                a is not None and a["action"] == "SET_GUARD"
+                and a["targetNodeId"] == "S13", str(a))
+    # 10) 高任务分贴近宫门的边农边冲者：普通汇入点无需等它先暴露卡手习惯。
+    gs = gs_race(my_pos="S09", opp_pos="S07", round_no=260,
+                 opp_task_score=120,
+                 opp_moving=("S07", "S09", "E_X", 8))
+    a = PlannerStrategy()._guard_opportunity(gs, "S09",
+                                             Plan("deliver", slack=50))
+    ok &= check("竞速: 边农边冲同路先到先卡",
+                a is not None and a["action"] == "SET_GUARD"
+                and a["targetNodeId"] == "S09", str(a))
+    # 11) 尾段直送时不再顺手领文书/情报，避免 S13 这种位置白烧 6 帧。
+    gs = gs_race(my_pos="S13", opp_pos="S10", round_no=430,
+                 task_score=120, opp_delivered=True)
+    gs.nodes["S13"]["resourceStock"] = {"INTEL": 1}
+    a = PlannerStrategy().main_action(gs, Plan("deliver", slack=120))
+    ok &= check("竞速: 尾段直送跳过非硬件资源",
+                a and a["action"] == "MOVE" and a["targetNodeId"] == "S14",
+                str(a))
     return ok
 
 
@@ -2279,7 +2334,7 @@ def test_race_cliff():
                                 TIME_SCORE_PER_FRAME, RACE_CLIFF_FRAME_VALUE)
 
     def gs_cliff(my_pos="S07", opp_pos="S05", round_no=160, guard_s10=None,
-                 ice_at=None, opp_task=0):
+                 ice_at=None, opp_task=0, opp_moving=None):
         gs = GameState(1001)
         gs.on_start(start)
         d = json.loads(json.dumps(inquire))
@@ -2293,10 +2348,18 @@ def test_race_cliff():
                          resources={}, freshness=95.0, goodFruit=90,
                          badFruit=0, taskScore=45)
             else:
-                p.update(state="IDLE", currentNodeId=opp_pos, nextNodeId=None,
-                         routeEdgeId=None, currentProcess=None,
-                         delivered=False, retired=False,
-                         taskScore=opp_task)
+                if opp_moving:
+                    cur_o, next_o, edge_id, remain = opp_moving
+                    p.update(state="MOVING", currentNodeId=cur_o,
+                             nextNodeId=next_o, routeEdgeId=edge_id,
+                             edgeTotalMs=remain * 1000, edgeProgressMs=0,
+                             currentProcess=None, delivered=False,
+                             retired=False, taskScore=opp_task)
+                else:
+                    p.update(state="IDLE", currentNodeId=opp_pos, nextNodeId=None,
+                             routeEdgeId=None, currentProcess=None,
+                             delivered=False, retired=False,
+                             taskScore=opp_task)
         for n in d["nodes"]:
             n["hasObstacle"] = False
             n["guard"] = guard_s10 if n["nodeId"] == "S10" else None
@@ -2316,7 +2379,7 @@ def test_race_cliff():
     ok &= check("悬崖: 带内帧价为悬崖斜率",
                 abs(fv - RACE_CLIFF_FRAME_VALUE) < 1e-9, f"fv={fv}")
     base_fv = FRESH_VALUE_PER_FRAME + TIME_SCORE_PER_FRAME
-    ok &= check("悬崖: 资源目标口径仍豁免",
+    ok &= check("悬崖: 显式非竞速口径仍可豁免",
                 abs(pl._frame_value(gs, 100, race_adjust=False)
                     - base_fv) < 1e-9, "")
 
@@ -2350,11 +2413,18 @@ def test_race_cliff():
     #     （A/B 实锤：无此门 farmer 局 48/48→42/48、镜像均分 -53）
     ok &= check("悬崖: 对手在途农任务不悬崖",
                 not TaskPlanner().race_cliff(gs_cliff(opp_task=60)), "")
+    # 6c) 复盘校准：边农边冲者能被识别，但仍不重新打开全局悬崖价。
+    gs = gs_cliff(opp_task=90, opp_moving=("S07", "S09", "E_X", 20))
+    pl = TaskPlanner()
+    ok &= check("悬崖: 边农边冲识别但不进全局悬崖",
+                pl.farm_rusher_pressure(gs) and not pl.race_cliff(gs), "")
+    # 6d) 但高任务分去追任务/绕离宫门的 farmer 仍被农任务门保护。
+    ok &= check("悬崖: 高分但未向宫门推进仍豁免",
+                not TaskPlanner().race_cliff(gs_cliff(
+                    opp_task=90, opp_moving=("S07", "S05", "E_X", 20))), "")
 
     # （行为级"带内顺路领取清空"无单元观察点：冰/马都会先被 planner 立为
-    #   资源目标走 plan 分支（race_adjust=False 豁免口径，V3.16 冰链 +
-    #   T06 马匹经济，刻意保留），en-route 清空只影响非目标资源的路过
-    #   领取——该效果由竞技场 cliff A/B（seed10/15 翻盘）背书）
+    #   资源目标走 plan 分支，en-route 清空只影响非目标资源的路过领取）
     return ok
 
 
@@ -2521,7 +2591,7 @@ def test_trap_ransom():
         inquire = json.load(f)["msg_data"]
 
     def gs_camp(my_pos, camp_pos, round_no=200, edge_patch=None,
-                task_score=90):
+                task_score=90, opp_task_score=0):
         """对手停靠在我们去宫门的下一跳上（无卡，纯占位威胁）。"""
         gs = GameState(1001)
         gs.on_start(start)
@@ -2542,7 +2612,8 @@ def test_trap_ransom():
             else:
                 p.update(state="IDLE", currentNodeId=camp_pos, nextNodeId=None,
                          routeEdgeId=None, currentProcess=None,
-                         delivered=False, retired=False)
+                         delivered=False, retired=False,
+                         taskScore=opp_task_score)
         for n in d["nodes"]:
             n["hasObstacle"] = False
             n["guard"] = None
@@ -2550,6 +2621,17 @@ def test_trap_ransom():
             n.pop("processType", None)
             n["processRound"] = 0
         gs.on_inquire(d)
+        return gs
+
+    def gs_converge(my_pos, opp_cur, opp_next, round_no=200):
+        """对手正在赶往我们的普通下一跳，用于普通收敛掐边测试。"""
+        gs = gs_camp(my_pos, opp_cur, round_no=round_no, task_score=130)
+        for p in gs.players.values():
+            if p["playerId"] != 1001:
+                p.update(state="MOVING", currentNodeId=opp_cur,
+                         nextNodeId=opp_next, routeEdgeId="E_X",
+                         edgeTotalMs=10000, edgeProgressMs=0,
+                         currentProcess=None)
         return gs
 
     # 1) 有第二条走廊时租买止损：S06 去宫门直路经 S08（山口，对手蹲点），
@@ -2588,6 +2670,19 @@ def test_trap_ransom():
         last = st2.main_action(gs_camp("S09", "S10", round_no=200 + i))
     ok &= check("租买: 真漏斗口绕不开照旧等待",
                 last and last["action"] == "WAIT", str(last))
+    # 2a) 山路口袋遇高分贴宫门且从未露卡的边农边冲者，只短等观察；
+    #     不起卡就抢边，避免 2986/2738 式 S08/S10 前 40+ 帧乌龟等待。
+    st_probe = PlannerStrategy()
+    moved = None
+    for i in range(14):
+        a = st_probe.main_action(gs_camp(
+            "S08", "S10", round_no=300 + i, task_score=130,
+            opp_task_score=120))
+        if a and a["action"] == "MOVE":
+            moved = a
+            break
+    ok &= check("租买: 山口边农边冲无卡证据短等后抢边",
+                moved and moved["targetNodeId"] == "S10", str(moved))
 
     # 2b) 无弹药豁免（V3.20）：对手两张卡配额已满 → 占位无冻结威胁，直接过
     #     （task_score=130 关掉 S09 的蹲刷分支，隔离被测逻辑，同用例 3）
@@ -2617,6 +2712,13 @@ def test_trap_ransom():
         gs_camp("S13", "S14", edge_patch={"E09": 2}, task_score=130))
     ok &= check("租买: 短边豁免直接过（读条 4 帧追不上）",
                 a and a["action"] == "MOVE" and a["targetNodeId"] == "S14",
+                str(a))
+    # 4) 普通节点收敛掐边：收敛分支仍不防普通节点，避免 farmer 误伤；
+    #    普通节点威胁通过驻扎等待和我方先到反手卡处理。
+    gs = gs_converge("S04", "S02", "S05")
+    a = PlannerStrategy().main_action(gs)
+    ok &= check("租买: 普通节点收敛不误等",
+                a and a["action"] == "MOVE" and a["targetNodeId"] == "S05",
                 str(a))
     return ok
 
