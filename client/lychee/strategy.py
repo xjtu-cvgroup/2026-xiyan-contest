@@ -240,8 +240,8 @@ class PlannerStrategy(BaselineStrategy):
                                 # 语料=2839 第 4 局 S09 掐踏边）
     TRAP_WAIT_MAX = 30          # 陷阱等待的日志告警阈值（V3.15 起不再硬闯：
                                 # replay56 上限到点硬闯 71 帧长边被 r314 掐点冻死）
-    TRAP_FARM_RUSH_WAIT = 12    # 边农边冲且无设卡证据：等 12 帧观察是否起卡，
-                                # 不起卡就抢边，避免 S08 40+ 帧乌龟等待
+    TRAP_FARM_RUSH_WAIT = 12    # 已停靠口袋点的边农边冲且无设卡证据：等 12 帧
+                                # 观察是否起卡；汇聚中照旧等待，防复刻 2839 长边冻死
     # 注意：不设"截止吃紧就赌一把"的例外 —— slack 越紧冻结越致命
     # （等待成本 10~30 帧 vs 冻结成本 180+ 帧），对峙上限已兜底防赖
     # 陷阱等待的租买止损（V3.18）：V3.15 删对峙上限后等待无上界，蹲点者
@@ -1302,7 +1302,7 @@ class PlannerStrategy(BaselineStrategy):
             _, n_wait = self._trap_wait
             if self._trap_wait[0] == nxt and n_wait >= self.TRAP_ORDINARY_WAIT:
                 return give_up()
-        elif self._farm_rusher_probe_release(state, cur, nxt):
+        elif self._farm_rusher_probe_release(state, cur, nxt, camped):
             _, n_wait = self._trap_wait
             if self._trap_wait[0] == nxt and n_wait >= self.TRAP_FARM_RUSH_WAIT:
                 return give_up()
@@ -1355,8 +1355,10 @@ class PlannerStrategy(BaselineStrategy):
         """普通节点收敛掐边只在设卡型/强推进信号下成立。"""
         return self._opp_ordinary_guard_seen or self.planner.race_cliff(state)
 
-    def _farm_rusher_probe_release(self, state, cur, nxt):
-        """山路口袋遇无设卡证据的边农边冲者：短等观察，未起卡则抢边。"""
+    def _farm_rusher_probe_release(self, state, cur, nxt, camped):
+        """山路口袋遇已停靠的边农边冲者：短等观察，未起卡则抢边。"""
+        if not camped:
+            return False
         edge = state.graph.edge_between(cur, nxt)
         mountain_escape = (state.node(cur).get("nodeType") == "MOUNTAIN_PASS"
                            or (edge and edge.get("routeType") == P.MOUNTAIN))

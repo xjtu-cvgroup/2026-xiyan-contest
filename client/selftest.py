@@ -16,7 +16,8 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from lychee import protocol as P
-from lychee.planner import marginal_task_value, task_component_score, Plan
+from lychee.planner import (TaskPlanner, marginal_task_value,
+                            task_component_score, Plan)
 from lychee.state import GameState
 from lychee.strategy import BaselineStrategy, PlannerStrategy
 from lychee_basic_client.framing import read_frame, write_frame
@@ -3501,11 +3502,67 @@ def test_farmer_walkin():
         last = st.main_action(g)
     ok &= check("农夫走边: 见过卡的对手不豁免",
                 last and last["action"] == "WAIT", str(last))
+
+    def gs_farm_rusher(round_no, camped=False):
+        gs = GameState(1001)
+        gs.on_start(start)
+        d = json.loads(json.dumps(inquire))
+        d["round"], d["phase"] = round_no, "NORMAL"
+        d["contests"], d["tasks"] = [], []
+        d["weather"] = {"active": [], "forecast": []}
+        edge_total = gs.graph.edge_total_move(gs.graph.edges["E05"])
+        for p_ in d["players"]:
+            if p_["playerId"] == 1001:
+                p_.update(state="IDLE", currentNodeId="S08", nextNodeId=None,
+                          routeEdgeId=None, currentProcess=None, buffs=[],
+                          resources={}, freshness=90.0, goodFruit=90,
+                          badFruit=2, taskScore=130, verified=False)
+            else:
+                if camped:
+                    p_.update(state="IDLE", currentNodeId="S10", nextNodeId=None,
+                              routeEdgeId=None, currentProcess=None, buffs=[],
+                              delivered=False, retired=False, taskScore=90,
+                              goodFruit=90)
+                else:
+                    p_.update(state="MOVING", currentNodeId="S09",
+                              nextNodeId="S10", routeEdgeId="E05",
+                              edgeTotalMs=edge_total,
+                              edgeProgressMs=edge_total - 5000,
+                              currentProcess=None, buffs=[],
+                              delivered=False, retired=False, taskScore=90,
+                              goodFruit=90)
+        for n in d["nodes"]:
+            n["hasObstacle"] = False
+            n["guard"] = None
+            n["resourceStock"] = {}
+            n.pop("processType", None)
+            n["processRound"] = 0
+        gs.on_inquire(d)
+        return gs
+
+    st = PlannerStrategy()
+    moved = None
+    for i in range(20):
+        a = st.main_action(gs_farm_rusher(287 + i, camped=False))
+        if a and a["action"] == "MOVE":
+            moved = a
+            break
+    ok &= check("边农边冲: 汇聚中不走12帧放行（2839死形钉子）",
+                moved is None, str(moved))
+    st = PlannerStrategy()
+    moved = None
+    for i in range(20):
+        a = st.main_action(gs_farm_rusher(287 + i, camped=True))
+        if a and a["action"] == "MOVE":
+            moved = a
+            break
+    ok &= check("边农边冲: 已停靠口袋点才允许短等后抢边",
+                moved and moved["targetNodeId"] == "S10", str(moved))
     return ok
 
 
 def test_front_tempo_tail_follow():
-    """V3.30：S03 被对手小幅抢先时尾随主路，不再读低进度/山线任务。"""
+    """V3.30/V3.32：FRONT_TEMPO 默认关闭；显式打开时保留尾随钉子。"""
     ok = True
     with open(os.path.join(DOC_DIR, "start消息.json"), encoding="utf-8") as f:
         start = json.load(f)["msg_data"]
@@ -3557,7 +3614,25 @@ def test_front_tempo_tail_follow():
         gs.on_inquire(d)
         return gs
 
+    pl = TaskPlanner()
+    ok &= check("前段尾随: 默认关闭，等待平台形态复证",
+                not pl.FRONT_TEMPO_ENABLED, "")
+    pl.FRONT_TEMPO_ENABLED = True
+    pl._map_progress = lambda state, cur: 0.1
+    pl._opp_on_my_forward_path = lambda state, cur: False
+    pl._opp_gate_lead = lambda state, cur: -10
+    dummy = type("DummyState", (), {
+        "phase": P.PHASE_NORMAL,
+        "opp": {"currentNodeId": "S04", "delivered": False, "retired": False},
+    })()
+    ok &= check("前段尾随: 我方领先不足30帧仍算竞争（符号钉子）",
+                pl._front_tempo_contested(dummy, "S03"), "")
+    pl._opp_gate_lead = lambda state, cur: -31
+    ok &= check("前段尾随: 我方领先超过30帧退出竞争",
+                not pl._front_tempo_contested(dummy, "S03"), "")
+
     st = PlannerStrategy()
+    st.planner.FRONT_TEMPO_ENABLED = True
     gs = gs_front(tasks=True)
     plan = st.planner.plan(gs)
     ok &= check("前段尾随: S03/S06 低进度任务不再截停",
@@ -3568,6 +3643,7 @@ def test_front_tempo_tail_follow():
                 f"{plan} -> {a}")
 
     st2 = PlannerStrategy()
+    st2.planner.FRONT_TEMPO_ENABLED = True
     gs = gs_front(stock=True, tasks=False)
     plan = st2.planner.plan(gs)
     a = st2.main_action(gs, plan)
@@ -3620,7 +3696,9 @@ def test_front_tempo_tail_follow():
              "failed": False, "ownerPlayerId": 0, "protectionPlayerId": 0,
              "routeBucket": P.MOUNTAIN}
     gs = gs_replay93("S03", 30, (t_s06,), "S02", "S03", "E02")
-    plan = PlannerStrategy().planner.plan(gs)
+    st3 = PlannerStrategy()
+    st3.planner.FRONT_TEMPO_ENABLED = True
+    plan = st3.planner.plan(gs)
     ok &= check("前段保速: S03 已拿30后不做 S06 山路清障",
                 plan.kind != "task", repr(plan))
 
@@ -3630,7 +3708,9 @@ def test_front_tempo_tail_follow():
              "failed": False, "ownerPlayerId": 0, "protectionPlayerId": 0,
              "routeBucket": P.ROAD}
     gs = gs_replay93("S07", 120, (t_s07,), "S07", "S09", "E04")
-    plan = PlannerStrategy().planner.plan(gs)
+    st4 = PlannerStrategy()
+    st4.planner.FRONT_TEMPO_ENABLED = True
+    plan = st4.planner.plan(gs)
     ok &= check("前段保速: S07 到120后先抢 S10 不贪到150",
                 plan.kind != "task", repr(plan))
     return ok

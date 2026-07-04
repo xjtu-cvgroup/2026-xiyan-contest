@@ -62,8 +62,9 @@ FORWARD_BIAS_AUTO = 0.6     # 冲锋型对手在线识别命中时的地板（st
 # 对手则跳过 S03，在 S07/S10 官道沿途补齐 150 分并早 55+ 帧交付。
 # 对手只先走几帧时不该改道认怂，而是尾随主路；所以这里只拦低进度/
 # 山线停留，不拦官道跟随。过了中段后硬件资源价值上调，补回前面放弃的
-# 非关键经济。
-FRONT_TEMPO_ENABLED = True
+# 非关键经济。V3.32 审计：陪练电池无 2986 官道型代表，子系统实测净负，
+# 默认关闭；保留旋钮，待平台新战报或新增形态陪练复证后再开。
+FRONT_TEMPO_ENABLED = False
 FRONT_TEMPO_PROGRESS_CUT = 0.22
 FRONT_TEMPO_BASE_CAP = 90
 FRONT_TEMPO_OPP_LEAD = 3
@@ -1120,7 +1121,7 @@ class TaskPlanner:
         opp_pos = opp.get("nextNodeId") or opp.get("currentNodeId")
         if opp_pos == cur:
             return True
-        return self._opp_gate_lead(state, cur) >= -self.FRONT_TEMPO_KEEP_LEAD_TRAIL
+        return self._opp_gate_lead(state, cur) >= self.FRONT_TEMPO_KEEP_LEAD_TRAIL
 
     def _task_route_bucket(self, state, task, pos):
         bucket = task.get("routeBucket") or task.get("routeType")

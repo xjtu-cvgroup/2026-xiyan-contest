@@ -3,7 +3,7 @@
 
 全量 regress.py（216 局 ~3 分钟）只在版本收尾时跑；日常改动用本电池
 快速把关。种子按历史信息量挑选：
-- camper 0/4/5/10/15/19/23：相位敏感七种子（悬崖带/宽限带/前推偏置
+- camper 0/4/5/10/15/17/19/23：相位敏感八种子（悬崖带/宽限带/前推偏置
   三轮实验的全部翻盘与回归都发生在这里）
 - toller 0/1/3/5：冻结/回手卡代表局
 - mirror 0/2/7、farmer 1/5、rusher 3：形态哨兵
@@ -19,7 +19,7 @@ from sparring import (CamperBot, FarmerBot, RusherBot,   # noqa: E402
                       TollerBot)
 
 SENTINELS = (
-    [("camper", s) for s in (0, 4, 5, 10, 15, 19, 23)]
+    [("camper", s) for s in (0, 4, 5, 10, 15, 17, 19, 23)]
     + [("toller", s) for s in (0, 1, 3, 5)]
     + [("mirror", s) for s in (0, 2, 7)]
     + [("farmer", s) for s in (1, 5)]

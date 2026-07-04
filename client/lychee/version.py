@@ -64,4 +64,7 @@
 #        farmer/farm-rusher/rusher/camper，farm-rusher 走独立前推/局部
 #        设卡/短等响应，不吃完整悬崖价；悬崖带内漏斗税恒按基础帧价
 #        计，避免同一份漏斗代价被 30 分/帧重复放大；smoke 补 toller3。
-BUILD_VERSION = "3.31-posture-funnel-smoke"
+# 3.32 = FRONT_TEMPO 审计回收：默认关闭前段尾随子系统，保留显式旋钮；
+#        修正 _front_tempo_contested 的领先阈值符号；farm-rusher 12 帧短等
+#        释放仅限已停靠口袋点，汇聚中继续等待；smoke 补 camper17。
+BUILD_VERSION = "3.32-front-tempo-audit"
