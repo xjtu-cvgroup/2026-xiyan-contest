@@ -302,9 +302,21 @@ class WardenStrategy(BaselineStrategy):
             guard = self._reactive_guard(state, cur)
             if guard:
                 return guard
-            task = self._farm_here(state, cur)
-            if task:
-                return task
+            # 任务读条 3-4 帧不可打断：对手逼近到"读条期内会上边+进关"
+            # 的距离时不开新任务，保持空闲随时可拦（实战：读条锁身位
+            # 放它溜进关）
+            opp = state.opp
+            near = False
+            if opp and not opp.get("delivered") and not opp.get("retired"):
+                pos = opp.get("nextNodeId") or opp.get("currentNodeId")
+                if pos:
+                    oeta, op = state.graph.shortest_path(
+                        pos, cur, P.BASE_SPEED)
+                    near = bool(op) and oeta <= 12   # 读条4+设卡5+余量
+            if not near:
+                task = self._farm_here(state, cur)
+                if task:
+                    return task
             return P.a_wait()
 
         # ---- 收官段 ----
@@ -392,8 +404,11 @@ class WardenStrategy(BaselineStrategy):
         opp = state.opp
         if not opp or opp.get("delivered") or opp.get("retired"):
             return False
-        return bool(opp.get("routeEdgeId")
-                    and opp.get("nextNodeId") == node_id)
+        hit = bool(opp.get("routeEdgeId")
+                   and opp.get("nextNodeId") == node_id)
+        if hit:
+            self._last_inbound = state.round
+        return hit
 
     def _opp_near(self, state, node_id, eta_cap):
         opp = state.opp
@@ -405,7 +420,7 @@ class WardenStrategy(BaselineStrategy):
         eta, path = state.graph.shortest_path(pos, node_id, P.BASE_SPEED)
         return bool(path) and eta <= eta_cap
 
-    GUARD_MIN_LEAD = 6         # 提交+4读条+1生效=+6起拦：对手剩≥6帧即来得及（r252实战差1帧修正）
+    GUARD_MIN_LEAD = 5         # 提交T→T+4完成→T+5起拦：剩≥5帧即可拦（实战5000ms被6误放的修正）
 
     def _reactive_guard(self, state, cur):
         """虚卡纪律：对手上边才落卡；卡亡且它仍在边上 → 立即补。
@@ -589,8 +604,13 @@ class WardenStrategy(BaselineStrategy):
         opp = state.opp
         if not opp or opp.get("delivered") or opp.get("retired"):
             return True
-        # ① 死线余量
-        if remain <= self._my_need(state, cur) + self.EXIT_PAD:
+        # ① 死线余量；对手长期未逼近关隘且未交付=埋伏流（vs2982 在
+        #    S14 掐我们踏边的形态），多留一张防4卡的风化税提前动身
+        pad = self.EXIT_PAD
+        if state.round - getattr(self, "_last_inbound", 0) > 120 \
+                and cur == self.camp_node:
+            pad += 90
+        if remain <= self._my_need(state, cur) + pad:
             return True
         # ② 数学判死：对手全速（含骑马余量）也到不了终点
         if True:
