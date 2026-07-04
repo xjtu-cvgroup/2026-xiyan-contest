@@ -390,6 +390,11 @@ class PlannerStrategy(BaselineStrategy):
         else:
             self._opp_stationary = (None, state.round)
 
+        # 富点干等观测（V3.34）逐帧跑——不能挂在 _profile_tick 里，
+        # 画像定型后那条链就停了，而干等证据恰恰在定型之后才累积
+        if opp:
+            self._dwell_tick(state, opp)
+
         # 对手画像（V3.20）：早期识别蹲点型，漏斗先验不等首卡提前升 1.0
         if self.PROFILE_ENABLED and self._opp_profile == "unknown" \
                 and state.round <= self.PROFILE_WINDOW:
@@ -516,6 +521,30 @@ class PlannerStrategy(BaselineStrategy):
                 self.log.info("opp identified as forward-rusher at r%d",
                               state.round)
         self.planner.forward_rush_opp = self._fwd_rush
+
+    def _dwell_tick(self, state, opp):
+        """富点干等观测（V3.34）：普通节点上的累计无读条闲置帧。
+
+        2986 型官道农会在任务富点纯等刷新波；2839/toller"农不停步"、
+        camper 只蹲关隘（节点类型天然排除）。停留 ≥5 帧后的闲置才计，
+        滤掉路过/领取的帧噪声；被我方卡拦住的等风化不算（那是受害者
+        不是农夫）。累计过线解锁 planner 的 FRONT_TEMPO 尾随。
+        """
+        if opp.get("delivered") or opp.get("retired") \
+                or opp.get("currentProcess"):
+            return
+        node_id, since = self._opp_stationary
+        if not node_id or state.round - since < 5:
+            return
+        if state.node(node_id).get("nodeType") \
+                in ("KEY_PASS", "PASS", "GATE", "PALACE_STATION"):
+            return
+        for nid in [node_id] + [n for n, _ in state.graph.neighbors(node_id)]:
+            g = state.node(nid).get("guard")
+            if g and g.get("ownerTeamId") == state.my_team \
+                    and g.get("active", g.get("defense", 0) > 0):
+                return
+        self.planner._opp_dwell_idle += 1
 
     def _profile_tick(self, state):
         opp = state.opp

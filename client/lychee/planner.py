@@ -62,10 +62,15 @@ FORWARD_BIAS_AUTO = 0.6     # 冲锋型对手在线识别命中时的地板（st
 # 对手则跳过 S03，在 S07/S10 官道沿途补齐 150 分并早 55+ 帧交付。
 # 对手只先走几帧时不该改道认怂，而是尾随主路；所以这里只拦低进度/
 # 山线停留，不拦官道跟随。过了中段后硬件资源价值上调，补回前面放弃的
-# 非关键经济。V3.32 审计：陪练电池无 2986 官道型代表，子系统实测净负，
-# 全量门默认关闭；V3.35 只恢复山路线轻门，覆盖平台 lose 批次里最稳定的
-# "已有基础分后被 S06/S08 山路拖走"负样本。
-FRONT_TEMPO_ENABLED = False
+# 非关键经济。V3.32 审计：陪练电池无 2986 官道型代表曾实测净负关闭；
+# V3.35 恢复山路轻门（平台 lose 批次最稳定负样本：已有基础分后被
+# S06/S08 山路拖走）；V3.37 补齐 RoadFarmerBot 语料后复证全量门：
+# 对官道农形态收益决定性（12 种子总 margin 5130→6305、交付
+# r515-585→r475-490），亏损集中在 camper/rusher/toller 误开火 →
+# 按"farmer 模式+零设卡+富点干等实锤"门控启用。两门并存：全量门
+# 只对干等实锤纯农开火；山路轻门覆盖其余形态（用 raw 竞争判定，
+# 不吃形态门）
+FRONT_TEMPO_ENABLED = True
 FRONT_TEMPO_MOUNTAIN_RECOVERY = True
 FRONT_TEMPO_PROGRESS_CUT = 0.22
 FRONT_TEMPO_BASE_CAP = 90
@@ -74,6 +79,11 @@ FRONT_TEMPO_BLOCK_ROUTE_TYPES = {P.MOUNTAIN}
 FRONT_TEMPO_KEEP_LEAD_TRAIL = -30
 FRONT_TEMPO_KEYPASS_BASE_CAP = 120
 FRONT_TEMPO_KEYPASS_TASK_ROUTES = {P.ROAD}
+# 富点干等实锤（V3.34）：2986 型在普通任务点纯等刷新波（零读条闲置），
+# 2839/toller 教义"农不停步"、camper 只蹲关隘——普通节点累计闲置帧是
+# 两者唯一的行为分水岭。strategy._profile_tick 逐帧累计（停留 ≥5 帧后
+# 的无读条帧才计，滤过路噪声），过线才解锁 FRONT_TEMPO 尾随
+FRONT_TEMPO_DWELL_MIN = 30
 LATE_RESOURCE_PROGRESS = 0.62
 LATE_RESOURCE_MULT = 1.25
 ICE_AMMO_TARGET_BAD = 1
@@ -341,6 +351,7 @@ class TaskPlanner:
         self.FRONT_TEMPO_OPP_LEAD = FRONT_TEMPO_OPP_LEAD
         self.FRONT_TEMPO_KEEP_LEAD_TRAIL = FRONT_TEMPO_KEEP_LEAD_TRAIL
         self.FRONT_TEMPO_KEYPASS_BASE_CAP = FRONT_TEMPO_KEYPASS_BASE_CAP
+        self.FRONT_TEMPO_DWELL_MIN = FRONT_TEMPO_DWELL_MIN
         self.LATE_RESOURCE_PROGRESS = LATE_RESOURCE_PROGRESS
         self.LATE_RESOURCE_MULT = LATE_RESOURCE_MULT
         self.ICE_AMMO_TARGET_BAD = ICE_AMMO_TARGET_BAD
@@ -367,6 +378,8 @@ class TaskPlanner:
         self._shadow_cache = (-1, frozenset())  # (round, 被对手抢先的节点集)
         self._opp_path_cache = (-1, frozenset())  # (round, 对手前进路线节点集)
         self._guard_seen = False       # 对手本局设过卡（漏斗先验升为 1.0，粘性）
+        self._opp_dwell_idle = 0       # 对手在普通节点的累计干等帧（V3.34，
+                                       # strategy._profile_tick 写入）
         self._funnel_cache = (None, None)  # ((round, cur), (choke, t_o, prior, toll_direct))
         self._race_cache = (-1, False)     # (round, 竞速模式是否激活)
         self._cliff_cache = (-1, False)    # (round, 悬崖带是否激活)
@@ -1077,6 +1090,15 @@ class TaskPlanner:
         opp = state.opp or {}
         if opp.get("delivered") or opp.get("retired"):
             return False
+        # V3.34 形态门控：只对已实锤的零设卡富点干等型纯农保速尾随。
+        # 四轮收紧史：unknown 放行 → camper 亏损全回来（smoke 五红灯）；
+        # farm-rusher 放行 → toller0 翻负；仅 farmer+未见卡 → toller0
+        # 仍翻负（2839 落卡前与 2986 同貌，信息论墙）。最终分水岭 =
+        # 富点干等实锤（普通节点累计闲置 ≥ DWELL_MIN；"农不停步"的
+        # toller 与只蹲关隘的 camper 永不过线）
+        if self._opp_tempo_mode(state) != "farmer" or self._guard_seen \
+                or self._opp_dwell_idle < self.FRONT_TEMPO_DWELL_MIN:
+            return False
         if self._map_progress(state, cur) >= self.FRONT_TEMPO_PROGRESS_CUT:
             return False
         if not self._opp_on_my_forward_path(state, cur):
@@ -1112,8 +1134,12 @@ class TaskPlanner:
                 return True
         return False
 
-    def _front_tempo_contested(self, state, cur):
-        """前半程身位仍在同屏竞争：领先也要保速，不能把路权农回去。"""
+    def _front_tempo_contested_raw(self, state, cur):
+        """前半程身位仍在同屏竞争（raw 身位判定，不吃形态门）。
+
+        山路轻门（V3.35）用本口径：它的目标形态含 rusher/farm-rusher，
+        不能被全量门的"干等实锤纯农"门挡住。
+        """
         opp = state.opp or {}
         if opp.get("delivered") or opp.get("retired"):
             return False
@@ -1125,6 +1151,13 @@ class TaskPlanner:
         if opp_pos == cur:
             return True
         return self._opp_gate_lead(state, cur) >= self.FRONT_TEMPO_KEEP_LEAD_TRAIL
+
+    def _front_tempo_contested(self, state, cur):
+        """形态门控版身位竞争：全量 FRONT_TEMPO 链路（关前节奏闸）用。"""
+        if self._opp_tempo_mode(state) != "farmer" or self._guard_seen \
+                or self._opp_dwell_idle < self.FRONT_TEMPO_DWELL_MIN:
+            return False     # 同 _front_tempo_active 的形态门控（V3.37）
+        return self._front_tempo_contested_raw(state, cur)
 
     def _task_route_bucket(self, state, task, pos):
         bucket = task.get("routeBucket") or task.get("routeType")
@@ -1176,7 +1209,9 @@ class TaskPlanner:
         """
         if not self.FRONT_TEMPO_MOUNTAIN_RECOVERY:
             return False
-        if self.FRONT_TEMPO_ENABLED or state.phase != P.PHASE_NORMAL:
+        # V3.37：不再因全量门开启而自闭——全量门被"干等实锤纯农"收窄
+        # 后，轻门负责其余形态的山线拖走负样本；身位判定用 raw 口径
+        if state.phase != P.PHASE_NORMAL:
             return False
         base = state.me.get("taskScore", 0) if base is None else base
         if (base or 0) < 30 or (base or 0) >= self.FRONT_TEMPO_BASE_CAP:
@@ -1185,7 +1220,7 @@ class TaskPlanner:
         if (opp.get("taskScore") or 0) < self.RACE_CLIFF_OPP_FARM \
                 and self._opp_tempo_mode(state) not in ("rusher", "farm-rusher"):
             return False
-        if not self._front_tempo_contested(state, cur):
+        if not self._front_tempo_contested_raw(state, cur):
             return False
         if not self._key_pass_ahead(state, cur, penalty, ecost):
             return False

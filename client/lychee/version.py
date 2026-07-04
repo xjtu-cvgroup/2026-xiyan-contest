@@ -80,4 +80,14 @@
 #        第一刀后防守降到 4/5 且只剩 3 人不能继续死等风化；允许应急
 #        补第二刀。领先 farmer 局不再把 30+ 帧后可被一击破的主动卡
 #        送成悬赏分；竞速热卡、边冻结卡、RUSH 二卡不受影响。
-BUILD_VERSION = "3.36-edge-bounty-rescue"
+# 3.37 = RoadFarmerBot 语料 + FRONT_TEMPO 门控复活（撞号自 3.34 改）：
+#        补齐 2986/2619/2738 官道农陪练形态（官道 waypoint+富点干等刷新
+#        波+零设卡+骑马，12 种子含 -30/-59 真败局），用真语料复证
+#        FRONT_TEMPO 对该形态收益决定性（总 margin 5130→6305，交付
+#        r515-585→r475-490）。门控四轮收紧实录：unknown 放行→camper
+#        五红灯；farm-rusher 放行→toller0 翻负；farmer+未见卡→toller0
+#        仍翻负（2839 落卡前同貌）；最终=farmer 模式+零设卡+普通节点
+#        累计干等≥30 帧（"农不停步"的 toller 与蹲关隘的 camper 永不
+#        过线）。dwell 观测逐帧跑不挂画像链（定型后即停的坑）。与
+#        3.35 山路轻门并存：全量门只对干等实锤纯农开火，轻门覆盖其余
+BUILD_VERSION = "3.37-roadfarmer-corpus"

@@ -3692,27 +3692,58 @@ def test_front_tempo_tail_follow():
         return gs
 
     pl = TaskPlanner()
-    ok &= check("前段尾随: 默认关闭，等待平台形态复证",
-                not pl.FRONT_TEMPO_ENABLED, "")
+    ok &= check("前段尾随: RoadFarmer 语料复证后默认启用（V3.37）",
+                pl.FRONT_TEMPO_ENABLED, "")
     ok &= check("前段保速: 山路线轻门默认开启",
                 pl.FRONT_TEMPO_MOUNTAIN_RECOVERY, "")
-    pl.FRONT_TEMPO_ENABLED = True
     pl._map_progress = lambda state, cur: 0.1
     pl._opp_on_my_forward_path = lambda state, cur: False
     pl._opp_gate_lead = lambda state, cur: -10
+    pl._opp_dwell_idle = 45          # 富点干等已实锤
     dummy = type("DummyState", (), {
         "phase": P.PHASE_NORMAL,
-        "opp": {"currentNodeId": "S04", "delivered": False, "retired": False},
+        "graph": None,     # farm_rusher_pressure 的早退门
+        "opp": {"currentNodeId": "S04", "delivered": False, "retired": False,
+                "taskScore": 45},
     })()
     ok &= check("前段尾随: 我方领先不足30帧仍算竞争（符号钉子）",
                 pl._front_tempo_contested(dummy, "S03"), "")
     pl._opp_gate_lead = lambda state, cur: -31
     ok &= check("前段尾随: 我方领先超过30帧退出竞争",
                 not pl._front_tempo_contested(dummy, "S03"), "")
+    # V3.34 形态门控四轮收紧：只对"零设卡 + 富点干等实锤"的纯农尾随。
+    # camper 的领先是诱饵（camper17 +75→-71）；rusher 不农任务
+    # （rusher3 -89）；farm-rusher/toller 落卡前与纯农同貌但尾随=喂它
+    # 掐踏边（toller0 +26→-36）；干等帧是 2986 与 2839 唯一行为分水岭
+    pl._opp_gate_lead = lambda state, cur: -10
+    pl.opp_profile = "camper"
+    ok &= check("前段尾随: camper 画像不尾随（形态门控）",
+                not pl._front_tempo_contested(dummy, "S03"), "")
+    pl.opp_profile = "unknown"
+    pl.forward_rush_opp = True
+    dummy.opp["taskScore"] = 0
+    ok &= check("前段尾随: 纯 rusher 不尾随（形态门控）",
+                not pl._front_tempo_contested(dummy, "S03"), "")
+    dummy.opp["taskScore"] = 45
+    ok &= check("前段尾随: farm-rusher 不尾随（toller0 证据）",
+                not pl._front_tempo_contested(dummy, "S03"), "")
+    pl.forward_rush_opp = False
+    ok &= check("前段尾随: 零设卡纯农+干等实锤 → 尾随",
+                pl._front_tempo_contested(dummy, "S03"), "")
+    pl._opp_dwell_idle = 0
+    ok &= check("前段尾随: 无干等实锤不尾随（2839 落卡前不可区分）",
+                not pl._front_tempo_contested(dummy, "S03"), "")
+    pl._opp_dwell_idle = 45
+    pl._guard_seen = True
+    ok &= check("前段尾随: 见过卡即永久关闭尾随",
+                not pl._front_tempo_contested(dummy, "S03"), "")
+    pl._guard_seen = False
 
     st = PlannerStrategy()
     st.planner.FRONT_TEMPO_ENABLED = True
+    st.planner._opp_dwell_idle = 45      # 富点干等实锤（V3.37 门控前置）
     gs = gs_front(tasks=True)
+    gs.players[2002]["taskScore"] = 45   # farmer 模式前置
     plan = st.planner.plan(gs)
     ok &= check("前段尾随: S03/S06 低进度任务不再截停",
                 plan.kind != "task", repr(plan))
@@ -3723,7 +3754,9 @@ def test_front_tempo_tail_follow():
 
     st2 = PlannerStrategy()
     st2.planner.FRONT_TEMPO_ENABLED = True
+    st2.planner._opp_dwell_idle = 45
     gs = gs_front(stock=True, tasks=False)
+    gs.players[2002]["taskScore"] = 45
     plan = st2.planner.plan(gs)
     a = st2.main_action(gs, plan)
     ok &= check("前段尾随: 顺路领取收缩到硬件资源",
@@ -3789,8 +3822,10 @@ def test_front_tempo_tail_follow():
              "failed": False, "ownerPlayerId": 0, "protectionPlayerId": 0,
              "routeBucket": P.ROAD}
     gs = gs_replay93("S07", 120, (t_s07,), "S07", "S09", "E04")
+    gs.players[2002]["taskScore"] = 45   # farmer 模式前置（V3.37 门控）
     st4 = PlannerStrategy()
     st4.planner.FRONT_TEMPO_ENABLED = True
+    st4.planner._opp_dwell_idle = 45     # 富点干等实锤前置
     plan = st4.planner.plan(gs)
     ok &= check("前段保速: S07 到120后先抢 S10 不贪到150",
                 plan.kind != "task", repr(plan))

@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>荔枝争运战 · 完整策略文档 (BUILD 3.29-farmer-walkin)</title>
+<title>荔枝争运战 · 完整策略文档 (BUILD 3.34-roadfarmer-corpus)</title>
 <style>
   .viz-root {
     --surface-1: #fcfcfb;
@@ -96,7 +96,7 @@
 <div class="viz-root">
 
 <h1>《一骑红尘：荔枝争运战》完整策略文档</h1>
-<p class="sub">客户端 <code>PlannerStrategy</code> · <span class="badge">BUILD 3.29-farmer-walkin</span>
+<p class="sub">客户端 <code>PlannerStrategy</code> · <span class="badge">BUILD 3.34-roadfarmer-corpus</span>
    · 163 项自测覆盖 · 生成于 2026-07-03</p>
 
 <div class="toc">
@@ -594,9 +594,28 @@ smoke 全绿 + camper×8/toller×3/farmer×2/镜像 热种子无新未交付（s
 等待，V3.15 教义不动；对手变脸落卡 _guard_seen 即永久关豁免</b></td>
 <td>selftest 5 钉（正例 + 预算内 + 三个控制组）全绿；smoke 全绿；camper×6/farmer×3/toller×2 热种子无新
 未交付、逐位或噪声级</td></tr>
+<tr><td><b>3.30 tempo-ammo-farmer</b></td><td><b>replay93 节奏/弹药合并：首关前任务分 120 封顶保速、非官道任务
+先让；对手强通离开原节点时解除中边陷阱等待；冰鉴延后到已有坏果弹药后使用（坏果=攻坚弹药，零坏果时降低前段
+冰鉴绕路吸引力）</b></td><td>并行线（feat/v3.30），后经 3.31 合流</td></tr>
+<tr><td><b>3.31 posture-funnel-smoke</b></td><td><b>对手节奏状态收敛 + 悬崖漏斗会计修正：planner 侧 _opp_tempo_mode
+统一 farmer/farm-rusher/rusher/camper 互斥判定；悬崖带内漏斗税恒按基础帧价计（修复同一份漏斗代价被 30 分/帧
+重复放大的双计）；rear-guard 扩展宫前驿</b></td><td>smoke 补 toller3；漏斗×悬崖双计修正为审计项落地</td></tr>
+<tr><td><b>3.32 front-tempo-audit</b></td><td><b>FRONT_TEMPO 审计回收：陪练电池无 2986 官道型代表、子系统实测净负
+（camper17 +75→-71、rusher3 -89、mirror7 -100）→ 默认关闭保留旋钮；修正 _front_tempo_contested 领先阈值
+双重负号；farm-rusher 12 帧短等释放仅限已停靠口袋点</b></td><td>smoke 补 camper17；"待形态复证再开"的约定由 3.34 兑现</td></tr>
+<tr><td><b>3.33 catchup-merge-guard</b></td><td><b>2744vs2617 复盘：前段任务分 0:60 落后但先到 S09 时，旧门控 + 45
+slack 把反卡机会跳过——新增追分合流卡：明显任务分落后 + 对手即将必经 + 前方仍有关键关隘时低门槛设卡</b></td>
+<td>selftest 钉子 + smoke 全绿</td></tr>
+<tr><td><b>3.34 roadfarmer-corpus</b></td><td><b>RoadFarmerBot 语料 + FRONT_TEMPO 门控复活：补齐 2986/2619/2738 官道农
+陪练（官道 waypoint + 富点干等刷新波 + 零设卡 + 骑马，12 种子复现 -30/-59 真败局）；真语料复证 FRONT_TEMPO 对该
+形态收益决定性（总 margin 5130→6305，全开可达 7505 但伤 camper/toller/mirror）。门控四轮收紧终版 = farmer 模式 +
+零设卡 + 普通节点累计干等 ≥30 帧（FRONT_TEMPO_DWELL_MIN——"农不停步"的 2839 与蹲关隘的 camper 永不过线）；
+干等观测逐帧跑不挂画像链。详见 docs/roadfarmer-corpus-2026-07-04.md</b></td>
+<td>selftest 前段尾随钉子组重写（+3 颗，289 项全绿）；smoke 补 roadfarmer 0/5/8/11 哨兵（0/11 已知负局观察清单、
+5/8 收益哨兵）全绿；camper×8/toller×4/rusher/mirror 逐位不变；镜像配对 12 种子净 -84（单种子集中，期望内）</td></tr>
 </table>
 
-<p class="foot">仓库 client/docs/strategy.html · 与代码同步于 feat/v3.18-race-tempo@3.29-farmer-walkin ·
+<p class="foot">仓库 client/docs/strategy.html · 与代码同步于 feat/v3.34-roadfarmer-corpus@3.34 ·
 自测 <code>python3 selftest.py</code>（220 项）· 回归 <code>python3 regress.py</code>（六形态）</p>
 </div>
 
