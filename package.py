@@ -6,13 +6,29 @@ Windows 打包的两个坑，这里都处理：
   1. start.sh 若带 CRLF，Linux 平台 bash 直接起不来 —— 强制归一化为 LF；
   2. Windows 原生压缩不保存 Unix 可执行位 —— 直接在 zip 条目里写入 0755。
 """
+import glob
 import os
+import re
 import sys
 import zipfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))   # 仓库根目录
 CLIENT = os.path.join(HERE, "client")               # 客户端源码目录
-OUT = os.path.join(HERE, "dist", "gameclient.zip")
+
+
+def build_version():
+    """从 version.py 读 BUILD_VERSION（文本解析，不 import，零依赖）。"""
+    src = os.path.join(CLIENT, "lychee", "version.py")
+    with open(src, encoding="utf-8") as f:
+        m = re.search(r'BUILD_VERSION\s*=\s*"([^"]+)"', f.read())
+    if not m:
+        raise SystemExit("version.py 里找不到 BUILD_VERSION")
+    return m.group(1)
+
+
+# 包名带版本号（防旧包上平台：曾三次打包/上传旧代码，文件名即水印第一关）
+VERSION = build_version()
+OUT = os.path.join(HERE, "dist", f"gameclient-{VERSION}.zip")
 
 # (打包路径[zip内相对根目录], 是否脚本[LF+755])
 INCLUDE_FILES = [
@@ -41,8 +57,11 @@ def add_file(zf, rel_path, is_script):
 
 def main():
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
-    if os.path.exists(OUT):
-        os.remove(OUT)
+    # 清掉 dist 里所有旧候选包（含无版本号的老 gameclient.zip）：
+    # dist 里永远只留一个提交候选，杜绝挑错文件上传
+    for old in glob.glob(os.path.join(HERE, "dist", "gameclient*.zip")):
+        os.remove(old)
+        print(f"  - 清理旧包 {os.path.basename(old)}")
 
     with zipfile.ZipFile(OUT, "w", zipfile.ZIP_DEFLATED) as zf:
         for rel, is_script in INCLUDE_FILES:
@@ -68,6 +87,8 @@ def main():
         for line in zf.read("lychee/version.py").decode("utf-8").splitlines():
             if line.startswith("BUILD_VERSION"):
                 ver = line.split("=", 1)[1].strip().strip('"')
+        # 包名版本必须与包内 version.py 一致（防手工改名/半新半旧）
+        assert ver == VERSION, f"包名版本 {VERSION} != 包内版本 {ver}"
         print(f"\n自检通过: start.sh 位于根目录 / LF / 权限 {oct(mode)}")
         print(f"*** 构建版本: {ver} ***  (对局日志开头应出现同样版本号)")
         print(f"打包完成: {OUT}  ({len(names)} 个文件)")

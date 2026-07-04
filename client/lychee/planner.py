@@ -20,6 +20,33 @@ FRESH_VALUE_PER_FRAME = 0.11   # 每帧鲜度损耗折分 ≈ 0.055(官道) × 1
 TIME_SCORE_PER_FRAME = 70.0 / 600.0   # 用时分斜率（任务系数拉满时）
 RAW_TIME_SCORE_EST = 25     # 估算用的原始用时分（约 385 帧交付）
 CONTEST_RISK_DISCOUNT = 0.5  # 对手比我们更近时的估值折扣
+# 争夺宽限带（V3.22 实验，已证伪，保留旋钮与记录）：反事实统计
+# （contest_truth，36 局 1900+ 样本）证明 0.5 作为概率大错——预测落后
+# ≤4 帧硬抢真实胜率 100%（三形态无一例外）、5~10 帧 96~99%（opp_eta
+# 是不含对手停留的裸 ETA + 对手多半无意图，双重偏差）。但 840 局扫描
+# 证明它作为政策歪打正着：G=4 五形态逐位零变化（小差距折半从不翻转
+# argmax）；G=10/20 全线崩坏（camper 42→38、toller 48→42、farmer
+# 24→22）——去抢对手身边的任务赢面虽大，却把走廊到达拖后 6~10 帧，
+# 悬崖帧价 25~35 分/帧远超任务边际值。0.5 的"悲观"实际在给估值体系
+# 没显式定价的"贴身绕路外部性"买单。真要动它，先给走廊外部性建模
+CONTEST_GRACE_FRAMES = 0     # 0 = 现行行为（任何落后都吃满折扣）
+CONTEST_GRACE_DISCOUNT = 0.9
+# 分段争夺折扣（V3.23）：反事实按博弈阶段切分（48 局 2000+ 样本）后
+# 发现外部性完全集中在关前——关后所有 gap 桶硬抢真实胜率 97~100%
+# （走廊已过，没有悬崖可输，输了只亏一趟路），对手已交付后更是规则上
+# 不可能被抢（7.4 + 交付队伍跳过主动作）。0.5 只该活在关前竞速段
+POST_CHOKE_CONTEST_DISCOUNT = 0.9   # 关后：P≈0.98 × 湿件谦逊
+CONTEST_PHASE_ENABLED = True
+# 前推偏置（V3.24，用户指令：前期节点降权、优先冲走廊、后面的资源更
+# 重要）：任务价值 × 地图进度系数——progress = 1 - 该点到宫门裸帧 /
+# 起点到宫门裸帧，系数 = FLOOR + (1-FLOOR)×progress。语料依据：2839
+# 边冲边农（S07/S10/S11 沿途农同样的 150 分），我们 S03 停留 15 帧在
+# 悬崖带射程（ETA≤125）之外，seed4/23 深链死局皆源于开局段落后。
+# 只作用于任务：资源口径不动（冰链血泪资产、马匹 T06 经济）
+FORWARD_BIAS_FLOOR = 1.0    # 1.0 = 关闭；扫描定参后改默认
+FORWARD_BIAS_CUT = 0.0      # >0 时改用阶跃：进度 < CUT 的节点吃 FLOOR，
+                            # 之后完全不动（只压真正的开局簇，不扰动
+                            # 走廊邻近农任务的时序）
 # 阻挡节点的寻路惩罚按真实处理代价估：会计入 ETA，不能虚高
 OBSTACLE_PENALTY = 10       # 清障 6 帧读条 + 1 好果 / 强通税 8 帧
 GUARD_PENALTY = 35          # 强通时间税 min(40, 10+防守值×5) 量级
@@ -221,6 +248,15 @@ class TaskPlanner:
         self.SWITCH_MARGIN = SWITCH_MARGIN
         self.FUNNEL_GUARD_PRIOR = FUNNEL_GUARD_PRIOR
         self.OFFPATH_RACE_FLOOR = OFFPATH_RACE_FLOOR
+        self.CONTEST_RISK_DISCOUNT = CONTEST_RISK_DISCOUNT
+        self.CONTEST_GRACE_FRAMES = CONTEST_GRACE_FRAMES
+        self.CONTEST_GRACE_DISCOUNT = CONTEST_GRACE_DISCOUNT
+        self.POST_CHOKE_CONTEST_DISCOUNT = POST_CHOKE_CONTEST_DISCOUNT
+        self.CONTEST_PHASE_ENABLED = CONTEST_PHASE_ENABLED
+        self._choke_ahead_cache = (-1, False)
+        self.FORWARD_BIAS_FLOOR = FORWARD_BIAS_FLOOR
+        self.FORWARD_BIAS_CUT = FORWARD_BIAS_CUT
+        self._fwd_total = None
         self.SHADOW_CHOKE_PENALTY = SHADOW_CHOKE_PENALTY
         self.CHOKE_PASS_FALLBACK = True   # 潼关回退（V3.20），A/B 可关
         self.blacklist = {}   # taskId -> 解禁帧（吃到拒绝后临时拉黑）
@@ -684,14 +720,29 @@ class TaskPlanner:
             return None
 
         value = marginal_task_value(base, task.get("score", 0))
+        # 前推偏置（V3.24）：前期节点的任务降权，优先把身位往走廊冲——
+        # 同样的分数在沿途更靠前的波次里农回来（2839 打法），开局停留
+        # 是深链死局的第一环
+        value *= self._forward_factor(state, pos)
         # 对手风险：对手离任务点更近时打折；对手正在处理该任务则放弃。
         # 离路软化（V3.10.1）：任务点不在对手合理走廊上时，它专程绕来抢的
         # 概率低（与资源折扣对称）——曾把走官道的 2614 判定会来抢山地任务
         if self._opp_processing_task(state, task):
             return None
+        opp = state.opp or {}
+        opp_out = opp.get("delivered") or opp.get("retired")
         opp_eta = self._opp_eta(state, pos)
-        if opp_eta < f_to:
-            d = CONTEST_RISK_DISCOUNT
+        if opp_eta < f_to and not opp_out:
+            # 分段折扣（V3.23）：对手已交付/退赛不折（规则上不可能被抢，
+            # 曾漏此检查白砍尾段任务）；关后 0.9（反事实 97~100%）；
+            # 关前保持 0.5（含贴身绕路外部性的补偿定价，放宽已被证伪）
+            gap = f_to - opp_eta
+            if self.CONTEST_PHASE_ENABLED and not self._choke_ahead(state):
+                d = self.POST_CHOKE_CONTEST_DISCOUNT
+            else:
+                d = (self.CONTEST_GRACE_DISCOUNT
+                     if gap <= self.CONTEST_GRACE_FRAMES
+                     else self.CONTEST_RISK_DISCOUNT)
             if pos not in self._opp_path_nodes(state):
                 d = max(d, self.OFFPATH_RACE_FLOOR)
             value *= d
@@ -811,6 +862,40 @@ class TaskPlanner:
             self._cliff_choke = None
         self._cliff_cache = (state.round, active)
         return active
+
+    def _forward_factor(self, state, node_id):
+        """地图进度系数：起点附近 → FLOOR，宫门方向 → 1.0（裸帧度量）。"""
+        floor = self.FORWARD_BIAS_FLOOR
+        if floor >= 1.0:
+            return 1.0
+        total = self._fwd_total
+        if total is None:
+            d, p = state.graph.shortest_path(
+                state.start_node, state.gate_node, P.BASE_SPEED) \
+                if state.start_node else (None, None)
+            total = d if p else 0
+            self._fwd_total = total
+        if not total:
+            return 1.0
+        remain, path = state.graph.shortest_path(
+            node_id, state.gate_node, P.BASE_SPEED)
+        if not path:
+            return 1.0
+        progress = max(0.0, min(1.0, 1.0 - remain / total))
+        if self.FORWARD_BIAS_CUT > 0:
+            return floor if progress < self.FORWARD_BIAS_CUT else 1.0
+        return floor + (1.0 - floor) * progress
+
+    def _choke_ahead(self, state):
+        """前方是否还有咽喉（漏斗 ctx 存在）——争夺折扣的阶段判定。"""
+        if self._choke_ahead_cache[0] == state.round:
+            return self._choke_ahead_cache[1]
+        cur = self._anchor_node(state)
+        ctx = self._funnel_ctx(state, cur, self._penalty_fn(state),
+                               self._edge_cost_fn(state)) if cur else None
+        val = bool(ctx)
+        self._choke_ahead_cache = (state.round, val)
+        return val
 
     # ================= 帧价值与辅助 =================
 
