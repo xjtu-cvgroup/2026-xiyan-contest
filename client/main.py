@@ -7,9 +7,8 @@
                                [--player-name NAME] [--version V]
                                [--strategy planner|warden]
 
-策略选择：本分支默认 warden（见 DEFAULT_STRATEGY）——切到本分支
-package.bat/package.py 打包上传即守望者，零参数。临时切回主线用
---strategy planner 或 LYCHEE_STRATEGY=planner。
+策略选择：本分支默认 planner（改进版主线）。--strategy warden /
+LYCHEE_STRATEGY=warden 可临时切守望者做本地对练。
 """
 import argparse
 import os
@@ -25,9 +24,8 @@ from lychee.version import BUILD_VERSION
 
 VERSION = BUILD_VERSION
 STRATEGIES = ("planner", "warden")
-# 本分支（exp/v3.96-s10-warden）身份=守望者：切到本分支打包即守望者包，
-# 无需任何参数。feat 主线此值恒为 "planner"。
-DEFAULT_STRATEGY = "warden"
+# 本分支（exp/v3.97-beat-warden）身份=改进版主线，默认 planner。
+DEFAULT_STRATEGY = "planner"
 
 
 def build_strategy(name, log):
