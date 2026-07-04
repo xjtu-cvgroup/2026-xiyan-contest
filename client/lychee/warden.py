@@ -44,14 +44,22 @@ class WardenStrategy(BaselineStrategy):
     OPP_SPEED_MARGIN = 0.8     # 判死时对手 ETA 打折（骑马/疾行令余量）
     OPP_DEAD_BUFFER = 8        # 判死额外缓冲：宁可多守 8 帧不误判
     WEAKEN_RESEND_GAP = 12     # 被冻在边上时的削弱重发间隔
-    CLAIM_EN_ROUTE = (P.FAST_HORSE, P.SHORT_HORSE,
-                      P.OFFICIAL_PERMIT, P.PASS_TOKEN, P.ICE_BOX)
+    # 竞速段只领快马（领取 2 帧、E05 骑 20 帧×1200 净省 ~2）：短程马
+    # 净收益 ~0、文书/冰各 -2 帧——竞速期每帧都是 S10 所有权，牌弹药
+    # 靠初始 4 点护卫行动点（兵争）兜底
+    CLAIM_EN_ROUTE = (P.FAST_HORSE,)
     THREAT_ETA = 90            # 对手离关隘 ETA 在此内算"在逼近"（临别卡用）
+    # 处理站探路标记（任务书 6.4.1：处理帧 -3 最低 2，寿命 45 帧，1 人手）：
+    # 水路 S02 交接 4→2 / S04 登船 7→4 / S05 换运 6→3，3 人手买 8 帧。
+    # 距站 ETA ≤ 此值才派（落地延迟 3~15 帧 + 寿命 45，窗口刚好盖住到站）
+    SCOUT_DISPATCH_ETA = 38
 
     def __init__(self, logger=None):
         super().__init__(logger)
         self.camp_node = None
         self._clear_plan = []      # 待派小分队清障的节点（按途经顺序）
+        self._scout_plan = []      # 待标记的固定处理站（按途经顺序）
+        self._scout_sent = {}      # nodeId -> 派出帧
         self._clear_sent = {}      # nodeId -> 派出帧
         self._guard_sent = {}      # nodeId -> 提交帧
         self._reinforce_sent = -999
@@ -71,9 +79,16 @@ class WardenStrategy(BaselineStrategy):
         if self.camp_node not in self._clear_plan \
                 and state.has_obstacle(self.camp_node):
             self._clear_plan.append(self.camp_node)
+        # 沿途固定处理站全部预标（-3 帧/站）：路线上处理帧 >0 的非验核站
+        self._scout_plan = [
+            n for n in (path or [])
+            if n != me_pos
+            and state.node(n).get("processType")
+            and state.node(n).get("processType") != "VERIFY"
+            and (state.node(n).get("processRound") or 0) > 0]
         if self.log:
-            self.log.info("warden: camp=%s clear_plan=%r",
-                          self.camp_node, self._clear_plan)
+            self.log.info("warden: camp=%s clear_plan=%r scout_plan=%r",
+                          self.camp_node, self._clear_plan, self._scout_plan)
 
     def _pick_camp(self, state):
         """关键关隘里挑在我方去宫门最短路上的那个；缺失回退 S10。"""
@@ -255,6 +270,31 @@ class WardenStrategy(BaselineStrategy):
 
     # ---- 封锁 ----
 
+    @staticmethod
+    def _my_eta(state, node_id):
+        """我方到目标节点的帧数，含路线边上剩余进度（同 planner._opp_eta 口径）。"""
+        me = state.me
+        edge_remain = 0.0
+        if me.get("routeEdgeId") and me.get("nextNodeId"):
+            total = me.get("edgeTotalMs") or 0
+            done = me.get("edgeProgressMs") or 0
+            edge_remain = max(0, total - done) / 1000.0
+            pos = me.get("nextNodeId")
+        else:
+            pos = me.get("currentNodeId")
+        if not pos:
+            return float("inf")
+        f, path = state.graph.shortest_path(pos, node_id)
+        return edge_remain + f if path else float("inf")
+
+    @staticmethod
+    def _has_our_mark(state, node_id):
+        for m in state.node(node_id).get("scouted") or []:
+            if m.get("teamId") == state.my_team \
+                    and m.get("remainingTriggers", 1) > 0:
+                return True
+        return False
+
     def _my_active_guard(self, state, node_id):
         g = state.node(node_id).get("guard")
         return bool(g and g.get("ownerTeamId") == state.my_team
@@ -403,6 +443,23 @@ class WardenStrategy(BaselineStrategy):
             self._clear_sent[nid] = rnd
             self._squad_spent += 2
             return P.a_squad_clear(nid)
+
+        # 2.5) 处理站探路标记：真实 ETA（含边上剩余进度）进入寿命窗口
+        #      （≤38）才派——落地早于我们进站、45 帧寿命盖住到站
+        #      （1 人手换 2~3 帧处理）
+        if avail >= 1 and me.get("currentNodeId") != self.camp_node:
+            for nid in self._scout_plan:
+                if self._scout_sent.get(nid):
+                    continue
+                if self._has_our_mark(state, nid):
+                    self._scout_sent[nid] = rnd
+                    continue
+                eta = self._my_eta(state, nid)
+                if eta > self.SCOUT_DISPATCH_ETA:
+                    continue
+                self._scout_sent[nid] = rnd
+                self._squad_spent += 1
+                return P.a_squad_scout(nid)
 
         # 3) 守墙增援：卡在挨打/风化且对手仍在边上 → 续防
         camp = self.camp_node
