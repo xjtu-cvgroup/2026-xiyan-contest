@@ -162,4 +162,7 @@
 #        或触及自身死线余量，离场临别卡）。语料：路人女主 80:677、
 #        BasicPy 568:30、主办确认中边改道机制。离线冒烟 3/3 把主线
 #        打到未交付（-580/-423/-420）——对练靶子强度达标。
-BUILD_VERSION = "3.96-exp-s10-warden"
+# 3.97 = 【探索线·工作分支】beat-warden：主线（planner）迭代到稳赢
+#        WardenStrategy。本分支默认策略=planner——打包出来是主线行为；
+#        要守望者包请回 exp/v3.96-s10-warden 打包。
+BUILD_VERSION = "3.97-exp-beat-warden-planner"
