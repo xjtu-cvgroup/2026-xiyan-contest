@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>荔枝争运战 · 完整策略文档 (BUILD 3.91-exp-roadfarmer-corpus)</title>
+<title>荔枝争运战 · 完整策略文档 (BUILD 3.93-exp-freeze-slack)</title>
 <style>
   .viz-root {
     --surface-1: #fcfcfb;
@@ -96,7 +96,7 @@
 <div class="viz-root">
 
 <h1>《一骑红尘：荔枝争运战》完整策略文档</h1>
-<p class="sub">客户端 <code>PlannerStrategy</code> · <span class="badge">BUILD 3.91-exp-roadfarmer-corpus</span>
+<p class="sub">客户端 <code>PlannerStrategy</code> · <span class="badge">BUILD 3.93-exp-freeze-slack</span>
    · 163 项自测覆盖 · 生成于 2026-07-03</p>
 
 <div class="toc">
@@ -621,9 +621,18 @@ slack 把反卡机会跳过——新增追分合流卡：明显任务分落后 +
 干等观测逐帧跑不挂画像链。详见 docs/roadfarmer-corpus-2026-07-04.md</b></td>
 <td>selftest 前段尾随钉子组重写（+3 颗，289 项全绿）；smoke 补 roadfarmer 0/5/8/11 哨兵（0/11 已知负局观察清单、
 5/8 收益哨兵）全绿；camper×8/toller×4/rusher/mirror 逐位不变；镜像配对 12 种子净 -84（单种子集中，期望内）</td></tr>
+<tr><td><b>3.92 opening-fork（探索线·调查）</b></td><td><b>seed0/11 开局岔路调查：根因=r108 水路岔道（反事实 +700×2）；
+两证伪=钝规则（对阵原版自己 2 胜 10 负 -3096，死形为官道农到 150 被宫前驿回手卡冻死末边）+ 时间盒开局门
+（roadfarmer 仅 +71、mirror7 -134）。信息墙第四次撞击记录在案：r0~150 内所有形态数据上不可分</b></td>
+<td>零代码变更，证伪档案 docs/opening-fork-2026-07-04.md</td></tr>
+<tr><td><b>3.93 freeze-slack（探索线）</b></td><td><b>尾随冻结预算：活对手领先且共享前路 = 暴露位（它先过我们要过的
+节点、可边走边回手卡），NORMAL 任务决策边际 +30 帧；纯农画像豁免（中后盘判定，不撞开局信息墙——问"我在不在
+暴露位"而非"对手是什么类型"）。顺手双翻 seed0/11：预算收窄 slack 使慢水路包不可行，纯农实锤后自动解除</b></td>
+<td>roadfarmer 12/12 全胜（6305→7981）；toller 逐位保全（扫描 30/45/60 定档 30）；camper/farmer/rusher 逐位；
+selftest +5 钉全绿；roadfarmer 0/11 从 KNOWN_LOSS 摘除转硬哨兵</td></tr>
 </table>
 
-<p class="foot">仓库 client/docs/strategy.html · 与代码同步于 exp/v3.91-roadfarmer-corpus（探索线，含主线 3.34-3.36 合流） ·
+<p class="foot">仓库 client/docs/strategy.html · 与代码同步于 exp/v3.93-freeze-slack（探索线，含主线 3.34-3.36 合流） ·
 自测 <code>python3 selftest.py</code>（220 项）· 回归 <code>python3 regress.py</code>（六形态）</p>
 </div>
 

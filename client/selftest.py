@@ -3739,6 +3739,33 @@ def test_front_tempo_tail_follow():
                 not pl._front_tempo_contested(dummy, "S03"), "")
     pl._guard_seen = False
 
+    # 尾随冻结预算（V3.93）：领先的活对手共享前路=暴露位；纯农豁免
+    pl2 = TaskPlanner()
+    pl2._opp_on_my_forward_path = lambda state, cur: True
+    pl2._opp_gate_lead = lambda state, cur: 12
+    dummy2 = type("DummyState", (), {
+        "phase": P.PHASE_NORMAL, "graph": None,
+        "opp": {"currentNodeId": "S07", "delivered": False,
+                "retired": False, "taskScore": 45},
+    })()
+    ok &= check("冻结预算: 对手领先且共享前路 → 暴露",
+                pl2._rear_freeze_exposed(dummy2, "S03"), "")
+    pl2.opp_profile = "farmer"
+    ok &= check("冻结预算: 纯农画像+未见卡 → 豁免",
+                not pl2._rear_freeze_exposed(dummy2, "S03"), "")
+    pl2._guard_seen = True
+    ok &= check("冻结预算: 见过卡后 farmer 也不豁免",
+                pl2._rear_freeze_exposed(dummy2, "S03"), "")
+    pl2._guard_seen = False
+    pl2.opp_profile = "unknown"
+    pl2._opp_gate_lead = lambda state, cur: -8
+    ok &= check("冻结预算: 我方领先无暴露",
+                not pl2._rear_freeze_exposed(dummy2, "S03"), "")
+    dummy2.opp["delivered"] = True
+    pl2._opp_gate_lead = lambda state, cur: 12
+    ok &= check("冻结预算: 对手已交付无暴露",
+                not pl2._rear_freeze_exposed(dummy2, "S03"), "")
+
     st = PlannerStrategy()
     st.planner.FRONT_TEMPO_ENABLED = True
     st.planner._opp_dwell_idle = 45      # 富点干等实锤（V3.91 门控前置）

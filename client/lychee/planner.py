@@ -19,6 +19,13 @@ SAFETY_MARGIN = 60          # 交付截止安全余量（帧）
 # 读条的 15 分任务（T_021/T_023），终局实剩 38 帧，那 20 分恰好大于
 # 18 分的败差。25 = 验核 6 + 交付 2 + 一次窗口/休整级意外的量级
 RUSH_SAFETY_MARGIN = 25
+FREEZE_RISK_BUDGET = 30     # 尾随冻结预算（V3.93）：领先的活对手可在我方
+                            # 前路任意节点回手卡，一次冻结 = 首风化 30~45 帧
+                            # 起步；纯农画像豁免，见 _rear_freeze_exposed。
+                            # 强度扫描（30/45/60）：rf0/rf11 翻盘三档全稳
+                            # (+700)；toller5 三档 +35/+19/+15——取 30 保住
+                            # 2839 形态零劣化（camper5 的 45 档 +89 额外
+                            # 收益为此舍弃）；镜像成本三档同在（机制固有）
 RUSH_EARLIEST = 390         # 宫宴冲刺最早可能触发帧（任务书 6.5）
 GATE_VERIFY_FRAMES = 6      # 宫门验核处理帧数
 DELIVER_FRAMES = 2          # 到终点 + 交付
@@ -338,6 +345,7 @@ class TaskPlanner:
         self.CONTEST_PHASE_ENABLED = CONTEST_PHASE_ENABLED
         self.SAFETY_MARGIN = SAFETY_MARGIN
         self.RUSH_SAFETY_MARGIN = RUSH_SAFETY_MARGIN
+        self.FREEZE_RISK_BUDGET = FREEZE_RISK_BUDGET
         self.CLIFF_MELEE_EXEMPT = CLIFF_MELEE_EXEMPT
         self.FUNNEL_FARMER_PRIOR = FUNNEL_FARMER_PRIOR
         self._choke_ahead_cache = (-1, False)
@@ -416,6 +424,15 @@ class TaskPlanner:
         # 尾段零绕路任务（可行性硬约束本身不变，仍用时间口径逐个检查）
         margin = self.RUSH_SAFETY_MARGIN \
             if state.phase == P.PHASE_RUSH else self.SAFETY_MARGIN
+        # 尾随冻结预算（V3.93）：活着的对手领先我们穿共享走廊时，它先过
+        # 我们要过的每个节点=可以边走边回手卡（V3.92 调查的镜像死形：
+        # 官道农到 150、r450 到 S13，被宫前驿回手卡冻死最后一条边 120 帧
+        # ——SAFETY_MARGIN 60 挡不住一次冻结）。纯农画像（≥60 分+全场
+        # 未见卡）豁免；只加在 NORMAL 阶段的任务贪吃决策上，RUSH 25
+        # 边际是 V3.26 拿回 vs2986 的战果不动
+        if state.phase != P.PHASE_RUSH \
+                and self._rear_freeze_exposed(state, cur):
+            margin += self.FREEZE_RISK_BUDGET
         slack = state.duration_round - (state.round + eta_direct + margin)
 
         # 已验核后离开宫门需要重新验核（6 帧），V1 不再接任务，直奔交付
@@ -1114,6 +1131,23 @@ class TaskPlanner:
         if my_gate == math.inf or opp_gate == math.inf:
             return 0.0
         return my_gate - opp_gate
+
+    def _rear_freeze_exposed(self, state, cur):
+        """尾随冻结暴露：活着的对手领先我方且共享前路（V3.93）。
+
+        它先经过我们将要经过的节点，随时可以站桩回手卡；一旦踏边被掐，
+        冻结时长（首风化 30~45 帧+衰减）远超基础安全边际。豁免：已实锤
+        的零设卡纯农（strategy 画像 farmer 要求 ≥60 分且全场未见卡——
+        这个决策发生在中后盘，画像已定型，不撞开局信息墙）。
+        """
+        opp = state.opp or {}
+        if not opp or opp.get("delivered") or opp.get("retired"):
+            return False
+        if self.opp_profile == "farmer" and not self._guard_seen:
+            return False
+        if not self._opp_on_my_forward_path(state, cur):
+            return False
+        return self._opp_gate_lead(state, cur) > 0
 
     def _opp_on_my_forward_path(self, state, cur):
         """对手当前位置/下一站是否在我方当前前路上；水路绕行不触发尾随。"""
