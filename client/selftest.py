@@ -4516,6 +4516,7 @@ def test_warden_strategy():
         inquire = json.load(f)["msg_data"]
 
     def gs_at(cur, opp_cur="S09", opp_next=None, opp_edge=None,
+              opp_process=None,
               round_no=320, phase=P.PHASE_NORMAL, verified=False,
               task_score=0, tasks=()):
         gs = GameState(1001)
@@ -4534,10 +4535,11 @@ def test_warden_strategy():
                          squadAvailable=8, verified=verified,
                          delivered=False, retired=False)
             else:
-                st = "MOVING" if opp_edge else "IDLE"
+                st = P.ST_PROCESSING if opp_process else (
+                    "MOVING" if opp_edge else "IDLE")
                 p.update(state=st, currentNodeId=opp_cur, nextNodeId=opp_next,
                          routeEdgeId=opp_edge, edgeTotalMs=24000,
-                         edgeProgressMs=1000, currentProcess=None,
+                         edgeProgressMs=1000, currentProcess=opp_process,
                          delivered=False, retired=False, goodFruit=70,
                          badFruit=1, taskScore=0, squadAvailable=8)
         for n in d["nodes"]:
@@ -4583,6 +4585,16 @@ def test_warden_strategy():
              "failed": False, "ownerPlayerId": 0, "protectionPlayerId": 0}
     gs = gs_at("S10", opp_cur="S09", opp_next="S10", opp_edge="E05",
                round_no=258, tasks=(t_s10,))
+    st = WardenStrategy()
+    st.camp_node = "S10"
+    st._plans_ready = True
+    a = st.main_action(gs)
+    ok &= check("warden: S10敌已踏边时设卡优先于任务",
+                a and a["action"] == "SET_GUARD" and a["targetNodeId"] == "S10",
+                str(a))
+
+    gs = gs_at("S10", opp_cur="S09", opp_next="S10", opp_edge="E05",
+               round_no=258, tasks=(t_s10,))
     gs.nodes["S10"]["guard"] = {"ownerTeamId": gs.my_team, "defense": 6,
                                 "maxDefense": 7, "active": True}
     st = WardenStrategy()
@@ -4592,6 +4604,22 @@ def test_warden_strategy():
     ok &= check("warden: S10有自家卡仍吃脚下任务",
                 a and a["action"] == "CLAIM_TASK" and a["taskId"] == "T_S10",
                 str(a))
+
+    gs = gs_at("S10", opp_cur="S09", round_no=282, tasks=(t_s10,),
+               opp_process={"action": "BREAK_GUARD", "type": "BREAK_GUARD",
+                            "targetNodeId": "S10", "remainRound": 3})
+    gs.nodes["S10"]["guard"] = {"ownerTeamId": gs.my_team, "defense": 4,
+                                "maxDefense": 7, "active": True}
+    st = WardenStrategy()
+    st.camp_node = "S10"
+    st._plans_ready = True
+    acts = st.decide(gs)
+    main = next((x for x in acts if x["action"] in P.MAIN_ACTION_TYPES), None)
+    ok &= check("warden: S10墙被攻坚时转下一个阻塞点",
+                main and main["action"] == "MOVE"
+                and main["targetNodeId"] != "S10"
+                and st.camp_node == "S14",
+                str(acts))
 
     st = WardenStrategy()
     st.camp_node = "S14"

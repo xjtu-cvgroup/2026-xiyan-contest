@@ -154,9 +154,12 @@ class WardenStrategy(BaselineStrategy):
         return actions
 
     def _maybe_fallback_gate(self, state):
-        """对手强闯关隘（FORCED_PASSING 转运期 ~110 帧不可中断）或已越关
-        → 果断转场宫门 S14 重筑墙：两走廊唯一汇合点、押不错边，且我们
-        坐在自己验核点上，离场需求 ~22 帧，墙可焊到收盘。"""
+        """当前墙被买穿/正在被攻坚/已失去必经性 → 转场宫门 S14 重筑墙。
+
+        S10 是第一道墙，不是最后一块地。对手一旦把墙转成强通税或攻坚
+        读条，继续守原点的收益会快速归零；原先套路就是果断放弃，到
+        下一个唯一汇合点继续埋伏。
+        """
         camp = self.camp_node
         gate = state.gate_node
         if not camp or camp == gate:
@@ -168,6 +171,9 @@ class WardenStrategy(BaselineStrategy):
         forcing = (opp.get("state") == P.ST_FORCED_PASSING
                    or (proc.get("action") or proc.get("type")) == "FORCED_PASS") \
             and (proc.get("targetNodeId") in (camp, None))
+        breaking = (proc.get("targetNodeId") == camp
+                    and (proc.get("action") or proc.get("type"))
+                    == "BREAK_GUARD")
         pos = opp.get("nextNodeId") or opp.get("currentNodeId")
         breached = False
         if pos and pos != camp:
@@ -175,10 +181,11 @@ class WardenStrategy(BaselineStrategy):
             breached = bool(pth) and camp not in pth   # 它去宫门已不经过关隘
         if forcing:
             self._last_inbound = state.round   # 转运=正在逼近，别当埋伏流
-        if forcing or breached:
+        if forcing or breaking or breached:
             if self.log:
                 self.log.info("warden: fallback to gate wall (%s)",
-                              "forced-pass" if forcing else "breached")
+                              "forced-pass" if forcing else
+                              ("break-guard" if breaking else "breached"))
             self.camp_node = gate
 
     # ================= 窗口防守 =================
@@ -238,6 +245,13 @@ class WardenStrategy(BaselineStrategy):
         cur = me.get("currentNodeId")
         gate, terminal = state.gate_node, state.terminal_node
         remain = state.duration_round - state.round
+
+        # ---- 墙优先级：对手已经踏边时，本帧能设卡就先设卡 ----
+        # 任务是墙成立后的白捡收益；不能反过来让 3-4 帧读条吃掉落卡窗口。
+        if cur in (self.camp_node, gate):
+            guard = self._reactive_guard(state, cur)
+            if guard:
+                return guard
 
         # ---- 农任务终局（S02 镜像锁死等场景）----
         # 我方交付已不可能：分数只剩未交付任务分可挣。但对手还活着时
