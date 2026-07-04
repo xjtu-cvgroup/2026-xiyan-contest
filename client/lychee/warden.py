@@ -57,6 +57,7 @@ class WardenStrategy(BaselineStrategy):
     def __init__(self, logger=None):
         super().__init__(logger)
         self.camp_node = None
+        self._plans_ready = False
         self._clear_plan = []      # 待派小分队清障的节点（按途经顺序）
         self._scout_plan = []      # 待标记的固定处理站（按途经顺序）
         self._scout_sent = {}      # nodeId -> 派出帧
@@ -69,6 +70,13 @@ class WardenStrategy(BaselineStrategy):
     # ================= 初始化 =================
 
     def on_start(self, state):
+        # 平台 start 消息里位置/障碍数据可能不全（实战 0/8 小队实锤：
+        # 计划在这里建成空表且永不重建）——只做日志，计划延迟到首帧
+        # inquire（state 完整）再建，见 decide() 的 _build_plans
+        if self.log:
+            self.log.info("warden: on_start (plans deferred to first frame)")
+
+    def _build_plans(self, state):
         self.camp_node = self._pick_camp(state)
         me_pos = state.me.get("currentNodeId")
         path = []
@@ -113,8 +121,10 @@ class WardenStrategy(BaselineStrategy):
         me = state.me
         if not me or me.get("delivered") or me.get("retired"):
             return []
-        if self.camp_node is None:      # 兜底：平台跳过 on_start 的异常路径
-            self.on_start(state)
+        if not self._plans_ready and me.get("currentNodeId"):
+            # 首帧建计划（不吃 start 消息的不全数据）：清障/标记/关隘一次成型
+            self._plans_ready = True
+            self._build_plans(state)
 
         actions = []
         contests = state.my_open_contests()
@@ -330,9 +340,19 @@ class WardenStrategy(BaselineStrategy):
         eta, path = state.graph.shortest_path(pos, node_id, P.BASE_SPEED)
         return bool(path) and eta <= eta_cap
 
+    GUARD_MIN_LEAD = 7         # 对手到站剩余帧 ≥ 此值才立卡（读条 4+生效 1+余量）
+
     def _reactive_guard(self, state, cur):
-        """虚卡纪律：对手上边才落卡；卡亡且它仍在边上 → 立即补。"""
+        """虚卡纪律：对手上边才落卡；卡亡且它仍在边上 → 立即补。
+
+        来得及才立（实战 r256 教训：对手 2 帧后进站，读条 4 帧的卡
+        r260 才成型，白烧 3 好果拦了个寂寞）。"""
         if not self._opp_inbound(state, cur):
+            return None
+        opp = state.opp
+        total = opp.get("edgeTotalMs") or 0
+        done = opp.get("edgeProgressMs") or 0
+        if total and (total - done) / 1000.0 < self.GUARD_MIN_LEAD:
             return None
         if not self._guardable(state, cur):
             return None
@@ -384,12 +404,16 @@ class WardenStrategy(BaselineStrategy):
     def _should_leave(self, state, cur):
         rnd = state.round
         remain = state.duration_round - rnd
+        # ⓪ 对手已交付/退赛：墙没有对象了，立即动身（实战 r412 对手交付
+        #    后还站到 r475 的 63 帧站岗白丢 3 鲜度）
+        opp = state.opp
+        if not opp or opp.get("delivered") or opp.get("retired"):
+            return True
         # ① 死线余量
         if remain <= self._my_need(state, cur) + self.EXIT_PAD:
             return True
         # ② 数学判死：对手全速（含骑马余量）也到不了终点
-        opp = state.opp
-        if opp and not opp.get("delivered") and not opp.get("retired"):
+        if True:
             pos = opp.get("nextNodeId") or opp.get("currentNodeId")
             if pos:
                 to_gate, p1 = state.graph.shortest_path(
