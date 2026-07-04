@@ -164,7 +164,7 @@ class WardenStrategy(BaselineStrategy):
         # 码头窗（S02 开局争先手）：双方此时都无马 → 强行不存在 →
         # 鲜供不败（对鲜供平、对其余全胜）。1 好果/拍；若演化成镜像
         # 锁死，未交付世界里好果一文不值，烧果免费
-        if contest.get("contestType") == P.CONTEST_DOCK \
+        if contest.get("contestType") in (P.CONTEST_DOCK, P.CONTEST_TASK) \
                 and me.get("freshness", 0) >= 80 \
                 and me.get("goodFruit", 0) > 10:
             return P.CARD_XIAN_GONG
@@ -425,7 +425,7 @@ class WardenStrategy(BaselineStrategy):
             return False
         need = (to_gate + gate_term) * self.OPP_SPEED_MARGIN \
             + GATE_VERIFY_FRAMES + DELIVER_FRAMES
-        return need <= remain + self.OPP_DEAD_BUFFER
+        return need <= remain      # 零缓冲：它数学死即死，秒让抢农起跑
 
     def _farm_endgame(self, state, cur):
         """交付双死后的任务分收割：让行出站 → 追最近可达任务 →
@@ -452,7 +452,9 @@ class WardenStrategy(BaselineStrategy):
         task = self._farm_here(state, cur)
         if task:
             return task
-        # 追最近的赶得上的任务
+        # 现存赶得上的任务优先；没有就驻守刷新候选点等波次（刷新帧
+        # r360/420/480 可预测；实战 vs2769 教训：追尸体到点全过期 +
+        # 天气边 113 帧 + 干等 54 帧 = 0 任务）
         best, best_eta = None, float("inf")
         res = me.get("resources") or {}
         has_horse = any(res.get(h, 0) > 0
@@ -462,18 +464,27 @@ class WardenStrategy(BaselineStrategy):
             if tpl == "T04" or (tpl == "T06" and not has_horse):
                 continue
             eta, path = state.graph.shortest_path(
-                t["nodeId"], t["nodeId"]) if False else \
-                state.graph.shortest_path(cur, t["nodeId"], state.my_speed())
+                cur, t["nodeId"], state.my_speed())
             if not path or eta >= best_eta:
                 continue
             expire = t.get("expireRound") or 0
-            if expire and state.round + eta + 6 > expire:
+            if expire and state.round + eta + 8 > expire:
                 continue
             best, best_eta = t["nodeId"], eta
+        if best is None:
+            # 无可追实例 → 驻守最近的任务刷新候选点吃下一波
+            cands = set()
+            for nodes in (state.task_candidates or {}).values():
+                cands.update(nodes)
+            for nid in cands:
+                eta, path = state.graph.shortest_path(
+                    cur, nid, state.my_speed())
+                if path and eta < best_eta:
+                    best, best_eta = nid, eta
         self._farm_target = best
-        if best:
+        if best and best != cur:
             return self._advance(state, cur, best)
-        return P.a_wait()
+        return P.a_wait()   # 已在候选点上：守波次，脚下刷出即被 _farm_here 吃
 
     # ---- 收官判定 ----
 
@@ -564,9 +575,20 @@ class WardenStrategy(BaselineStrategy):
             return P.a_squad_scout(target)
 
         # 2.5) 处理站探路标记：真实 ETA（含边上剩余进度）进入寿命窗口
-        #      （≤38）才派——落地早于我们进站、45 帧寿命盖住到站
-        #      （1 人手换 2~3 帧处理）
-        if avail >= 1 and me.get("currentNodeId") != self.camp_node:
+        #      （≤38）才派——落地早于我们进站、45 帧寿命盖住到站。
+        #      锁死前置（实战 vs2769：S02 互锁期间派的 3 个标记全过期
+        #      白烧）：停在未处理完的处理站且对手同站=疑似锁死，不派
+        cur_n = me.get("currentNodeId")
+        locked = False
+        if cur_n and not me.get("routeEdgeId"):
+            nd = state.node(cur_n)
+            opp = state.opp
+            locked = (nd.get("processType")
+                      and (nd.get("processRound") or 0) > 0
+                      and not self._processed_here
+                      and bool(opp and opp.get("currentNodeId") == cur_n))
+        if avail >= 1 and not locked \
+                and me.get("currentNodeId") != self.camp_node:
             for nid in self._scout_plan:
                 if self._scout_sent.get(nid):
                     continue
