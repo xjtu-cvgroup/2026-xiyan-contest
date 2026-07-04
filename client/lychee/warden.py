@@ -66,6 +66,7 @@ class WardenStrategy(BaselineStrategy):
         self._reinforce_sent = -999
         self._weaken_sent = {}     # nodeId -> 派出帧（被冻自救）
         self._squad_spent = 0
+        self._dead_since = None    # 双死判定首次成立的帧（懦夫博弈滞后）
 
     # ================= 初始化 =================
 
@@ -244,7 +245,14 @@ class WardenStrategy(BaselineStrategy):
             if self._opp_alive_can_deliver(state, remain):
                 pass          # 对手未死：按原逻辑继续争/驻守拖死它
             else:
-                return self._farm_endgame(state, cur)
+                # 懦夫博弈滞后：双死后先眨眼者拿第二槽位（换乘慢 9 帧）。
+                # 多扛 12 帧不让行——对面转向阈值若比我们早，它先让、
+                # 我们白捡先手；12 帧后仍僵持再让（保证不锁到终场）
+                if self._dead_since is None:
+                    self._dead_since = state.round
+                if state.round - self._dead_since >= 12 \
+                        or not self._at_contested_station(state, cur):
+                    return self._farm_endgame(state, cur)
 
         # ---- 交付线 ----
         if cur == terminal:
@@ -454,6 +462,15 @@ class WardenStrategy(BaselineStrategy):
         return self._claim_en_route(state, cur)
 
     # ---- 农任务终局 ----
+
+    def _at_contested_station(self, state, cur):
+        """还站在与对手争夺中的未处理站上（懦夫博弈仍在进行）。"""
+        node = state.node(cur)
+        opp = state.opp
+        return bool(node.get("processType")
+                    and (node.get("processRound") or 0) > 0
+                    and not self._processed_here
+                    and opp and opp.get("currentNodeId") == cur)
 
     def _opp_alive_can_deliver(self, state, remain):
         """还需要用争夺/驻守拖住对手吗？对手已交付/退赛/数学死=不需要。"""
