@@ -2915,6 +2915,146 @@ def test_opp_profile():
     return ok
 
 
+def test_farm_meta():
+    """V3.26 农夫 meta 三件套（reports 三败局 vs2986/2619/2738 驱动）。
+
+    ① farmer 画像：对手在途任务分 ≥60 且全场未见其设卡 → 漏斗先验降
+       0.35（落卡即被 _guard_seen 粘性覆盖，2839 防御不拆）；
+    ② 悬崖共点对峙豁免：任务在脚下、对手也在场 → 悬崖前提（我停它不停）
+       不成立，回落竞速帧价——vs2619 的 S07 三连 90 分不再白让；
+    ③ RUSH 余量分档 60→25：尾段零绕路小任务不再被 deliver 模式整档熔断。
+    """
+    ok = True
+    with open(os.path.join(DOC_DIR, "start消息.json"), encoding="utf-8") as f:
+        start = json.load(f)["msg_data"]
+    with open(os.path.join(DOC_DIR, "inquire消息.json"), encoding="utf-8") as f:
+        inquire = json.load(f)["msg_data"]
+
+    def gs_farm(my_pos="S07", opp_pos="S07", round_no=167, opp_task=0,
+                my_task=45, phase="NORMAL", task_at=None, task_score=30,
+                proc=4, opp_guard_at=None, opp_proc=None):
+        gs = GameState(1001)
+        gs.on_start(start)
+        d = json.loads(json.dumps(inquire))
+        d["round"], d["phase"] = round_no, phase
+        d["contests"] = []
+        d["weather"] = {"active": [], "forecast": []}
+        d["tasks"] = []
+        if task_at:
+            d["tasks"] = [{"taskId": "T_FM", "taskTemplateId": "T01",
+                           "nodeId": task_at, "score": task_score,
+                           "processRound": proc, "active": True,
+                           "completed": False, "ownerId": 0,
+                           "expireRound": 600, "protectTeam": 0}]
+        for p in d["players"]:
+            if p["playerId"] == 1001:
+                p.update(state="IDLE", currentNodeId=my_pos, nextNodeId=None,
+                         routeEdgeId=None, currentProcess=None, buffs=[],
+                         resources={}, freshness=95.0, goodFruit=90,
+                         badFruit=0, taskScore=my_task, verified=False)
+            else:
+                p.update(state="IDLE", currentNodeId=opp_pos, nextNodeId=None,
+                         routeEdgeId=None, currentProcess=opp_proc, buffs=[],
+                         delivered=False, retired=False, taskScore=opp_task)
+        for n in d["nodes"]:
+            n["hasObstacle"] = False
+            n["guard"] = None
+            n["resourceStock"] = {}
+            n.pop("processType", None)
+            n["processRound"] = 0
+            if opp_guard_at and n["nodeId"] == opp_guard_at:
+                n["guard"] = {"ownerTeamId": "BLUE", "defense": 5,
+                              "maxDefense": 7, "active": True,
+                              "completeRound": round_no - 5,
+                              "initialDefense": 6}
+        gs.on_inquire(d)
+        return gs
+
+    # ---- ① farmer 画像 ----
+    st = PlannerStrategy()
+    st.decide(gs_farm(opp_pos="S09", opp_task=90))
+    ok &= check("农夫: 任务分 ≥60 且未见卡分类 farmer",
+                st._opp_profile == "farmer", st._opp_profile)
+    ctx = st.planner._funnel_ctx(gs_farm(opp_pos="S09", opp_task=90), "S07")
+    ok &= check("农夫: farmer 漏斗先验降档 0.35",
+                ctx and ctx[2] == st.planner.FUNNEL_FARMER_PRIOR, str(ctx))
+    # 对手落卡后 _guard_seen 粘性覆盖 farmer 档——2839 防御不拆
+    # （round_no 换新帧：_funnel_cache 按 (round, cur) 键，同帧会吃缓存）
+    gs_g = gs_farm(opp_pos="S09", opp_task=90, opp_guard_at="S10",
+                   round_no=168)
+    ctx = st.planner._funnel_ctx(gs_g, "S07")
+    ok &= check("农夫: 落卡后先验回 1.0（粘性覆盖）",
+                st.planner._guard_seen and ctx and ctx[2] == 1.0, str(ctx))
+    # 分数不够（样例 30）不分类——顺手一个任务不算农夫
+    st2 = PlannerStrategy()
+    st2.decide(gs_farm(opp_pos="S09", opp_task=30))
+    ok &= check("农夫: 任务分 <60 不分类",
+                st2._opp_profile == "unknown", st2._opp_profile)
+    # 关隘排除（V3.26.1，电池抓获）：站在武关上农到 90 的是延迟 camper
+    # 候选不是农夫——随机化 camper 曾 12/48 误判、seed15 退回未交付
+    st2b = PlannerStrategy()
+    st2b.decide(gs_farm(opp_pos="S10", opp_task=90))
+    ok &= check("农夫: 关隘上农任务不分类（延迟 camper 不误判）",
+                st2b._opp_profile == "unknown", st2b._opp_profile)
+
+    # ---- ② 悬崖共点对峙豁免 ----
+    # 复刻 vs2619 r169：双方同在 S07，对手分 0（行为门看不见未来的农夫）
+    # 且正在读任务条（"同桌"实锤，V3.26.2 口径），悬崖激活中，
+    # 脚下 30 分任务应被接下而不是让给对手
+    OPP_PROC = {"action": "CLAIM_TASK", "taskId": "T_OPP",
+                "targetNodeId": "S07", "remainRound": 3}
+    st3 = PlannerStrategy()
+    gs_melee = gs_farm(task_at="S07", opp_proc=OPP_PROC)
+    assert st3.planner.race_cliff(gs_melee), "前提: 悬崖带应激活"
+    plan = st3.planner.plan(gs_melee)
+    ok &= check("对峙: 悬崖带内共点任务被接下（vs2619 复刻）",
+                plan.kind == "task" and plan.position == "S07", repr(plan))
+    # 控制组 1：对手不在场（S05，非同桌）→ 悬崖照砍（seed10/15 不回退）
+    st4 = PlannerStrategy()
+    plan = st4.planner.plan(gs_farm(opp_pos="S05", task_at="S07"))
+    ok &= check("对峙: 对手不在场时悬崖照砍",
+                plan.kind != "task", repr(plan))
+    # 控制组 1b：对手同点但只是停靠/领资源（无任务读条）→ 不豁免
+    # ——camper 沿途 2 帧资源停靠曾触发豁免（seed15 -410，A/B 抓获）
+    st4b = PlannerStrategy()
+    plan = st4b.planner.plan(gs_farm(task_at="S07"))
+    ok &= check("对峙: 对手仅停靠不豁免（seed15 钉子）",
+                plan.kind != "task", repr(plan))
+    # 控制组 2：见过对手设卡 → 不豁免（会设卡的对手同桌是钓鱼）
+    st5 = PlannerStrategy()
+    st5.planner._guard_seen = True
+    plan = st5.planner.plan(gs_farm(task_at="S07"))
+    ok &= check("对峙: 见过卡的对手不豁免",
+                plan.kind != "task", repr(plan))
+
+    # ---- ③ RUSH 余量分档 ----
+    # 复刻 vs2986 r476@S12：T_021 型 15 分/5 帧任务，60 余量下 slack<0
+    # 整档熔断，25 余量下应接下。对手已过关（S13），无悬崖干扰
+    def rush_case(margin_normal):
+        stx = PlannerStrategy()
+        if margin_normal:
+            stx.planner.RUSH_SAFETY_MARGIN = stx.planner.SAFETY_MARGIN
+        gs = gs_farm(my_pos="S12", opp_pos="S13", round_no=476,
+                     opp_task=150, my_task=120, phase="RUSH",
+                     task_at="S12", task_score=15, proc=5)
+        return stx.planner.plan(gs)
+    plan = rush_case(margin_normal=False)
+    ok &= check("余量: RUSH 分档后尾段零绕路任务放行（vs2986 复刻）",
+                plan.kind == "task" and plan.position == "S12", repr(plan))
+    plan = rush_case(margin_normal=True)
+    ok &= check("余量: 旧 60 余量对照组确认熔断（回归基线）",
+                plan.kind == "deliver", repr(plan))
+    # 普通阶段余量不变：同局面 NORMAL 相同 round 仍按 60 算
+    st6 = PlannerStrategy()
+    gs_n = gs_farm(my_pos="S12", opp_pos="S13", round_no=476, opp_task=150,
+                   my_task=120, phase="NORMAL", task_at="S12",
+                   task_score=15, proc=5)
+    plan = st6.planner.plan(gs_n)
+    ok &= check("余量: 普通阶段仍按 60（不放松非 RUSH 路径）",
+                plan.kind == "deliver", repr(plan))
+    return ok
+
+
 def main():
     ok = test_codec()
     ok &= test_state_and_strategy()
@@ -2948,6 +3088,7 @@ def main():
     ok &= test_trap_ransom()
     ok &= test_card_profile()
     ok &= test_opp_profile()
+    ok &= test_farm_meta()
     print()
     print("ALL PASS" if ok else "SOME FAILED")
     sys.exit(0 if ok else 1)

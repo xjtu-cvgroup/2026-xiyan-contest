@@ -13,6 +13,12 @@ from . import protocol as P
 
 # ---- 可调参数 ----
 SAFETY_MARGIN = 60          # 交付截止安全余量（帧）
+# RUSH 后余量分档（V3.26）：60 的余量吸收的是"未建模延误"（敌卡/窗口/
+# 汇聚等待），进入 RUSH 后这些方差大头已经落定，继续按 60 算等于把
+# 尾段顺路任务整档熔断——reports 局 vs2986 在 S12/S13 跳过两个 5 帧
+# 读条的 15 分任务（T_021/T_023），终局实剩 38 帧，那 20 分恰好大于
+# 18 分的败差。25 = 验核 6 + 交付 2 + 一次窗口/休整级意外的量级
+RUSH_SAFETY_MARGIN = 25
 RUSH_EARLIEST = 390         # 宫宴冲刺最早可能触发帧（任务书 6.5）
 GATE_VERIFY_FRAMES = 6      # 宫门验核处理帧数
 DELIVER_FRAMES = 2          # 到终点 + 交付
@@ -140,6 +146,18 @@ RACE_CLIFF_OPP_FARM = 30    # 对手在途 taskScore ≥ 此值 → 它一路在
                             # 局 48/48→42/48、镜像均分 -53——弃经济抢一场
                             # 不存在的竞速。语料里的脚本抢关者到关前分数恒 0）
 RACE_CLIFF_FRAME_VALUE = 30.0
+# 悬崖带共点对峙豁免（V3.26，reports 局 vs2619 实锤）：双方同帧停靠在
+# 同一任务点时，悬崖的前提（"我停它不停 → 我落后进漏斗"）不成立——
+# 它也停下农，竞速对称；它不停，任务归我们是纯拒止（+我 −它双向摆幅）。
+# vs2619：r167 双方同到 S07，桌上三个 30 分任务，悬崖价 30/帧把它们
+# 全砍（4 帧读条 = 120 > 净值 90），对手留场连吃三个 90 分，而它整局
+# 零设卡——我们抢赢的漏斗没有过路费，终局 -8（里程碑差 -45）。
+# 豁免边界（V3.26.1 收紧，camper seed15 A/B 抓获）：只豁免脚下
+# （pos == 锚点）+ 普通节点（关隘/宫门同桌 = 蹲点预备式）+ 对手已
+# 停靠在同一节点（"将至 ETA≤10"版被开局汇聚窗口反噬：camper 分 0
+# 未落卡时与我们同桌，一停即 -410 未交付）；见过对手设卡或画像为
+# camper 时不豁免——"停一手被掐"死局全部来自会设卡的对手
+CLIFF_MELEE_EXEMPT = True
 
 # 漏斗定价（V3.16）：全图汇于关键关隘（武关 S10 类），谁后到谁挨卡。
 # 对手先到时，我们过漏斗的真实代价随"到达时机"剧烈变化（replay57/60 实测）：
@@ -157,6 +175,12 @@ FUNNEL_WEATHER_GAP = 30
 FUNNEL_WINDOW_OVERHEAD = 8      # 强通 PASS 窗口 + 可能的休整摊销
 FUNNEL_GUARD_PRIOR = 0.7        # 首卡出现前的先验（语料 6/11 局走廊领跑者卡漏斗，
                                 # L4 系 demo 5/5；见过对手设卡后升为 1.0）
+# farmer 先验下行（V3.26）：0.7 只升不降是单向棘轮——reports 三败局
+# 对手全程农任务零设卡，我们仍按 0.7 给共用走廊计漏斗税，把自己推向
+# 山线（刷新密度低 + S06→S08→S10 长边节奏税）。对手画像为 farmer
+# （在途任务分 ≥60 且全场未见其设卡）时先验降档；它一旦落卡，
+# _guard_seen 粘性升 1.0，本值即被覆盖，2839 防御不拆
+FUNNEL_FARMER_PRIOR = 0.35
 # 差值截断只作用于"税差"部分（税依赖对手是否真设卡，有模型不确定性）；
 # "死等差"部分不截断——它是纯几何：到得早又抢不完边就必须等卡出生
 # （规则 6.2.1 + 防冻结天条推导，与对手意愿无关）
@@ -240,6 +264,10 @@ class TaskPlanner:
         self.CONTEST_GRACE_DISCOUNT = CONTEST_GRACE_DISCOUNT
         self.POST_CHOKE_CONTEST_DISCOUNT = POST_CHOKE_CONTEST_DISCOUNT
         self.CONTEST_PHASE_ENABLED = CONTEST_PHASE_ENABLED
+        self.SAFETY_MARGIN = SAFETY_MARGIN
+        self.RUSH_SAFETY_MARGIN = RUSH_SAFETY_MARGIN
+        self.CLIFF_MELEE_EXEMPT = CLIFF_MELEE_EXEMPT
+        self.FUNNEL_FARMER_PRIOR = FUNNEL_FARMER_PRIOR
         self._choke_ahead_cache = (-1, False)
         self.FORWARD_BIAS_FLOOR = FORWARD_BIAS_FLOOR
         self.FORWARD_BIAS_CUT = FORWARD_BIAS_CUT
@@ -288,7 +316,11 @@ class TaskPlanner:
         to_gate, _ = g.shortest_path(cur, state.gate_node, speed, penalty, ecost)
         gate_to_term, _ = g.shortest_path(state.gate_node, state.terminal_node, speed)
         eta_direct = to_gate_t + GATE_VERIFY_FRAMES + gate_to_term + DELIVER_FRAMES
-        slack = state.duration_round - (state.round + eta_direct + SAFETY_MARGIN)
+        # 余量分档（V3.26）：RUSH 后未建模方差已落定，改用小余量放行
+        # 尾段零绕路任务（可行性硬约束本身不变，仍用时间口径逐个检查）
+        margin = self.RUSH_SAFETY_MARGIN \
+            if state.phase == P.PHASE_RUSH else self.SAFETY_MARGIN
+        slack = state.duration_round - (state.round + eta_direct + margin)
 
         # 已验核后离开宫门需要重新验核（6 帧），V1 不再接任务，直奔交付
         if me.get("verified"):
@@ -381,9 +413,14 @@ class TaskPlanner:
                 oe = self._opp_eta(state, choke)
                 if oe != math.inf:
                     t_o = state.round + oe
-                    prior = (1.0 if (self._guard_seen
-                                     or self.opp_profile == "camper")
-                             else self.FUNNEL_GUARD_PRIOR)
+                    if self._guard_seen or self.opp_profile == "camper":
+                        prior = 1.0
+                    elif self.opp_profile == "farmer":
+                        # 农任务型（V3.26）：分数在涨、全场没设过卡，
+                        # 漏斗威胁按证据降档（落卡即被 _guard_seen 覆盖）
+                        prior = self.FUNNEL_FARMER_PRIOR
+                    else:
+                        prior = self.FUNNEL_GUARD_PRIOR
                     toll_direct = self._funnel_toll(
                         state, choke, t_o, path, state.round)
                     ctx = (choke, t_o, prior, toll_direct)
@@ -727,12 +764,28 @@ class TaskPlanner:
         if self._time_detour(state, cur, pos) + proc + bframes > slack:
             bundle, bframes = 0.0, 0  # 余量装不下捆绑就只按裸任务估
 
-        cost = (total_frames + bframes) * self._frame_value(state, eta_direct)
+        fv = self._frame_value(state, eta_direct)
+        # 共点对峙豁免（V3.26，V3.26.1 收紧）：悬崖带内、任务就在脚下、
+        # 对手停靠在同一节点 —— 双方同桌，悬崖前提（我停它不停）不成立，
+        # 回落竞速帧价。vs2619 实锤：S07 三连任务被悬崖全砍，对手留场
+        # 吃满 90。收紧记录（camper seed15 A/B 抓获）：首版用
+        # "opp ETA ≤10 将至"即豁免，被开局汇聚窗口反噬——camper 分 0、
+        # 未落卡、画像 unknown 时与我们同桌，一停即输走廊（-410 未交付，
+        # 正是 seed10/15 死形）。现要求①普通节点（关隘同桌=对方蹲点
+        # 预备式，不豁免）②对手已停靠（不是"将至"，收敛中让路照旧）
+        if (self.CLIFF_MELEE_EXEMPT
+                and fv >= self.RACE_CLIFF_FRAME_VALUE and pos == cur
+                and not self._guard_seen and self.opp_profile != "camper"
+                and state.node(pos).get("nodeType")
+                not in ("KEY_PASS", "PASS", "GATE")
+                and self._opp_farming_at(state, pos)):
+            fv = (FRESH_VALUE_PER_FRAME + TIME_SCORE_PER_FRAME) \
+                * self.RACE_FRAME_MULT
+        cost = (total_frames + bframes) * fv
         # 漏斗定价（V3.16）：绕路改变到达关键关隘的时机，死等/满防税/躲税
         # 的差额计入净值（replay57 山路死等+满税 vs replay60 水路零死等半税）
         funnel = self._funnel_delta(state, cur, pos, proc + bframes,
-                                    penalty, ecost) \
-            * self._frame_value(state, eta_direct)
+                                    penalty, ecost) * fv
         net = value + bundle - cost - funnel
         return (net, pos) if net > 0 else None
 
@@ -889,6 +942,22 @@ class TaskPlanner:
             if self.race_cliff(state):
                 v = max(v, self.RACE_CLIFF_FRAME_VALUE)
         return v
+
+    @staticmethod
+    def _opp_farming_at(state, node_id):
+        """对手停靠在该节点且正在读任务条（共点对峙豁免的"同桌"判定）。
+
+        V3.26.2 再收紧（seed15 A/B 二次抓获）："仅停靠"仍误伤——camper
+        沿途停 2 帧领资源也算停靠，豁免在开局共点开火即输走廊。农任务
+        读条（currentProcess 带 taskId）才是"它坐下吃这桌菜"的实锤；
+        它正在吃的那一个由 _opp_processing_task 排除，我们接其余的。"""
+        opp = state.opp
+        if not opp or opp.get("delivered") or opp.get("retired"):
+            return False
+        if opp.get("routeEdgeId") or opp.get("currentNodeId") != node_id:
+            return False
+        proc = opp.get("currentProcess") or {}
+        return bool(proc.get("taskId"))
 
     @staticmethod
     def _anchor_node(state):

@@ -430,6 +430,16 @@ class PlannerStrategy(BaselineStrategy):
                                # 它刚落座时关死采集。误报风险有界：首卡之后
                                # prior 已被 _guard_seen 定死，画像不再增量起效；
                                # 400 之后的关隘等待多为尾段战术对峙，不采
+    # farmer 分类（V3.26）：在途任务分 ≥60（两个以上任务，不是顺手一个）
+    # 且全场未见其任何设卡 → 农任务型，漏斗先验降档（planner.FUNNEL_
+    # FARMER_PRIOR）。reports 三败局对手全是这个形态：农到 120~150、
+    # 零设卡，我们却按 0.7 先验交漏斗保险费。误判为 farmer 的下行风险
+    # 有界：它一落卡 _guard_seen 粘性升 1.0 覆盖本档；中边陷阱等待等
+    # 灾难级防御不读画像，保持全额（保险只降"定价"，不降"保命"）。
+    # 注意与 camper 的判定顺序：farmer 靠分数、camper 靠关隘闲置——
+    # "先农满 60 再蹲关"的混合体会被先判成 farmer，其后的蹲守由陷阱
+    # 等待兜底、落卡由 _guard_seen 兜底，不裸奔
+    PROFILE_FARM_SCORE = 60
 
     FWD_RUSH_TASK_MIN = 30      # 在途任务分证据线（蹲点型到关前恒 0）
     FWD_RETREAT_TOL = 12        # 宫门 ETA 回升超过此值 = 它回头过（农任务
@@ -469,8 +479,27 @@ class PlannerStrategy(BaselineStrategy):
 
     def _profile_tick(self, state):
         opp = state.opp
+        if not opp:
+            return
+        # farmer 分类的关隘排除（V3.26.1，电池抓获）：延迟 camper 变体
+        # "先在武关农满 60 再落卡"会被误判 farmer（随机化 camper 12/48
+        # 误判、seed15 从赢局退回未交付）。可分离信号：真农夫的农发生在
+        # S07 驿站类普通节点（reports 三局全程如此），在关隘上农到 60 的
+        # 对手下一步大概率就是回手卡——它站在关隘上时不分类，等它离开
+        # 关隘再看（真农夫有的是普通节点帧可采）
+        opp_pos = opp.get("currentNodeId")
+        at_choke = (opp_pos and not opp.get("routeEdgeId")
+                    and state.node(opp_pos).get("nodeType")
+                    in ("KEY_PASS", "PASS"))
+        if (opp.get("taskScore") or 0) >= self.PROFILE_FARM_SCORE \
+                and not self.planner._guard_seen and not at_choke:
+            self._opp_profile = "farmer"
+            if self.log:
+                self.log.info("opp profiled as FARMER at r%d (taskScore=%d)",
+                              state.round, opp.get("taskScore") or 0)
+            return
         node_id, _ = self._opp_stationary
-        if not opp or not node_id:
+        if not node_id:
             return
         # 关隘型节点：KEY_PASS（S10 武关）+ PASS（S03/S11）——蹲潼关与
         # 蹲武关是同一威胁形态（replay36 死局的 ~225 帧通行费来自双关卡）
