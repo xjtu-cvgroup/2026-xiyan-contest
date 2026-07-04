@@ -4518,7 +4518,8 @@ def test_warden_strategy():
     def gs_at(cur, opp_cur="S09", opp_next=None, opp_edge=None,
               opp_process=None,
               round_no=320, phase=P.PHASE_NORMAL, verified=False,
-              task_score=0, tasks=(), events=()):
+              task_score=0, tasks=(), events=(), freshness=85.0,
+              good_fruit=70, guard_ap=4):
         gs = GameState(1001)
         gs.on_start(start)
         d = json.loads(json.dumps(inquire))
@@ -4531,9 +4532,10 @@ def test_warden_strategy():
             if p["playerId"] == 1001:
                 p.update(state="IDLE", currentNodeId=cur, nextNodeId=None,
                          routeEdgeId=None, currentProcess=None, buffs=[],
-                         resources={}, freshness=85.0, goodFruit=70,
+                         resources={}, freshness=freshness, goodFruit=good_fruit,
                          badFruit=1, taskScore=task_score,
-                         squadAvailable=8, verified=verified,
+                         squadAvailable=8, guardActionPoint=guard_ap,
+                         verified=verified,
                          delivered=False, retired=False)
             else:
                 st = P.ST_PROCESSING if opp_process else (
@@ -4565,6 +4567,27 @@ def test_warden_strategy():
     a = st.main_action(gs_at("S02", opp_cur="S02", round_no=220))
     ok &= check("warden: S02未完成时继续争换乘",
                 a and a["action"] == "PROCESS", str(a))
+
+    st = WardenStrategy()
+    st.camp_node = "S10"
+    st._plans_ready = True
+    gs = gs_at("S02", opp_cur="S02", round_no=370, freshness=79.5,
+               good_fruit=29, guard_ap=4)
+    card = st._defense_card(gs, {"contestId": "C_S02",
+                                 "contestType": P.CONTEST_DOCK,
+                                 "targetNodeId": "S02"})
+    ok &= check("warden: S02鲜度不足不再非法献贡",
+                card == P.CARD_BING_ZHENG, card)
+
+    st = WardenStrategy()
+    st.camp_node = "S10"
+    st._plans_ready = True
+    st._processed_here = False
+    a = st.main_action(gs_at("S02", opp_cur="S02", round_no=366,
+                             freshness=79.8, good_fruit=29))
+    ok &= check("warden: S02献贡不可用时转农处理而非继续硬锁",
+                st._score_farm_mode and a and a["action"] == "PROCESS",
+                str(a))
 
     st = WardenStrategy()
     st.camp_node = "S10"

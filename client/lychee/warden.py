@@ -223,10 +223,15 @@ class WardenStrategy(BaselineStrategy):
         res = me.get("resources") or {}
         # 码头窗（S02 开局争先手）：双方此时都无马 → 强行不存在 →
         # 鲜供不败（对鲜供平、对其余全胜）。1 好果/拍；若演化成镜像
-        # 锁死，未交付世界里好果一文不值，烧果免费
+        # 锁死，未交付世界里好果一文不值，烧果免费。鲜供需要鲜度≥80；
+        # 跌破后继续提交会被 RESOURCE_NOT_ENOUGH 拒绝，改用兵争/弃权。
         if contest.get("contestType") in (P.CONTEST_DOCK, P.CONTEST_TASK) \
-                and me.get("goodFruit", 0) > 1:
+                and self._xian_gong_available(state):
             return P.CARD_XIAN_GONG
+        if contest.get("contestType") in (P.CONTEST_DOCK, P.CONTEST_TASK):
+            if (me.get("guardActionPoint") or 0) > 0:
+                return P.CARD_BING_ZHENG
+            return P.CARD_ABSTAIN
         pool = []
         if (me.get("guardActionPoint") or 0) > 0:
             pool.append(P.CARD_BING_ZHENG)   # 克强行（攻方骑马强通的主牌）
@@ -280,6 +285,10 @@ class WardenStrategy(BaselineStrategy):
         # 必须继续争（让行=放它出去交付）；对手也死了才让行转农
         if cur == "S02" and self._s02_won_window and self._processed_here:
             return self._advance(state, cur, camp)
+        if cur == "S02" and not self._processed_here \
+                and self._s02_lock_spent(state):
+            self._score_farm_mode = True
+            return self._farm_endgame(state, cur)
         if self._score_farm_mode and not me.get("verified"):
             return self._farm_endgame(state, cur)
         if self._s02_lock_hold(state, cur):
@@ -433,10 +442,24 @@ class WardenStrategy(BaselineStrategy):
             return False
         if state.me.get("verified") or self._processed_here:
             return False
+        if self._s02_lock_spent(state):
+            return False
         opp = state.opp
         return bool(opp and not opp.get("delivered") and not opp.get("retired")
                     and not opp.get("routeEdgeId")
                     and opp.get("currentNodeId") == cur)
+
+    @staticmethod
+    def _xian_gong_available(state):
+        me = state.me
+        return bool(me.get("freshness", 0) >= 80
+                    and me.get("goodFruit", 0) > 1)
+
+    def _s02_lock_spent(self, state):
+        """S02 假锁识别：献贡不可用或 RUSH 已到，就别再开无效窗口。"""
+        if state.phase == P.PHASE_RUSH:
+            return True
+        return not self._xian_gong_available(state)
 
     # ---- 封锁 ----
 
