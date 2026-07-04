@@ -205,6 +205,7 @@ class PlannerStrategy(BaselineStrategy):
     GUARD_SLACK_MIN = 65        # 自己交付余量充足才花这 4 帧
     GUARD_ROUTE_TOLERANCE = 15  # 判断该节点是否在对手高效路线上的容差（帧）
     GUARD_RETRY_GAP = 40        # 同一节点设卡重试间隔
+    GUARD_REGUARD_WINDOW = 18   # 我方卡刚被打穿且仍占点时，允许补卡反打
     # 关隘热设卡（V3.18）：刚赢下漏斗竞速、对手正被汇过来（ETA ≤60）时，
     # 4 帧读条 + 1~3 好果换对手 45+ 帧死等/满防税，是竞速胜利的兑现动作
     # ——65 的常规闸门在这个场景下把"过关隘必设卡"整档拦掉（对手 2614
@@ -222,6 +223,12 @@ class PlannerStrategy(BaselineStrategy):
     GUARD_CATCHUP_SLACK = 5
     GUARD_CATCHUP_TASK_GAP = 60
     GUARD_CATCHUP_MY_TASK_MAX = 30
+    # 高分合流拒止卡（vs2931）：r224 我们先到 S09，对手 26 帧后必经且
+    # 任务分 90:60 领先。旧 catchup 门只认 0:60，导致白白放它进站拿 T013。
+    GUARD_SCORE_LEAD_OPP_ETA = 45
+    GUARD_SCORE_LEAD_SLACK = 25
+    GUARD_SCORE_LEAD_TASK_MIN = 90
+    GUARD_SCORE_LEAD_TASK_GAP = 30
     GUARD_BOUNTY_EXPOSE_ETA = 30  # 30 帧后破卡会生成/结算悬赏，领先局避开送分卡
 
     # ---- 防中边陷阱（V3.5，V3.12 删证据门）----
@@ -304,6 +311,8 @@ class PlannerStrategy(BaselineStrategy):
         self._last_forced_node = None
         self._squad_spent = 0            # 本地人手账本（服务端字段缺失时兜底）
         self._guard_sent = {}            # nodeId -> 设卡提交帧（防重试风暴）
+        self._own_guard_seen = {}        # nodeId -> (active, defense)，用于识别被打穿
+        self._own_guard_broken = {}      # nodeId -> 最近一次我方卡失效帧
         self._trap_wait = (None, 0)      # (等待的目标节点, 连续等待帧数)
         self._trap_avoid = (None, -1)    # (租买改道要绕开的节点, 承诺到期帧)
         self._opp_card_hist = {}         # 对手本局出牌频次（WINDOW_CARD_REVEAL）
@@ -393,6 +402,11 @@ class PlannerStrategy(BaselineStrategy):
         else:
             self._opp_stationary = (None, state.round)
 
+        # 富点干等观测（V3.91）逐帧跑——不能挂在 _profile_tick 里，
+        # 画像定型后那条链就停了，而干等证据恰恰在定型之后才累积
+        if opp:
+            self._dwell_tick(state, opp)
+
         # 对手画像（V3.20）：早期识别蹲点型，漏斗先验不等首卡提前升 1.0
         if self.PROFILE_ENABLED and self._opp_profile == "unknown" \
                 and state.round <= self.PROFILE_WINDOW:
@@ -408,6 +422,7 @@ class PlannerStrategy(BaselineStrategy):
                 self._guard_first_seen.setdefault(node_id, state.round)
                 if state.node(node_id).get("nodeType") not in self.GUARD_NODE_TYPES:
                     self._opp_ordinary_guard_seen = True
+        self._track_own_guard_breaks(state)
 
         # 租买改道承诺提前解除：对手离开被避节点（或已交付/退赛）后该走廊
         # 已干净，不再为一个不存在的威胁多绕路
@@ -549,6 +564,30 @@ class PlannerStrategy(BaselineStrategy):
                 self.log.info("opp identified as forward-rusher at r%d",
                               state.round)
         self.planner.forward_rush_opp = self._fwd_rush
+
+    def _dwell_tick(self, state, opp):
+        """富点干等观测（V3.91）：普通节点上的累计无读条闲置帧。
+
+        2986 型官道农会在任务富点纯等刷新波；2839/toller"农不停步"、
+        camper 只蹲关隘（节点类型天然排除）。停留 ≥5 帧后的闲置才计，
+        滤掉路过/领取的帧噪声；被我方卡拦住的等风化不算（那是受害者
+        不是农夫）。累计过线解锁 planner 的 FRONT_TEMPO 尾随。
+        """
+        if opp.get("delivered") or opp.get("retired") \
+                or opp.get("currentProcess"):
+            return
+        node_id, since = self._opp_stationary
+        if not node_id or state.round - since < 5:
+            return
+        if state.node(node_id).get("nodeType") \
+                in ("KEY_PASS", "PASS", "GATE", "PALACE_STATION"):
+            return
+        for nid in [node_id] + [n for n, _ in state.graph.neighbors(node_id)]:
+            g = state.node(nid).get("guard")
+            if g and g.get("ownerTeamId") == state.my_team \
+                    and g.get("active", g.get("defense", 0) > 0):
+                return
+        self.planner._opp_dwell_idle += 1
 
     def _profile_tick(self, state):
         opp = state.opp
@@ -846,7 +885,9 @@ class PlannerStrategy(BaselineStrategy):
             active = g.get("active", g.get("defense", 0) > 0)
             if active:
                 return None
-        if state.round - self._guard_sent.get(cur, -999) < self.GUARD_RETRY_GAP:
+        reguard = self._reguard_after_break(state, cur)
+        if not reguard \
+                and state.round - self._guard_sent.get(cur, -999) < self.GUARD_RETRY_GAP:
             return None
         if self._my_active_guards(state) >= 2:
             return None  # 每队上限 2 个，第 3 个会顶掉最早的
@@ -871,7 +912,10 @@ class PlannerStrategy(BaselineStrategy):
         node_type = node.get("nodeType")
         choke_guard = node_type in self.GUARD_NODE_TYPES
         catchup_guard = self._catchup_merge_guard_opportunity(state, cur, opp_eta)
-        rear_guard = catchup_guard or self._rear_guard_opportunity(state, cur, opp_eta)
+        score_lead_guard = self._score_lead_merge_guard_opportunity(
+            state, cur, opp_eta)
+        rear_guard = catchup_guard or score_lead_guard \
+            or self._rear_guard_opportunity(state, cur, opp_eta)
         if not (choke_guard or rear_guard):
             return None
         # slack 闸门分档（V3.18/V3.23）：常规 65；关键关隘热窗口 25；
@@ -886,6 +930,8 @@ class PlannerStrategy(BaselineStrategy):
                          else self.GUARD_REAR_SLACK)
         elif catchup_guard:
             slack_min = self.GUARD_CATCHUP_SLACK
+        elif score_lead_guard:
+            slack_min = self.GUARD_SCORE_LEAD_SLACK
         elif rear_guard and not choke_guard:
             slack_min = (self.GUARD_REAR_RUSH_SLACK
                          if state.phase == P.PHASE_RUSH
@@ -907,8 +953,46 @@ class PlannerStrategy(BaselineStrategy):
             return None
         self._guard_sent[cur] = state.round
         if self.log:
-            self.log.info("set guard @%s extra=%d (opp eta=%d)", cur, extra, opp_eta)
+            self.log.info("set%s guard @%s extra=%d (opp eta=%d)",
+                          " follow-up" if reguard else "", cur, extra, opp_eta)
         return P.a_set_guard(cur, extra)
+
+    def _track_own_guard_breaks(self, state):
+        """记录我方刚被打穿的卡点，给同点补卡一个短窗口。
+
+        防重试间隔挡的是同一帧/同一读条失败后的动作风暴；但 vs2931 里
+        S10 卡已完整生效并逼出对手 3 次削弱，卡被打掉后我们仍站在 S10。
+        这时补第二张卡是战术兑现，不是重试风暴。
+        """
+        current = {}
+        for node_id, node in state.nodes.items():
+            g = node.get("guard") or {}
+            if g.get("ownerTeamId") == state.my_team:
+                defense = g.get("defense", 0) or 0
+                active = bool(g.get("active", defense > 0)) and defense > 0
+                current[node_id] = (active, defense)
+        for node_id, (was_active, _) in list(self._own_guard_seen.items()):
+            now = current.get(node_id)
+            if was_active and (not now or not now[0]):
+                self._own_guard_broken[node_id] = state.round
+        self._own_guard_seen = current
+        for node_id, round_no in list(self._own_guard_broken.items()):
+            if state.round - round_no > self.GUARD_REGUARD_WINDOW:
+                del self._own_guard_broken[node_id]
+
+    def _reguard_after_break(self, state, cur):
+        """同点补卡：上一张我方卡刚被打穿、对手仍未通过时绕过重试间隔。"""
+        last = self._own_guard_broken.get(cur)
+        if last is None or state.round - last > self.GUARD_REGUARD_WINDOW:
+            return False
+        if state.node(cur).get("nodeType") not in self.GUARD_NODE_TYPES:
+            return False
+        opp = state.opp or {}
+        if not opp or opp.get("delivered") or opp.get("retired"):
+            return False
+        if opp.get("currentNodeId") == cur and not opp.get("routeEdgeId"):
+            return False
+        return True
 
     def _guard_bounty_exposure(self, state, node_id, opp_eta, extra):
         """领先局不把一击可破、会挂悬赏的卡送给对手。
@@ -967,6 +1051,21 @@ class PlannerStrategy(BaselineStrategy):
         if me_task > self.GUARD_CATCHUP_MY_TASK_MAX:
             return False
         if opp_task - me_task < self.GUARD_CATCHUP_TASK_GAP:
+            return False
+        return self.planner._key_pass_ahead(state, cur)
+
+    def _score_lead_merge_guard_opportunity(self, state, cur, opp_eta):
+        """中盘高分对手将至时，普通合流点也应兑现先到设卡权。"""
+        node_type = state.node(cur).get("nodeType")
+        if node_type in self.GUARD_NODE_TYPES or node_type in ("START", "FINISH"):
+            return False
+        if opp_eta > self.GUARD_SCORE_LEAD_OPP_ETA:
+            return False
+        me_task = state.me.get("taskScore", 0) or 0
+        opp_task = state.opp.get("taskScore", 0) or 0
+        if opp_task < self.GUARD_SCORE_LEAD_TASK_MIN:
+            return False
+        if opp_task - me_task < self.GUARD_SCORE_LEAD_TASK_GAP:
             return False
         return self.planner._key_pass_ahead(state, cur)
 
@@ -1321,11 +1420,13 @@ class PlannerStrategy(BaselineStrategy):
         return P.a_use_resource(P.INTEL, target)
 
     def _should_claim_intel_en_route(self, state, plan, cur):
-        """情报主动领取只保留给 S03 开局打包与 camper 慢局。
+        """情报主动领取只保留给 S03 开局打包、后段走廊与 camper 慢局。
 
         情报 2 帧领取 + 1 帧使用最多省 3 帧，在前段竞速/悬崖/直送阶段
         等价于拿节奏换零收益；但 S03 开局已停车打包、camper seed5 这类
-        极限收盘局，需要这一帧级减读条把 r600 交付救回来。"""
+        极限收盘局，需要这一帧级减读条把 r600 交付救回来。S10/S11/S13
+        这类后段走廊情报还兼具拒止价值：我们不拿，对手会拿去给自己
+        入关/宫前读条减帧。"""
         if state.phase != P.PHASE_NORMAL:
             return False
         if self.planner.race_mode(state) or self.planner.race_cliff(state):
@@ -1338,6 +1439,11 @@ class PlannerStrategy(BaselineStrategy):
                 or self.planner.farm_rusher_pressure(state, cur)):
             return False
         if cur == "S03" and state.round <= 130 and plan.slack >= 50:
+            return True
+        node_type = (state.node(cur) or {}).get("nodeType")
+        if node_type in ("KEY_PASS", "PASS", "PALACE_STATION") \
+                and self.planner._map_progress(state, cur) >= 0.55 \
+                and plan.slack >= 20:
             return True
         return self._opp_profile == "camper"
 
@@ -1419,6 +1525,8 @@ class PlannerStrategy(BaselineStrategy):
             our_edge = state.graph.edge_frames(edge, state.my_speed()) \
                 if edge else 0
             if edge and our_edge <= self.TRAP_GUARD_FRAMES:
+                return give_up()
+            if self._rush_gate_entry_release(state, nxt, our_edge):
                 return give_up()
             risk = True        # 它正站在我们的下一跳上
         elif opp_next == nxt and (not ordinary or (
@@ -1507,6 +1615,24 @@ class PlannerStrategy(BaselineStrategy):
         if state.enemy_guard(nxt) or self._opp_setting_guard(state, nxt):
             return False
         return True
+
+    def _rush_gate_entry_release(self, state, nxt, our_edge):
+        """RUSH 将开时不在宫门外长等纯占位者。
+
+        vs2696 里对手 r349 到 S14 等 RUSH，我们 r367 在 S11 外继续等到
+        r398；若直接上边，正好 r390 到门口，至少能同步验核/争门。这个
+        豁免只给宫门入口、未见卡对手、且我方能处理预期门卡的局面，避免
+        回退 replay56/2839 的咽喉中边保护。
+        """
+        if nxt != state.gate_node or state.phase == P.PHASE_RUSH:
+            return False
+        if state.me.get("verified") or self.planner._guard_seen:
+            return False
+        if self._opp_profile == "camper":
+            return False
+        if state.round + our_edge < RUSH_EARLIEST - 3:
+            return False
+        return self.planner._can_break_expected_guard(state, nxt)
 
     def _ordinary_converge_threat(self, state):
         """普通节点收敛掐边只在设卡型/强推进信号下成立。"""

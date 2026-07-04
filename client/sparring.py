@@ -335,6 +335,111 @@ class FarmerBot(ScriptedBot):
         return P.a_wait()
 
 
+class RoadFarmerBot(ScriptedBot):
+    """2986/2619/2738 官道农形态复刻（语料：farm-meta-2026-07-04.md）。
+
+    整局零设卡的官道任务流：主轴不偏离官道，在任务富点（S07/S09/S10）
+    停靠连吃任务并等刷新波（vs2986 局中 S07 一点五波刷新），补齐任务分
+    封顶后直奔交付（三局实测 120~150 分、r480~508 交付）。
+    与 TollerBot 的区别：完全不设卡（纯经济压制，我们三连败的真实 meta）；
+    与 FarmerBot 的区别：不巡回追任务，靠官道停留吃刷新。
+    """
+
+    ROUTE = ("S03", "S07", "S09", "S10")   # 官道主轴 waypoint（不走水路捷径）
+    FARM_DWELL_NODES = ("S07", "S10")      # 停留等刷新波的富点
+    DWELL_MAX = 45             # 脚下无任务时最多等刷新波的帧数
+    TASK_CAP = 150
+    LEAVE_ROUND = 400
+    DEADLINE_PAD = 100         # 验核 6 + 宫门→终点 + 处理站/攻坚余量
+    RIDE_HORSE = True          # 边上骑马保节奏（实测它们全程领跑我们）
+    RANDOMIZE = True
+
+    def _setup(self, state):
+        if getattr(self, "_cfg_done", False):
+            return
+        self._cfg_done = True
+        self._dwell_from = None
+        self._wp = 0
+        if not self.RANDOMIZE:
+            return
+        rng = random.Random(f"{state.match_id}:roadfarmerbot")
+        self.TASK_CAP = rng.choice((120, 150, 150, 180))
+        self.DWELL_MAX = rng.choice((20, 45, 45, 70))
+        self.LEAVE_ROUND = rng.randrange(370, 431)
+
+    def bot_action(self, state):
+        self._setup(state)
+        me = state.me
+        if me.get("routeEdgeId"):
+            # 节奏是这个形态的命：有马就骑（vs2986 领先我们 55+ 帧交付）
+            if self.RIDE_HORSE and not state.has_move_buff():
+                res = me.get("resources") or {}
+                for h in (P.FAST_HORSE, P.SHORT_HORSE):
+                    if res.get(h, 0) > 0:
+                        return P.a_use_resource(h)
+            return None
+        cur = me.get("currentNodeId")
+
+        if me.get("verified"):
+            step = self._walk_to(state, state.terminal_node)
+            if step:
+                return step
+            if cur == state.terminal_node:
+                return P.a_deliver()
+            return P.a_wait()
+
+        # 鲜度维护（2986 交付鲜度高段位，冰不省）
+        res = me.get("resources") or {}
+        if me.get("freshness", 100) < 88 and res.get(P.ICE_BOX, 0) > 0:
+            return P.a_use_resource(P.ICE_BOX)
+
+        # 动态死线：剩余帧不够走完交付链就立刻动身（同 FarmerBot 教训）
+        eta_gate, pg = state.graph.shortest_path(
+            cur, state.gate_node, state.my_speed())
+        deadline = pg and state.round + eta_gate + self.DEADLINE_PAD >= 600
+        score = me.get("taskScore", 0) or 0
+        leaving = deadline or state.round >= self.LEAVE_ROUND \
+            or score >= self.TASK_CAP
+
+        while self._wp < len(self.ROUTE) and cur == self.ROUTE[self._wp]:
+            self._wp += 1          # 到达 waypoint，锁定下一个
+
+        if not leaving:
+            # 脚下任务照吃（官道农不绕路；T04 需障碍点、T06 无马领取被拒）
+            has_horse = any(res.get(h, 0) > 0
+                            for h in (P.FAST_HORSE, P.SHORT_HORSE))
+            for t in state.claimable_tasks():
+                if t.get("nodeId") != cur:
+                    continue
+                tpl = t.get("taskTemplateId")
+                if tpl == "T04" or (tpl == "T06" and not has_horse):
+                    continue
+                self._dwell_from = None
+                return P.a_claim_task(t["taskId"])
+            claim = self._claim_here(state, (P.ICE_BOX, P.FAST_HORSE,
+                                             P.SHORT_HORSE))
+            if claim:
+                return claim
+            # 农点停留等刷新波；等满 DWELL_MAX 无新任务才继续前进
+            if cur in self.FARM_DWELL_NODES:
+                if self._dwell_from is None:
+                    self._dwell_from = state.round
+                if state.round - self._dwell_from < self.DWELL_MAX:
+                    return P.a_wait()
+            self._dwell_from = None
+            # 沿官道 waypoint 推进（next_hop 最短路会抄水路，绕开官道
+            # 任务带——真实对手不这么走）
+            if self._wp < len(self.ROUTE):
+                return self._walk_to(state, self.ROUTE[self._wp]) \
+                    or P.a_wait()
+
+        if cur == state.gate_node:
+            if state.phase == P.PHASE_RUSH:
+                return P.a_verify_gate()
+            return P.a_wait()
+        return self._walk_to(state, state.gate_node) or P.a_wait()
+
+
 class TollerBot(ScriptedBot):
     """第一名 2839 (lychee-py) 形态复刻（语料：vs2839-firstplace-2026-07-03.md）。
 
@@ -465,4 +570,4 @@ class TollerBot(ScriptedBot):
 
 
 BOTS = {"camper": CamperBot, "rusher": RusherBot, "farmer": FarmerBot,
-        "toller": TollerBot}
+        "toller": TollerBot, "roadfarmer": RoadFarmerBot}

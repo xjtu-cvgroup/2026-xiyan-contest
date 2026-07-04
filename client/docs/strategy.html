@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>荔枝争运战 · 完整策略文档 (BUILD 3.29-farmer-walkin)</title>
+<title>荔枝争运战 · 完整策略文档 (BUILD 3.40-lose4-counterplay)</title>
 <style>
   .viz-root {
     --surface-1: #fcfcfb;
@@ -96,8 +96,8 @@
 <div class="viz-root">
 
 <h1>《一骑红尘：荔枝争运战》完整策略文档</h1>
-<p class="sub">客户端 <code>PlannerStrategy</code> · <span class="badge">BUILD 3.29-farmer-walkin</span>
-   · 163 项自测覆盖 · 生成于 2026-07-03</p>
+<p class="sub">客户端 <code>PlannerStrategy</code> · <span class="badge">BUILD 3.40-lose4-counterplay</span>
+   · 自测 + smoke 哨兵覆盖 · 生成于 2026-07-04</p>
 
 <div class="toc">
 <strong>目录</strong>
@@ -594,10 +594,47 @@ smoke 全绿 + camper×8/toller×3/farmer×2/镜像 热种子无新未交付（s
 等待，V3.15 教义不动；对手变脸落卡 _guard_seen 即永久关豁免</b></td>
 <td>selftest 5 钉（正例 + 预算内 + 三个控制组）全绿；smoke 全绿；camper×6/farmer×3/toller×2 热种子无新
 未交付、逐位或噪声级</td></tr>
+<tr><td><b>3.30 tempo-ammo-farmer</b></td><td><b>replay93 节奏/弹药合并：首关前任务分 120 封顶保速、非官道任务
+先让；对手强通离开原节点时解除中边陷阱等待；冰鉴延后到已有坏果弹药后使用（坏果=攻坚弹药，零坏果时降低前段
+冰鉴绕路吸引力）</b></td><td>并行线（feat/v3.30），后经 3.31 合流</td></tr>
+<tr><td><b>3.31 posture-funnel-smoke</b></td><td><b>对手节奏状态收敛 + 悬崖漏斗会计修正：planner 侧 _opp_tempo_mode
+统一 farmer/farm-rusher/rusher/camper 互斥判定；悬崖带内漏斗税恒按基础帧价计（修复同一份漏斗代价被 30 分/帧
+重复放大的双计）；rear-guard 扩展宫前驿</b></td><td>smoke 补 toller3；漏斗×悬崖双计修正为审计项落地</td></tr>
+<tr><td><b>3.32 front-tempo-audit</b></td><td><b>FRONT_TEMPO 审计回收：陪练电池无 2986 官道型代表、子系统实测净负
+（camper17 +75→-71、rusher3 -89、mirror7 -100）→ 默认关闭保留旋钮；修正 _front_tempo_contested 领先阈值
+双重负号；farm-rusher 12 帧短等释放仅限已停靠口袋点</b></td><td>smoke 补 camper17；"待形态复证再开"的约定由 3.34 兑现</td></tr>
+<tr><td><b>3.33 catchup-merge-guard</b></td><td><b>2744vs2617 复盘：前段任务分 0:60 落后但先到 S09 时，旧门控 + 45
+slack 把反卡机会跳过——新增追分合流卡：明显任务分落后 + 对手即将必经 + 前方仍有关键关隘时低门槛设卡</b></td>
+<td>selftest 钉子 + smoke 全绿</td></tr>
+<tr><td><b>3.34 farmer-converge-walkin</b></td><td><b>replay95 复盘：高分 farmer 正在向 S10/S11 收敛时，原 farmer
+有界等待只覆盖 camped 读条，S09+S10 白等 36 帧同分输用时——新增零设卡高分 farmer 收敛短等封顶</b></td>
+<td>并行线（撞号 3.34，roadfarmer 探索轮改入 3.9x 号段）</td></tr>
+<tr><td><b>3.35 stability-guard-tempo</b></td><td><b>稳健回滚与平台输局修复：撤回 S02 弃权反同步；收紧边农边冲无卡
+证据抢长边；全量 FRONT_TEMPO 仍关，仅恢复"对手已有任务分/冲锋证据"下的山路线保速轻门
+（FRONT_TEMPO_MOUNTAIN_RECOVERY）</b></td><td>平台 lose 批次驱动</td></tr>
+<tr><td><b>3.36 edge-bounty-rescue</b></td><td><b>20579/20587/20576 复盘：边上被关键口卡冻结、第一刀后防守 4/5 且
+只剩 3 人时允许应急补第二刀；领先 farmer 局不再把可一击破的主动卡送成悬赏分</b></td><td>竞速热卡/边冻结卡/RUSH 二卡不受影响</td></tr>
+<tr><td><b>3.37 corridor-follow-tempo</b></td><td><b>走廊跟随轻门：对手已用 routeEdge/站位暴露官道或山路承诺时，
+阻止我方为低位任务反切另一条线；只拦需要离站的反切，水路不作跟随证据，脚下顺手任务不杀</b></td>
+<td>lose(2) 15 局 6 败：核心不是偏好哪条路，而是对手已提交走廊后我方仍反切</td></tr>
+<tr><td><b>3.38 new-map-resource-hygiene</b></td><td><b>新图早段节奏陷阱 + 资源账本：S02/S03 入口被 S06 T04/冰鉴吸走时，
+按重山线入口闸门阻止低值长绕；情报默认不主动顺路领取，只保留 S03 开局打包 / camper 慢局例外</b></td>
+<td>lose(3) 换图复盘；情报 2 帧领取 + 1 帧使用最多省 3 帧，节奏局常为负收益</td></tr>
+<tr><td><b>3.39 roadfarmer-freeze-sync</b></td><td><b>RoadFarmerBot 语料 + FRONT_TEMPO 门控复活 + 尾随冻结预算：补齐 2986/2619/2738
+官道农陪练（官道 waypoint + 富点干等刷新波 + 零设卡 + 骑马）；全量 FRONT_TEMPO 只在 farmer 模式 + 零设卡 +
+普通节点累计干等 ≥30 帧时开火，3.37/3.38 轻门继续接 raw 身位判定；活对手领先且共享前路时 NORMAL 任务决策
+slack +30 帧，纯农画像豁免</b></td>
+<td>smoke 补 roadfarmer 0/5/8/11 哨兵；探索线验证 roadfarmer 12/12 全胜，toller/camper/farmer/rusher 逐位保全；
+镜像单种子代价已记录，需后续平台语料复查</td></tr>
+<tr><td><b>3.40 lose4-counterplay</b></td><td><b>lose(4) 对抗补刀：vs2931 r225 S09 先到合流点时，
+若对手任务分 ≥90 且领先 ≥30、45 帧内必经、前方仍有关键关，则主动设高分合流拒止卡；我方卡刚被削穿且仍占点时，
+允许短窗口同点补卡，避免 S10 r286 卡被三削后因重试间隔放走对手；RUSH 将开且可破预期门卡时，不再在宫门外白等；
+后段走廊情报恢复为拒止资源，只在 S10/S11/S13 等关口顺路领取</b></td>
+<td>针对 2931 的 S09 不设卡、S10 被突破后不补卡，以及 2696 宫门外空等；selftest 加钉子，smoke 保持全绿</td></tr>
 </table>
 
-<p class="foot">仓库 client/docs/strategy.html · 与代码同步于 feat/v3.18-race-tempo@3.29-farmer-walkin ·
-自测 <code>python3 selftest.py</code>（220 项）· 回归 <code>python3 regress.py</code>（六形态）</p>
+<p class="foot">仓库 client/docs/strategy.html · 与代码同步于 feat/v3.40-lose4-counterplay ·
+自测 <code>python3 selftest.py</code> · 哨兵 <code>python3 smoke.py</code>（含 roadfarmer）</p>
 </div>
 
 <script>

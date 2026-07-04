@@ -6,6 +6,9 @@
 - camper 0/4/5/10/15/17/19/23：相位敏感八种子（悬崖带/宽限带/前推偏置
   三轮实验的全部翻盘与回归都发生在这里）
 - toller 0/1/3/5：冻结/回手卡代表局
+- roadfarmer 0/5/8/11：官道农 meta（reports 三败局复刻）——0/11 曾为
+  开局身位负局，V3.93 冻结预算翻绿（+700），回归即红灯；5/8 是
+  FRONT_TEMPO 门控收益哨兵（V3.91）
 - mirror 0/2/7、farmer 1/5、rusher 3：形态哨兵
 基线（V3.25）：见文件尾 EXPECT——偏离即黄灯，去跑全量电池定位。
 """
@@ -15,12 +18,13 @@ from multiprocessing import Pool
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from arena import run_match, PID_A, PID_B          # noqa: E402
-from sparring import (CamperBot, FarmerBot, RusherBot,   # noqa: E402
-                      TollerBot)
+from sparring import (CamperBot, FarmerBot, RoadFarmerBot,   # noqa: E402
+                      RusherBot, TollerBot)
 
 SENTINELS = (
     [("camper", s) for s in (0, 4, 5, 10, 15, 17, 19, 23)]
     + [("toller", s) for s in (0, 1, 3, 5)]
+    + [("roadfarmer", s) for s in (0, 5, 8, 11)]
     + [("mirror", s) for s in (0, 2, 7)]
     + [("farmer", s) for s in (1, 5)]
     + [("rusher", 3)]
@@ -28,8 +32,10 @@ SENTINELS = (
 # V3.25 基线预期（数字来自全量电池，改动使其恶化才算红灯）
 KNOWN_UNDLV = {("camper", 4), ("camper", 23)}   # 深链死局（观察清单）
 KNOWN_LOSS = {("camper", 19)}                    # 交付负局（42/48 基线内）
+# roadfarmer 0/11 已从 KNOWN_LOSS 摘除（V3.93 冻结预算翻绿 +700）
 BOTS = {"camper": CamperBot, "farmer": FarmerBot,
-        "toller": TollerBot, "rusher": RusherBot}
+        "toller": TollerBot, "rusher": RusherBot,
+        "roadfarmer": RoadFarmerBot}
 
 
 def game(spec):

@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from lychee import protocol as P
 from lychee.planner import (TaskPlanner, marginal_task_value,
-                            task_component_score, Plan)
+                            task_component_score, Plan, RUSH_EARLIEST)
 from lychee.state import GameState
 from lychee.strategy import BaselineStrategy, PlannerStrategy
 from lychee_basic_client.framing import read_frame, write_frame
@@ -2070,6 +2070,18 @@ def test_latent_mechanics():
                 a and a["action"] == "CLAIM_RESOURCE"
                 and a["resourceType"] == "INTEL", str(a))
 
+    gs = base_state(cur="S10", resources={})
+    gs.me["taskScore"] = 120
+    for p in gs.players.values():
+        if p["playerId"] != 1001:
+            p["currentNodeId"] = "S01"
+    gs.nodes["S10"]["resourceStock"] = {"INTEL": 1}
+    st_late_intel = PlannerStrategy()
+    late_plan = Plan("deliver", slack=80)
+    ok &= check("情报: 后段走廊拒止允许顺路领",
+                st_late_intel._should_claim_intel_en_route(gs, late_plan, "S10"),
+                str(st_late_intel._should_claim_intel_en_route(gs, late_plan, "S10")))
+
     gs = base_state(cur="S12", resources={})
     gs.me["taskScore"] = 90
     gs.nodes["S12"]["resourceStock"] = {"INTEL": 1}
@@ -2368,6 +2380,34 @@ def test_race_tempo():
     # 7b) slack 低于热闸门 25 仍不设（交付优先的底线不动）
     a = PlannerStrategy()._guard_opportunity(gs, "S10", Plan("deliver", slack=20))
     ok &= check("竞速: slack 低于热闸门仍不设", a is None, str(a))
+    # 7c0) vs2931：r286 S10 卡逼出对手 3 次削弱，r292 被打穿后我们仍
+    #      站在 S10；这时应补第二张卡，而不是被 40 帧重试间隔拦住。
+    st_reguard = PlannerStrategy()
+    st_reguard._guard_sent["S10"] = 286
+    gs = gs_race(my_pos="S10", opp_pos="S09", round_no=294,
+                 task_score=120, opp_task_score=120)
+    a = st_reguard._guard_opportunity(gs, "S10", Plan("deliver", slack=80))
+    ok &= check("竞速: 无打穿证据时同点重试仍被拦",
+                a is None, str(a))
+    st_reguard._own_guard_broken["S10"] = 292
+    a = st_reguard._guard_opportunity(gs, "S10", Plan("deliver", slack=80))
+    ok &= check("竞速: 我方卡刚被削穿且仍占点时补卡",
+                a is not None and a["action"] == "SET_GUARD"
+                and a["targetNodeId"] == "S10", str(a))
+    st_track = PlannerStrategy()
+    gs_on = gs_race(my_pos="S10", opp_pos="S09", round_no=291)
+    gs_on.nodes["S10"]["guard"] = {"ownerTeamId": gs_on.my_team,
+                                   "defense": 6, "maxDefense": 7,
+                                   "active": True}
+    st_track._absorb_feedback(gs_on)
+    gs_off = gs_race(my_pos="S10", opp_pos="S09", round_no=292)
+    gs_off.nodes["S10"]["guard"] = {"ownerTeamId": gs_off.my_team,
+                                    "defense": 0, "maxDefense": 7,
+                                    "active": False}
+    st_track._absorb_feedback(gs_off)
+    ok &= check("竞速: 识别我方卡被打穿",
+                st_track._own_guard_broken.get("S10") == 292,
+                str(st_track._own_guard_broken))
     # 7c) 非关键关隘不吃热折扣：S11（PASS）slack 40 照旧被常规闸门拦住
     gs = gs_race(my_pos="S11", opp_pos="S10", round_no=200)
     a = PlannerStrategy()._guard_opportunity(gs, "S11", Plan("deliver", slack=40))
@@ -2413,6 +2453,23 @@ def test_race_tempo():
     a = PlannerStrategy()._guard_opportunity(gs, "S09",
                                              Plan("deliver", slack=10))
     ok &= check("竞速: 普通驿站无追分分差不设卡", a is None, str(a))
+    # 8e) vs2931：我方 r224 先到 S09，对手 r251 才到但任务分 90:60
+    #     领先；这不是 0:60 的早段追分，却同样应把先到合流点兑现成拒止卡。
+    gs = gs_race(my_pos="S09", round_no=225, task_score=60,
+                 opp_task_score=90,
+                 opp_moving=("S07", "S09", "E04", 26))
+    a = PlannerStrategy()._guard_opportunity(gs, "S09",
+                                             Plan("deliver", slack=35))
+    ok &= check("竞速: 高分对手将至 S09 时先到合流点设卡",
+                a is not None and a["action"] == "SET_GUARD"
+                and a["targetNodeId"] == "S09", str(a))
+    gs = gs_race(my_pos="S09", round_no=225, task_score=60,
+                 opp_task_score=75,
+                 opp_moving=("S07", "S09", "E04", 26))
+    a = PlannerStrategy()._guard_opportunity(gs, "S09",
+                                             Plan("deliver", slack=35))
+    ok &= check("竞速: 高分合流卡分差不足不泛化",
+                a is None, str(a))
     # 9) RUSH 起点二卡：规则允许 SET_GUARD，只保留交付余量底线
     gs = gs_race(my_pos="S13", opp_pos="S11", round_no=452, phase="RUSH")
     a = PlannerStrategy()._guard_opportunity(gs, "S13",
@@ -3005,6 +3062,17 @@ def test_trap_ransom():
     a = PlannerStrategy().main_action(
         gs_camp("S13", "S14", edge_patch={"E09": 2}, task_score=130))
     ok &= check("租买: 短边豁免直接过（读条 4 帧追不上）",
+                a and a["action"] == "MOVE" and a["targetNodeId"] == "S14",
+                str(a))
+    # 3b) 宫门 RUSH 将开：对手提前在 S14 等 RUSH 时，若我们预计到门口
+    #     正好赶上开门且能处理预期门卡，不再在门外白等到对手先验核。
+    a = PlannerStrategy().main_action(
+        gs_camp("S13", "S14", round_no=RUSH_EARLIEST - 50, task_score=130))
+    ok &= check("租买: RUSH 还早时宫门占位仍等待",
+                a and a["action"] == "WAIT", str(a))
+    a = PlannerStrategy().main_action(
+        gs_camp("S13", "S14", round_no=RUSH_EARLIEST - 18, task_score=130))
+    ok &= check("租买: RUSH 将开且可破门卡时不在宫门外白等",
                 a and a["action"] == "MOVE" and a["targetNodeId"] == "S14",
                 str(a))
     # 4) 普通节点收敛掐边：收敛分支仍不防普通节点，避免 farmer 误伤；
@@ -3754,27 +3822,85 @@ def test_front_tempo_tail_follow():
         return gs
 
     pl = TaskPlanner()
-    ok &= check("前段尾随: 默认关闭，等待平台形态复证",
-                not pl.FRONT_TEMPO_ENABLED, "")
+    ok &= check("前段尾随: RoadFarmer 语料复证后默认启用（V3.91）",
+                pl.FRONT_TEMPO_ENABLED, "")
     ok &= check("前段保速: 山路线轻门默认开启",
                 pl.FRONT_TEMPO_MOUNTAIN_RECOVERY, "")
-    pl.FRONT_TEMPO_ENABLED = True
     pl._map_progress = lambda state, cur: 0.1
     pl._opp_on_my_forward_path = lambda state, cur: False
     pl._opp_gate_lead = lambda state, cur: -10
+    pl._opp_dwell_idle = 45          # 富点干等已实锤
     dummy = type("DummyState", (), {
         "phase": P.PHASE_NORMAL,
-        "opp": {"currentNodeId": "S04", "delivered": False, "retired": False},
+        "graph": None,     # farm_rusher_pressure 的早退门
+        "opp": {"currentNodeId": "S04", "delivered": False, "retired": False,
+                "taskScore": 45},
     })()
     ok &= check("前段尾随: 我方领先不足30帧仍算竞争（符号钉子）",
                 pl._front_tempo_contested(dummy, "S03"), "")
     pl._opp_gate_lead = lambda state, cur: -31
     ok &= check("前段尾随: 我方领先超过30帧退出竞争",
                 not pl._front_tempo_contested(dummy, "S03"), "")
+    # V3.91 形态门控四轮收紧：只对"零设卡 + 富点干等实锤"的纯农尾随。
+    # camper 的领先是诱饵（camper17 +75→-71）；rusher 不农任务
+    # （rusher3 -89）；farm-rusher/toller 落卡前与纯农同貌但尾随=喂它
+    # 掐踏边（toller0 +26→-36）；干等帧是 2986 与 2839 唯一行为分水岭
+    pl._opp_gate_lead = lambda state, cur: -10
+    pl.opp_profile = "camper"
+    ok &= check("前段尾随: camper 画像不尾随（形态门控）",
+                not pl._front_tempo_contested(dummy, "S03"), "")
+    pl.opp_profile = "unknown"
+    pl.forward_rush_opp = True
+    dummy.opp["taskScore"] = 0
+    ok &= check("前段尾随: 纯 rusher 不尾随（形态门控）",
+                not pl._front_tempo_contested(dummy, "S03"), "")
+    dummy.opp["taskScore"] = 45
+    ok &= check("前段尾随: farm-rusher 不尾随（toller0 证据）",
+                not pl._front_tempo_contested(dummy, "S03"), "")
+    pl.forward_rush_opp = False
+    ok &= check("前段尾随: 零设卡纯农+干等实锤 → 尾随",
+                pl._front_tempo_contested(dummy, "S03"), "")
+    pl._opp_dwell_idle = 0
+    ok &= check("前段尾随: 无干等实锤不尾随（2839 落卡前不可区分）",
+                not pl._front_tempo_contested(dummy, "S03"), "")
+    pl._opp_dwell_idle = 45
+    pl._guard_seen = True
+    ok &= check("前段尾随: 见过卡即永久关闭尾随",
+                not pl._front_tempo_contested(dummy, "S03"), "")
+    pl._guard_seen = False
+
+    # 尾随冻结预算（V3.93）：领先的活对手共享前路=暴露位；纯农豁免
+    pl2 = TaskPlanner()
+    pl2._opp_on_my_forward_path = lambda state, cur: True
+    pl2._opp_gate_lead = lambda state, cur: 12
+    dummy2 = type("DummyState", (), {
+        "phase": P.PHASE_NORMAL, "graph": None,
+        "opp": {"currentNodeId": "S07", "delivered": False,
+                "retired": False, "taskScore": 45},
+    })()
+    ok &= check("冻结预算: 对手领先且共享前路 → 暴露",
+                pl2._rear_freeze_exposed(dummy2, "S03"), "")
+    pl2.opp_profile = "farmer"
+    ok &= check("冻结预算: 纯农画像+未见卡 → 豁免",
+                not pl2._rear_freeze_exposed(dummy2, "S03"), "")
+    pl2._guard_seen = True
+    ok &= check("冻结预算: 见过卡后 farmer 也不豁免",
+                pl2._rear_freeze_exposed(dummy2, "S03"), "")
+    pl2._guard_seen = False
+    pl2.opp_profile = "unknown"
+    pl2._opp_gate_lead = lambda state, cur: -8
+    ok &= check("冻结预算: 我方领先无暴露",
+                not pl2._rear_freeze_exposed(dummy2, "S03"), "")
+    dummy2.opp["delivered"] = True
+    pl2._opp_gate_lead = lambda state, cur: 12
+    ok &= check("冻结预算: 对手已交付无暴露",
+                not pl2._rear_freeze_exposed(dummy2, "S03"), "")
 
     st = PlannerStrategy()
     st.planner.FRONT_TEMPO_ENABLED = True
+    st.planner._opp_dwell_idle = 45      # 富点干等实锤（V3.91 门控前置）
     gs = gs_front(tasks=True)
+    gs.players[2002]["taskScore"] = 45   # farmer 模式前置
     plan = st.planner.plan(gs)
     ok &= check("前段尾随: S03/S06 低进度任务不再截停",
                 plan.kind != "task", repr(plan))
@@ -3817,7 +3943,9 @@ def test_front_tempo_tail_follow():
 
     st2 = PlannerStrategy()
     st2.planner.FRONT_TEMPO_ENABLED = True
+    st2.planner._opp_dwell_idle = 45
     gs = gs_front(stock=True, tasks=False)
+    gs.players[2002]["taskScore"] = 45
     plan = st2.planner.plan(gs)
     a = st2.main_action(gs, plan)
     ok &= check("前段尾随: 顺路领取收缩到硬件资源",
@@ -3893,8 +4021,10 @@ def test_front_tempo_tail_follow():
              "failed": False, "ownerPlayerId": 0, "protectionPlayerId": 0,
              "routeBucket": P.ROAD}
     gs = gs_replay93("S07", 120, (t_s07,), "S07", "S09", "E04")
+    gs.players[2002]["taskScore"] = 45   # farmer 模式前置（V3.91 门控）
     st4 = PlannerStrategy()
     st4.planner.FRONT_TEMPO_ENABLED = True
+    st4.planner._opp_dwell_idle = 45     # 富点干等实锤前置
     plan = st4.planner.plan(gs)
     ok &= check("前段保速: S07 到120后先抢 S10 不贪到150",
                 plan.kind != "task", repr(plan))
