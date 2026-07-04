@@ -84,4 +84,8 @@
 #        前段对手已暴露官道/山路走廊后，我们仍为低位任务切到另一条线；
 #        新增首关前走廊跟随轻门，按对手 routeEdge/前段站位证据阻止离站
 #        反切；脚下顺手任务不杀，水路不作跟随证据，避免 camper/toller 复发。
-BUILD_VERSION = "3.37-corridor-follow-tempo"
+# 3.38 = lose(3) 换图复盘 + 资源账本修正：S03/S06 低值山线入口收窄，
+#        S02 DOCK 猜拳循环加破局；情报默认不主动顺路领取，只保留 S03
+#        开局打包 / camper 慢局例外，避免 S06/S08 等节奏局 2+1 帧换
+#        3 帧的伪收益吃掉速度。
+BUILD_VERSION = "3.38-new-map-resource-hygiene"

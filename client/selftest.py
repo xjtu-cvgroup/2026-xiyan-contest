@@ -2053,6 +2053,34 @@ def test_latent_mechanics():
                 a and a["action"] == "CLAIM_RESOURCE"
                 and a["resourceType"] == "PASS_TOKEN", str(a))
 
+    # ---- 情报 3: 不主动顺路领取情报；只有已持有时才利用空转/预热收益 ----
+    gs = base_state(cur="S06", resources={})
+    gs.me["taskScore"] = 90
+    gs.nodes["S06"]["resourceStock"] = {"INTEL": 1}
+    a = PlannerStrategy().main_action(gs, Plan("deliver", slack=200))
+    ok &= check("情报: 不主动顺路领取",
+                not (a and a.get("action") == "CLAIM_RESOURCE"
+                     and a.get("resourceType") == "INTEL"), str(a))
+
+    gs = base_state(cur="S03", round_no=90, resources={})
+    gs.me["taskScore"] = 90
+    gs.nodes["S03"]["resourceStock"] = {"INTEL": 1}
+    a = PlannerStrategy().main_action(gs, Plan("deliver", slack=200))
+    ok &= check("情报: S03 开局打包允许顺路领",
+                a and a["action"] == "CLAIM_RESOURCE"
+                and a["resourceType"] == "INTEL", str(a))
+
+    gs = base_state(cur="S12", resources={})
+    gs.me["taskScore"] = 90
+    gs.nodes["S12"]["resourceStock"] = {"INTEL": 1}
+    st_camper = PlannerStrategy()
+    st_camper._opp_profile = "camper"
+    st_camper.planner.opp_profile = "camper"
+    a = st_camper.main_action(gs, Plan("deliver", slack=200))
+    ok &= check("情报: camper 慢局允许顺路领",
+                a and a["action"] == "CLAIM_RESOURCE"
+                and a["resourceType"] == "INTEL", str(a))
+
     # ---- 远程清障 1: 路上非 T04 障碍派小分队清，不用主车队绕路/自己 CLEAR ----
     # 处理站帧数已计入寻路惩罚（V3.1），S01->S14 的惩罚后最短路实际走
     # S01-S06-S08-S10-S11-S12-S13-S14（绕开 S02/S04/S05/S09 的固定处理），
