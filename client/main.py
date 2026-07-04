@@ -7,9 +7,9 @@
                                [--player-name NAME] [--version V]
                                [--strategy planner|warden]
 
-策略选择（对练演练用）：
-  命名参数 --strategy warden，或环境变量 LYCHEE_STRATEGY=warden
-  （位置参数风格下只能用环境变量）。默认 planner（主线策略）。
+策略选择：本分支默认 warden（见 DEFAULT_STRATEGY）——切到本分支
+package.bat/package.py 打包上传即守望者，零参数。临时切回主线用
+--strategy planner 或 LYCHEE_STRATEGY=planner。
 """
 import argparse
 import os
@@ -25,6 +25,9 @@ from lychee.version import BUILD_VERSION
 
 VERSION = BUILD_VERSION
 STRATEGIES = ("planner", "warden")
+# 本分支（exp/v3.96-s10-warden）身份=守望者：切到本分支打包即守望者包，
+# 无需任何参数。feat 主线此值恒为 "planner"。
+DEFAULT_STRATEGY = "warden"
 
 
 def build_strategy(name, log):
@@ -59,7 +62,7 @@ def parse_cli(argv):
         parser.add_argument("--version", default=VERSION)
         parser.add_argument("--strategy", choices=STRATEGIES,
                             default=os.environ.get("LYCHEE_STRATEGY",
-                                                   "planner"))
+                                                   DEFAULT_STRATEGY))
         a = parser.parse_args(argv)
         cfg = Config(host=a.host, port=a.port, player_id=a.player_id,
                      player_name=a.player_name or f"team-{a.player_id}",
@@ -76,7 +79,7 @@ def parse_cli(argv):
     name = argv[3] if len(argv) > 3 else f"team-{player_id}"
     cfg = Config(host=argv[1], port=int(argv[2]), player_id=player_id,
                  player_name=name, version=VERSION)
-    return cfg, os.environ.get("LYCHEE_STRATEGY", "planner")
+    return cfg, os.environ.get("LYCHEE_STRATEGY", DEFAULT_STRATEGY)
 
 
 def connect_with_retry(host, port, log, retries=30, delay=1.0):
