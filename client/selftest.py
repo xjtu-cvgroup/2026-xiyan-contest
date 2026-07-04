@@ -1450,9 +1450,19 @@ def test_trap_proof():
     st = PlannerStrategy()
     last = None
     for i in range(35):
-        last = st.main_action(gs_tail(round_no=380 + i))
-    ok &= check("防陷阱: 蹲点者常驻下一跳永不硬闯",
+        last = st.main_action(gs_tail(round_no=300 + i))
+    ok &= check("防陷阱: 蹲点者常驻下一跳不硬闯（slack 未沉底）",
                 last and last["action"] == "WAIT", str(last))
+    # V3.95 截止线逃逸：同一场景推进到晚局（r380+，slack≤0、已实等
+    # 30+ 帧）→ 等待=确定性未交付，硬闯反而是较小风险（camper seed4
+    # 复刻：教义性等待 120 帧后 r600 差 10 帧未交付 → 逃逸后 +726）
+    st = PlannerStrategy()
+    last = None
+    for i in range(35):
+        last = st.main_action(gs_tail(round_no=380 + i))
+    ok &= check("截止逃逸: 晚局 slack 沉底+实等30帧 → 弃等推进",
+                last and last["action"] == "MOVE"
+                and last["targetNodeId"] == "S11", str(last))
 
     # 5b) 对手"正在赶来"同样不硬闯（V3.15 删对峙上限——replay56 直接死因：
     #     r305 上限到点硬闯 71 帧长边，对手 r310 到点 r314 起卡冻死）。
@@ -1462,7 +1472,7 @@ def test_trap_proof():
     last = None
     for i in range(40):
         last = st.main_action(
-            gs_tail(opp_cur="S12", opp_next="S11", opp_edge="E07", round_no=380 + i))
+            gs_tail(opp_cur="S12", opp_next="S11", opp_edge="E07", round_no=300 + i))
     ok &= check("防陷阱: 汇聚中超过旧上限仍不硬闯",
                 last and last["action"] == "WAIT", str(last))
 

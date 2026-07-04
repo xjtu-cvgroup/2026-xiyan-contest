@@ -1119,6 +1119,12 @@ class PlannerStrategy(BaselineStrategy):
     # 5 = 观测上界 + 1 帧余量；竞技场 camper 局实测 8→5 把 3/24 的未交付
     # 清零（3 帧提前量级联：早出武关 → 赶在对手到潼关起卡前上边，整段
     # 45 帧汇聚等待消失），镜像局该参数不绑定（±30% margin 恰 0）无回归
+    TRAP_ESCAPE_SLACK = 0       # 截止线逃逸阈值（V3.95）：slack 低于此值
+                                # 且下面两门全中时，陷阱等待让位于推进
+                                # （等待=必死，冻结风险反而是较小的那个）
+    TRAP_ESCAPE_ROUND = 360     # 晚局门：开局/中盘的瞬时负 slack 不算数
+    TRAP_ESCAPE_MIN_WAIT = 30   # 僵局门：同一下一跳已实等 ≥30 帧才证明
+                                # 是站桩对峙，不是路过的风险波动
     CAMPER_GRACE = 5
     # 驻扎判定（V3.19）：宽限的依据是"临别卡 = 刚到就起卡、次帧就走"。
     # 起卡前已在该节点驻扎 ≥ 此帧数的对手是坐地户不是过客（竞技场 camper
@@ -1417,6 +1423,21 @@ class PlannerStrategy(BaselineStrategy):
         opp = state.opp
         if not opp or opp.get("delivered") or opp.get("retired"):
             return give_up()
+        # 截止线逃逸（V3.95）：等待的前提是等得起。slack ≤ 0 且已在同一
+        # 僵局等待 ≥ MIN_WAIT、局面确入晚局时，继续等=确定性未交付
+        # （camper seed4/23 深链：S09/S10 教义性等待 120+ 帧，slack 从
+        # -20 一路沉底，r600 差 10~30 帧卡死在末段）；此时上边是严格
+        # 占优——无卡则白赚，被掐/有卡由攻坚/强通兜底（税 ≤40+风化
+        # 可等，均 << 必死）。三重门收紧记录：仅 slack≤0 一门时开局的
+        # 瞬时负 slack 也触发，把赢局 seed0/17/19 反送进冻结死局
+        # （+97/+18/+100 → 三连未交付）。注意不走 give_up()：保留计数，
+        # slack 回正（如吃到刷新任务）后等待纪律原样恢复
+        if plan is not None and getattr(plan, "slack", None) is not None \
+                and plan.slack <= self.TRAP_ESCAPE_SLACK \
+                and state.round >= self.TRAP_ESCAPE_ROUND \
+                and self._trap_wait[0] == nxt \
+                and self._trap_wait[1] >= self.TRAP_ESCAPE_MIN_WAIT:
+            return False
         # V3.12 删证据门：V3.9 曾要求"对手本局设过卡"才等待，但首卡必然
         # 没有前科（replay36: 2614 全场第一张卡 r314 掐在我们上边后，几何+
         # 地形全中仍被放行，冻 195 帧零交付）。replay27 型误伤由地形门兜底：

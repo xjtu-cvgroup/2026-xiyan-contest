@@ -30,7 +30,8 @@ SENTINELS = (
     + [("rusher", 3)]
 )
 # V3.25 基线预期（数字来自全量电池，改动使其恶化才算红灯）
-KNOWN_UNDLV = {("camper", 4), ("camper", 23)}   # 深链死局（观察清单）
+KNOWN_UNDLV = {("camper", 23)}   # 深链死局（观察清单）——camper4 已被
+                                 # V3.95 截止线逃逸翻绿（+726），回归即红灯
 KNOWN_LOSS = {("camper", 19)}                    # 交付负局（42/48 基线内）
 # roadfarmer 0/11 已从 KNOWN_LOSS 摘除（V3.93 冻结预算翻绿 +700）
 BOTS = {"camper": CamperBot, "farmer": FarmerBot,

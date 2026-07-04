@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>荔枝争运战 · 完整策略文档 (BUILD 3.93-exp-freeze-slack)</title>
+<title>荔枝争运战 · 完整策略文档 (BUILD 3.95-exp-deadline-escape)</title>
 <style>
   .viz-root {
     --surface-1: #fcfcfb;
@@ -96,7 +96,7 @@
 <div class="viz-root">
 
 <h1>《一骑红尘：荔枝争运战》完整策略文档</h1>
-<p class="sub">客户端 <code>PlannerStrategy</code> · <span class="badge">BUILD 3.93-exp-freeze-slack</span>
+<p class="sub">客户端 <code>PlannerStrategy</code> · <span class="badge">BUILD 3.95-exp-deadline-escape</span>
    · 163 项自测覆盖 · 生成于 2026-07-03</p>
 
 <div class="toc">
@@ -630,9 +630,15 @@ slack 把反卡机会跳过——新增追分合流卡：明显任务分落后 +
 暴露位"而非"对手是什么类型"）。顺手双翻 seed0/11：预算收窄 slack 使慢水路包不可行，纯农实锤后自动解除</b></td>
 <td>roadfarmer 12/12 全胜（6305→7981）；toller 逐位保全（扫描 30/45/60 定档 30）；camper/farmer/rusher 逐位；
 selftest +5 钉全绿；roadfarmer 0/11 从 KNOWN_LOSS 摘除转硬哨兵</td></tr>
+<tr><td><b>3.94 mainline-sync（探索线）</b></td><td><b>合入主线 3.37 走廊跟随轻门 + 3.38 重山线入口闸门/资源账本修正；
+走廊跟随在探索线接 raw 身位判定。与冻结预算正向复合</b></td><td>roadfarmer 总 margin 7981→8040 新高；全哨兵不变</td></tr>
+<tr><td><b>3.95 deadline-escape（探索线）</b></td><td><b>截止线逃逸：V3.15"无上限等待"教义补上"等得起才等"前提。
+slack≤0 + 晚局(r≥360) + 同僵局实等≥30 帧 → 弃等推进（等待=确定性未交付，冻结反而是较小风险）。camper seed4
+深链 -411→+726 交付；收紧史含开局瞬时负 slack 误触发（三赢局翻死）与 ROUND 相位骰子（330 反杀 seed5）</b></td>
+<td>camper4 转硬哨兵、KNOWN_UNDLV 仅剩 seed23；smoke 全绿；selftest 教义钉子按新契约重写（教义域 r300 + 逃逸正例 r380）</td></tr>
 </table>
 
-<p class="foot">仓库 client/docs/strategy.html · 与代码同步于 exp/v3.93-freeze-slack（探索线，含主线 3.34-3.36 合流） ·
+<p class="foot">仓库 client/docs/strategy.html · 与代码同步于 exp/v3.95-camper-deepchain（探索线，含主线 3.34-3.38 全量合流） ·
 自测 <code>python3 selftest.py</code>（220 项）· 回归 <code>python3 regress.py</code>（六形态）</p>
 </div>
 
