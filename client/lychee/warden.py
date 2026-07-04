@@ -245,7 +245,19 @@ class WardenStrategy(BaselineStrategy):
         if not me.get("verified") \
                 and remain < self._my_need(state, cur) - 5:
             if self._opp_alive_can_deliver(state, remain):
-                pass          # 对手未死：按原逻辑继续争/驻守拖死它
+                # 能守才守：我在关隘/宫门且它去宫门仍必经此处 → 驻守拖死
+                # 它仍有价值；否则（僵持散场/它已越关）我死=立刻转农
+                opp = state.opp
+                pos = opp and (opp.get("nextNodeId")
+                               or opp.get("currentNodeId"))
+                wallable = False
+                if pos and cur in (self.camp_node, state.gate_node) \
+                        and cur != pos:
+                    _, pth = state.graph.shortest_path(
+                        pos, state.gate_node, P.BASE_SPEED)
+                    wallable = bool(pth) and cur in pth
+                if not wallable:
+                    return self._farm_endgame(state, cur)
             else:
                 # 用户 spec：双死判定成立的那一帧立刻转最优任务，
                 # 不为 9 帧先手多等（早动 = 抢刷新波占位 + 抢短马快马）
@@ -609,10 +621,16 @@ class WardenStrategy(BaselineStrategy):
         # ① 死线余量；对手长期未逼近关隘且未交付=埋伏流（vs2982 在
         #    S14 掐我们踏边的形态），多留一张防4卡的风化税提前动身
         pad = self.EXIT_PAD
-        if state.round - getattr(self, "_last_inbound", 0) > 120 \
+        opp0 = state.opp
+        opos = opp0 and (opp0.get("nextNodeId") or opp0.get("currentNodeId"))
+        if opos != getattr(self, "_opp_last_pos", None):
+            self._opp_last_pos, self._opp_pos_since = opos, state.round
+        opp_static = state.round - getattr(self, "_opp_pos_since", 0) >= 100
+        if opp_static \
+                and state.round - getattr(self, "_last_inbound", 0) > 120 \
                 and cur == self.camp_node \
                 and cur != state.gate_node:   # 宫门→S15 边规则禁卡，无伏可防
-            pad += 90
+            pad += 90                          # 真埋伏流才提前留卡税
         if remain <= self._my_need(state, cur) + pad:
             return True
         # ② 数学判死：对手全速（含骑马余量）也到不了终点
