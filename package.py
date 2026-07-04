@@ -6,6 +6,7 @@ Windows 打包的两个坑，这里都处理：
   1. start.sh 若带 CRLF，Linux 平台 bash 直接起不来 —— 强制归一化为 LF；
   2. Windows 原生压缩不保存 Unix 可执行位 —— 直接在 zip 条目里写入 0755。
 """
+import argparse
 import glob
 import os
 import re
@@ -28,7 +29,6 @@ def build_version():
 
 # 包名带版本号（防旧包上平台：曾三次打包/上传旧代码，文件名即水印第一关）
 VERSION = build_version()
-OUT = os.path.join(HERE, "dist", f"gameclient-{VERSION}.zip")
 
 # (打包路径[zip内相对根目录], 是否脚本[LF+755])
 INCLUDE_FILES = [
@@ -42,12 +42,18 @@ EXEC_ATTR = 0o755 << 16      # zip external_attr 的 Unix 权限位
 NORM_ATTR = 0o644 << 16
 
 
-def add_file(zf, rel_path, is_script):
+def add_file(zf, rel_path, is_script, strategy="planner"):
     src = os.path.join(CLIENT, rel_path)
     with open(src, "rb") as f:
         data = f.read()
     if is_script:
         data = data.replace(b"\r\n", b"\n").replace(b"\r", b"\n")  # 强制 LF
+    if rel_path == "start.sh" and strategy != "planner":
+        # 平台用位置参数启动读不到 --strategy：把策略烧进启动脚本
+        data = data.replace(
+            b"exec python3 main.py",
+            b"export LYCHEE_STRATEGY=" + strategy.encode() + b"\n"
+            b"exec python3 main.py")
     info = zipfile.ZipInfo(rel_path.replace(os.sep, "/"))
     info.external_attr = EXEC_ATTR if is_script else NORM_ATTR
     info.compress_type = zipfile.ZIP_DEFLATED
@@ -56,6 +62,13 @@ def add_file(zf, rel_path, is_script):
 
 
 def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--strategy", choices=("planner", "warden"),
+                    default="planner",
+                    help="打包进 start.sh 的策略（默认主线 planner）")
+    args = ap.parse_args()
+    suffix = "" if args.strategy == "planner" else f"-{args.strategy}"
+    OUT = os.path.join(HERE, "dist", f"gameclient-{VERSION}{suffix}.zip")
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
     # 清掉 dist 里所有旧候选包（含无版本号的老 gameclient.zip）：
     # dist 里永远只留一个提交候选，杜绝挑错文件上传
@@ -65,7 +78,7 @@ def main():
 
     with zipfile.ZipFile(OUT, "w", zipfile.ZIP_DEFLATED) as zf:
         for rel, is_script in INCLUDE_FILES:
-            add_file(zf, rel, is_script)
+            add_file(zf, rel, is_script, strategy=args.strategy)
         for d in INCLUDE_DIRS:
             for root, dirs, files in os.walk(os.path.join(CLIENT, d)):
                 dirs[:] = [x for x in dirs if x != "__pycache__"]
@@ -89,7 +102,11 @@ def main():
                 ver = line.split("=", 1)[1].strip().strip('"')
         # 包名版本必须与包内 version.py 一致（防手工改名/半新半旧）
         assert ver == VERSION, f"包名版本 {VERSION} != 包内版本 {ver}"
+        if args.strategy != "planner":
+            assert f"LYCHEE_STRATEGY={args.strategy}".encode() in data, \
+                "策略注入失败：start.sh 缺 LYCHEE_STRATEGY"
         print(f"\n自检通过: start.sh 位于根目录 / LF / 权限 {oct(mode)}")
+        print(f"*** 策略: {args.strategy} ***")
         print(f"*** 构建版本: {ver} ***  (对局日志开头应出现同样版本号)")
         print(f"打包完成: {OUT}  ({len(names)} 个文件)")
     return 0
