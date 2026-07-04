@@ -436,7 +436,7 @@ def test_contention():
     a = PlannerStrategy().main_action(gs)
     ok &= check("错峰: 对手读条中我方排队", a["action"] == "WAIT", str(a))
 
-    # ---- best-response 出牌（V3.16）：镜像局面主打期望最优牌，留少量混合防死锁 ----
+    # ---- best-response 出牌（V3.16）：镜像局面主打期望最优牌；严格劣势不混 ----
     random.seed(42)
     gs = mirror_state(1001, 44)
     contest = {"contestId": "C_X", "contestType": "DOCK",
@@ -448,8 +448,10 @@ def test_contention():
     ok &= check("出牌: 镜像局主打期望最优的献贡",
                 picks.count(P.CARD_XIAN_GONG) > 120,
                 f"xian={picks.count(P.CARD_XIAN_GONG)}/200")
-    ok &= check("出牌: 保留混合防镜像死锁", len(distinct) >= 2, f"{sorted(distinct)}")
-    ok &= check("出牌: 弃权不占主导", picks.count(P.CARD_ABSTAIN) < 40,
+    ok &= check("出牌: 严格优势不混劣势牌",
+                distinct == {P.CARD_XIAN_GONG}, f"{sorted(distinct)}")
+    ok &= check("出牌: 不随机弃权",
+                P.CARD_ABSTAIN not in distinct,
                 f"abstain={picks.count(P.CARD_ABSTAIN)}/200")
     ok &= check("出牌: 全部为合法牌",
                 distinct <= {P.CARD_YAN_DIE, P.CARD_QIANG_XING, P.CARD_XIAN_GONG,
@@ -471,6 +473,15 @@ def test_contention():
     picks = {st.pick_card(gs, live) for _ in range(40)}
     ok &= check("出牌: 1:1 决胜拍照常出牌",
                 any(c != P.CARD_ABSTAIN for c in picks), f"{sorted(picks)}")
+
+    # replay99：对手连续献贡且我方没有强行，献贡是唯一非负响应；决胜拍
+    # 不得被软混合掷到兵争/弃权。
+    st = PlannerStrategy()
+    st._opp_card_hist = {P.CARD_XIAN_GONG: 5}
+    live = dict(contest, redPoint=0, bluePoint=0)
+    picks = {st.pick_card(gs, live) for _ in range(80)}
+    ok &= check("出牌: 对手献贡画像下不随机偏离献贡",
+                picks == {P.CARD_XIAN_GONG}, f"{sorted(picks)}")
 
     # ---- 移动中只有小分队动作时补显式 MOVE（防服务端暂停推进） ----
     # 场景: r360 在 E09 上移动、接近宫门 -> 触发探路，同包必须补 MOVE 保持推进

@@ -642,9 +642,13 @@ slack +30 帧，纯农画像豁免</b></td>
 低位水路任务/直送兜底/陷阱租买层不再把路线改回 S04/S05；farmer 小分队弹药充足时不喂防 6 卡，
 同点刚被拆且对手仍有削弱弹药时不复立，尾段单边卡收紧路径确定性</b></td>
 <td>针对“任务分打平但零冰水路 + 9 好果卡被拆”形态；selftest 全绿，保留 S04/S05 真冰鉴豁免</td></tr>
+<tr><td><b>3.50 card-dominated-mix-off</b></td><td><b>S02/窗口出牌稳健性：
+取消 CARD_MIX_RATE 软权重混合，严格优势牌不再随机偏离；只在 EPS 平手集随机，
+S02 镜像平局仍交给 DRAW 后破局逻辑</b></td>
+<td>回应 replay99 第二窗决胜拍偏离献贡；暂不动动态盘口/整窗弃权，避免重开 S02 弃权反同步风险；selftest 全绿</td></tr>
 </table>
 
-<p class="foot">仓库 client/docs/strategy.html · 与代码同步于 3.49-road-ice-guard-economy ·
+<p class="foot">仓库 client/docs/strategy.html · 与代码同步于 3.50-card-dominated-mix-off ·
 自测 <code>python3 client/selftest.py</code></p>
 </div>
 

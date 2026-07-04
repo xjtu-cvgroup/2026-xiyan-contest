@@ -2196,7 +2196,7 @@ class PlannerStrategy(BaselineStrategy):
                      P.CONTEST_TASK: 8.0, P.CONTEST_DOCK: 6.0,
                      P.CONTEST_OBSTACLE: 5.0, P.CONTEST_RESOURCE: 3.0}
     CARD_TIE_EPS = 0.4      # 期望值差在此以内视为平手，随机选（防镜像平局链）
-    CARD_MIX_RATE = 0.15    # 少量混合：纯 best-response 对镜像会锁死同牌平局
+    CARD_MIX_RATE = 0.0     # 严格劣势牌不混；镜像破局交给 DRAW 后专门逻辑
 
     @staticmethod
     def _opp_card_pool(state):
@@ -2231,9 +2231,9 @@ class PlannerStrategy(BaselineStrategy):
         对手本拍可负担的牌集可由公开字段精确算出（文书/护卫点/鲜度好果/
         马类增益）；对可负担集的出牌概率用本局已观察的出牌历史做拉普拉斯
         平滑加权（无观测时退化为均匀先验），再按对象赌注加权、减自身出牌
-        成本，取最优。期望值打平（±CARD_TIE_EPS）时随机、另留 CARD_MIX_RATE
-        概率按软权重混合——纯确定性 best-response 对镜像对手会锁死同牌
-        平局链（休整 3 帧 + 抑制 18 帧，曾双双 0 分）。
+        成本，取最优。期望值打平（±CARD_TIE_EPS）时随机；不再把严格劣势
+        牌混进来。镜像平局破局交给 _window_draw_break_card 这条已证实的
+        S02 专门逻辑，避免 replay99 决胜拍随机偏离献贡。
         """
         me = state.me
         res = me.get("resources") or {}
@@ -2290,17 +2290,6 @@ class PlannerStrategy(BaselineStrategy):
             scored.append((ev, card))
         scored.sort(key=lambda x: -x[0])
 
-        if rng.random() < self.CARD_MIX_RATE:
-            # 软权重混合（EV 平移到正区间），保留对镜像的不可预测性
-            floor_ = min(ev for ev, _ in scored)
-            weights = [(ev - floor_ + 0.5, card) for ev, card in scored]
-            total = sum(w for w, _ in weights)
-            pick = rng.random() * total
-            for w, card in weights:
-                pick -= w
-                if pick <= 0:
-                    return card
-            return weights[-1][1]
         best_ev = scored[0][0]
         ties = [card for ev, card in scored if best_ev - ev <= self.CARD_TIE_EPS]
         return rng.choice(ties)
