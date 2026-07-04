@@ -4649,6 +4649,15 @@ def test_warden_strategy():
     ok &= check("warden: S14已验核离场前先临别卡",
                 a and a["action"] == "SET_GUARD" and a["targetNodeId"] == "S14",
                 str(a))
+
+    st = WardenStrategy()
+    st.camp_node = "S14"
+    st._plans_ready = True
+    a = st.main_action(gs_at("S14", opp_cur="S13", round_no=520,
+                             phase=P.PHASE_RUSH, verified=True))
+    ok &= check("warden: S14对手未踏边不提前临别卡",
+                a and a["action"] != "SET_GUARD",
+                str(a))
     return ok
 
 

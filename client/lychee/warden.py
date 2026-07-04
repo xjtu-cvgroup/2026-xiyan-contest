@@ -503,6 +503,8 @@ class WardenStrategy(BaselineStrategy):
         """临别卡：离场时对手仍在逼近就再挡一手。"""
         if self._my_active_guard(state, cur):
             return None
+        if cur == state.gate_node and not self._opp_inbound(state, cur):
+            return None
         if not (self._opp_inbound(state, cur)
                 or self._opp_near(state, cur, self.THREAT_ETA)):
             return None
