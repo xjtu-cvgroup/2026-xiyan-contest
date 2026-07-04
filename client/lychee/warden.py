@@ -245,14 +245,9 @@ class WardenStrategy(BaselineStrategy):
             if self._opp_alive_can_deliver(state, remain):
                 pass          # 对手未死：按原逻辑继续争/驻守拖死它
             else:
-                # 懦夫博弈滞后：双死后先眨眼者拿第二槽位（换乘慢 9 帧）。
-                # 多扛 12 帧不让行——对面转向阈值若比我们早，它先让、
-                # 我们白捡先手；12 帧后仍僵持再让（保证不锁到终场）
-                if self._dead_since is None:
-                    self._dead_since = state.round
-                if state.round - self._dead_since >= 12 \
-                        or not self._at_contested_station(state, cur):
-                    return self._farm_endgame(state, cur)
+                # 用户 spec：双死判定成立的那一帧立刻转最优任务，
+                # 不为 9 帧先手多等（早动 = 抢刷新波占位 + 抢短马快马）
+                return self._farm_endgame(state, cur)
 
         # ---- 交付线 ----
         if cur == terminal:
@@ -410,7 +405,7 @@ class WardenStrategy(BaselineStrategy):
         eta, path = state.graph.shortest_path(pos, node_id, P.BASE_SPEED)
         return bool(path) and eta <= eta_cap
 
-    GUARD_MIN_LEAD = 7         # 对手到站剩余帧 ≥ 此值才立卡（读条 4+生效 1+余量）
+    GUARD_MIN_LEAD = 6         # 提交+4读条+1生效=+6起拦：对手剩≥6帧即来得及（r252实战差1帧修正）
 
     def _reactive_guard(self, state, cur):
         """虚卡纪律：对手上边才落卡；卡亡且它仍在边上 → 立即补。
@@ -511,6 +506,12 @@ class WardenStrategy(BaselineStrategy):
             if proc.get("targetNodeId") == cur:
                 return P.a_wait()
             return P.a_process()
+        # 脚下资源：农期马就是任务巡回速度（短马也领）
+        stock = state.node(cur).get("resourceStock") or {}
+        res2 = state.me.get("resources") or {}
+        for rt in (P.FAST_HORSE, P.SHORT_HORSE):
+            if stock.get(rt, 0) > 0 and res2.get(rt, 0) < 1:
+                return P.a_claim_resource(cur, rt)
         # 脚下任务直接吃
         task = self._farm_here(state, cur)
         if task:
