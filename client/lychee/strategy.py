@@ -12,14 +12,9 @@ from . import protocol as P
 from .planner import (TaskPlanner, FUNNEL_FIRST_WEATHER,
                       FUNNEL_WEATHER_GAP, RUSH_EARLIEST)
 
-# 对手手册（V3.24）：按对手 playerId 应用赛前预设。前推偏置全局默认开
-# 被电池证伪（camper 未交付 4→10——开局提速重掷与蹲点者起卡周期的相位
-# 骰子），但对官道冲锋型对手价值巨大（vs toller margin +32→+248，代价
-# 2/48）。第一名 2839（lychee-py，边冲边农+汇入点回手卡，四局逐帧复刻
-# 般确定）是该预设的实锤适用对象。键 = 对手 playerId（开局即知）
-OPPONENT_BOOK = {
-    2839: {"planner.FORWARD_BIAS_FLOOR": 0.6},   # 第一名：官道冲锋型
-}
+# （V3.25 撤下按 playerId 的对手手册：地图会变、对手会变，ID 定制是
+# 过拟合——用户纠偏。前推偏置的激活改为对手位置/行为在线识别，见
+# PlannerStrategy._fwd_rush_tick）
 
 
 class Strategy:
@@ -279,7 +274,9 @@ class PlannerStrategy(BaselineStrategy):
         self._opp_card_hist = {}         # 对手本局出牌频次（WINDOW_CARD_REVEAL）
         self._rng = None                 # (matchId, playerId) 派生种子，回放可复现
         self._opp_stationary = (None, 0)  # (对手停靠节点, 起始帧)——驻扎判定
-        self._book_applied = False       # 对手手册预设只应用一次
+        self._fwd_rush = False           # 冲锋型对手识别结论（粘性）
+        self._opp_min_gate_eta = float("inf")   # 对手宫门 ETA 历史最小值
+        self._opp_retreated = False      # 对手曾回头（ETA 显著回升过）
         self._loiter_spent = 0           # 尾段蹲刷已用帧数（预算制）
         self._last_main_action = None    # 上一帧提交的主车队动作（拒绝反馈的 join 键）
         self._clear_sent = {}            # nodeId -> 小分队清障派出帧（防重试风暴）
@@ -340,18 +337,12 @@ class PlannerStrategy(BaselineStrategy):
             self.planner.back_until = state.round + 40
         self._weaken_target = None
 
-        # 对手手册（V3.24）：首帧按对手 playerId 应用赛前预设（只一次）
-        if not self._book_applied:
-            self._book_applied = True
-            preset = OPPONENT_BOOK.get(getattr(state, "opp_id", None))
-            if preset:
-                for key, val in preset.items():
-                    scope, attr = key.split(".", 1)
-                    obj = self.planner if scope == "planner" else self
-                    setattr(obj, attr, val)
-                if self.log:
-                    self.log.info("opponent book applied for %s: %r",
-                                  state.opp_id, preset)
+        # 冲锋型对手在线识别（V3.25，按位置/行为，不认 ID）：在途任务分
+        # ≥30（蹲点型到关前恒 0）+ 走廊推进从未回头（农任务型会游走回撤）
+        # + 未被画像为蹲点型 → 前推偏置激活（粘性；画像若后到蹲点型则
+        # 撤销）。全局常开被 1344 局扫描证伪（camper 相位骰子），冲锋型
+        # 专用收益 vs toller margin +32→+248
+        self._fwd_rush_tick(state)
 
         # 敌卡消失（被拆/风化/失效）即重置宽限计时：同节点再立新卡重新起算
         for node_id in list(self._guard_first_seen):
@@ -447,11 +438,76 @@ class PlannerStrategy(BaselineStrategy):
                                # 它刚落座时关死采集。误报风险有界：首卡之后
                                # prior 已被 _guard_seen 定死，画像不再增量起效；
                                # 400 之后的关隘等待多为尾段战术对峙，不采
+    # farmer 分类（V3.26）：在途任务分 ≥60（两个以上任务，不是顺手一个）
+    # 且全场未见其任何设卡 → 农任务型，漏斗先验降档（planner.FUNNEL_
+    # FARMER_PRIOR）。reports 三败局对手全是这个形态：农到 120~150、
+    # 零设卡，我们却按 0.7 先验交漏斗保险费。误判为 farmer 的下行风险
+    # 有界：它一落卡 _guard_seen 粘性升 1.0 覆盖本档；中边陷阱等待等
+    # 灾难级防御不读画像，保持全额（保险只降"定价"，不降"保命"）。
+    # 注意与 camper 的判定顺序：farmer 靠分数、camper 靠关隘闲置——
+    # "先农满 60 再蹲关"的混合体会被先判成 farmer，其后的蹲守由陷阱
+    # 等待兜底、落卡由 _guard_seen 兜底，不裸奔
+    PROFILE_FARM_SCORE = 60
+
+    FWD_RUSH_TASK_MIN = 30      # 在途任务分证据线（蹲点型到关前恒 0）
+    FWD_RETREAT_TOL = 12        # 宫门 ETA 回升超过此值 = 它回头过（农任务
+                                # 型游走特征；容差吸收边进度量化噪声）
+    FWD_RUSH_DEPTH = 0.6        # 触发还要求对手已深入（宫门 ETA ≤ 60% 全
+                                # 程）：冲锋型攒够任务分时必然已在走廊深处
+                                # （2839 任务 30 时在 S07），农任务型攒分时
+                                # 还在浅区（FarmerBot r82 在 S04）——不加
+                                # 这道闸它会被误触发在最有害的开局窗口
+
+    def _fwd_rush_tick(self, state):
+        """冲锋型对手在线识别 → planner.forward_rush_opp（前推偏置开关）。"""
+        opp = state.opp
+        if not opp or opp.get("delivered") or opp.get("retired"):
+            self.planner.forward_rush_opp = self._fwd_rush
+            return
+        eta = self.planner._opp_eta(state, state.gate_node)
+        # 对手逼近宫门后冻结回头追踪：它过宫门奔终点时宫门 ETA 会回升
+        # ~27 帧（终局伪影，实测把 r181 起的正确识别在 r452 误撤销）
+        if eta != float("inf") \
+                and self._opp_min_gate_eta > self.FWD_RETREAT_TOL:
+            if eta > self._opp_min_gate_eta + self.FWD_RETREAT_TOL:
+                self._opp_retreated = True
+            self._opp_min_gate_eta = min(self._opp_min_gate_eta, eta)
+        total = self.planner._map_total(state)
+        deep = total and eta != float("inf") \
+            and eta <= self.FWD_RUSH_DEPTH * total
+        if self._opp_profile == "camper" or self._opp_retreated:
+            self._fwd_rush = False       # 蹲点画像/回头随时撤销
+        elif not self._fwd_rush and deep \
+                and (opp.get("taskScore", 0) or 0) >= self.FWD_RUSH_TASK_MIN:
+            self._fwd_rush = True
+            if self.log:
+                self.log.info("opp identified as forward-rusher at r%d",
+                              state.round)
+        self.planner.forward_rush_opp = self._fwd_rush
 
     def _profile_tick(self, state):
         opp = state.opp
+        if not opp:
+            return
+        # farmer 分类的关隘排除（V3.26.1，电池抓获）：延迟 camper 变体
+        # "先在武关农满 60 再落卡"会被误判 farmer（随机化 camper 12/48
+        # 误判、seed15 从赢局退回未交付）。可分离信号：真农夫的农发生在
+        # S07 驿站类普通节点（reports 三局全程如此），在关隘上农到 60 的
+        # 对手下一步大概率就是回手卡——它站在关隘上时不分类，等它离开
+        # 关隘再看（真农夫有的是普通节点帧可采）
+        opp_pos = opp.get("currentNodeId")
+        at_choke = (opp_pos and not opp.get("routeEdgeId")
+                    and state.node(opp_pos).get("nodeType")
+                    in ("KEY_PASS", "PASS"))
+        if (opp.get("taskScore") or 0) >= self.PROFILE_FARM_SCORE \
+                and not self.planner._guard_seen and not at_choke:
+            self._opp_profile = "farmer"
+            if self.log:
+                self.log.info("opp profiled as FARMER at r%d (taskScore=%d)",
+                              state.round, opp.get("taskScore") or 0)
+            return
         node_id, _ = self._opp_stationary
-        if not opp or not node_id:
+        if not node_id:
             return
         # 关隘型节点：KEY_PASS（S10 武关）+ PASS（S03/S11）——蹲潼关与
         # 蹲武关是同一威胁形态（replay36 死局的 ~225 帧通行费来自双关卡）

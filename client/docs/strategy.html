@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>荔枝争运战 · 完整策略文档 (BUILD 3.22-toll-defense)</title>
+<title>荔枝争运战 · 完整策略文档 (BUILD 3.26-farm-meta)</title>
 <style>
   .viz-root {
     --surface-1: #fcfcfb;
@@ -96,7 +96,7 @@
 <div class="viz-root">
 
 <h1>《一骑红尘：荔枝争运战》完整策略文档</h1>
-<p class="sub">客户端 <code>PlannerStrategy</code> · <span class="badge">BUILD 3.22-toll-defense</span>
+<p class="sub">客户端 <code>PlannerStrategy</code> · <span class="badge">BUILD 3.26-farm-meta</span>
    · 163 项自测覆盖 · 生成于 2026-07-03</p>
 
 <div class="toc">
@@ -558,9 +558,25 @@ selftest 213 项全绿。观察清单：seed 4/23 深链死局（纯节奏救不
 （农夫走向下个任务点被判赶路者，镜像/farmer/toller 三形态齐跌）。战绩：vs toller 冻结帧 60~120→0、48/48
 (+32.1)；其余五形态与 V3.21 逐位。selftest 220 项。观察清单：toller margin 仅 +32（真 2839 更强）、悬崖对
 边农边抢关失效、KEY_PASS 卡上限 7/休整鲜度回升未建模</td></tr>
+<tr><td><b>3.23 contest-phase</b></td><td><b>分段争夺折扣：反事实按博弈阶段切分（48 局 2000+ 样本）——外部性
+完全集中在关前，关后所有 gap 桶硬抢真实胜率 97~100%。关前 0.5 原样（外部性补偿），关后 0.9，对手已交付/
+退赛不折扣（规则确定性，旧代码漏检查，尾段任务对着不存在的对手打五折）</b></td>
+<td>配对 A/B 336 局五形态逐位零变化（bot 种群尾局候选稀疏，排序不变）；效果窗口在真实对手尾局。selftest
+224 项。详见 contest-discount / contest-phase 两份文档</td></tr>
+<tr><td><b>3.24 forward-bias</b></td><td><b>前推偏置（任务×地图进度系数）+ 对手手册（按 playerId 预设条目）：全局默认开被证伪（camper 相位骰子），2839 条目 FLOOR=0.6 上线</b></td><td>详见 forward-bias 文档</td></tr>
+<tr><td><b>3.25 adaptive-rush</b></td><td><b>撤 playerId 对手手册（地图/对手会变），前推偏置改为冲锋型在线识别（任务分≥30+深入走廊+从不回头，粘性可撤销）；smoke.py 哨兵电池（4.5 秒）替代全量电池作日常闸门</b></td><td>识别 r~181 触发但收益窗口 r0~180，当前定位=零成本保险。详见 forward-bias 文档</td></tr>
+<tr><td><b>3.26 farm-meta</b></td><td><b>reports 三败局（vs2986/2619/2738，全员农夫零设卡 meta，死亡链清零后
+输在任务经济 -18/-8/-11）驱动：①RUSH 余量分档 60→25——尾段零绕路 15 分任务曾被 deliver 模式整档熔断
+（vs2986 的 T_021/T_023，终局实剩 38 帧）；②悬崖带共点对峙豁免（CLIFF_MELEE_ETA=10）——任务在脚下且对手
+在场/将至时悬崖前提不成立（vs2619：S07 三连 90 分被悬崖价全砍白让对手），见过卡或 camper 画像不豁免；
+③farmer 画像（在途任务分 ≥60 且未见其设卡）+ 漏斗先验降档 0.7→0.35——先验单向棘轮修正，只降定价不降
+保命（陷阱等待不读画像），落卡即被 _guard_seen 粘性覆盖</b></td>
+<td>selftest 235 项（新增 11：vs2619/vs2986 复刻正例 + 三控制组）。遗留：山线 vs 官道刷新密度未入账
+（r99 型开局岔路仍可能进山，需任务流期望建模）；悬崖对边农边抢关混合体依旧失效（V3.22 证伪记录有效）。
+六形态电池结果见 farm-meta 文档 §四</td></tr>
 </table>
 
-<p class="foot">仓库 client/docs/strategy.html · 与代码同步于 feat/v3.18-race-tempo@3.22-toll-defense ·
+<p class="foot">仓库 client/docs/strategy.html · 与代码同步于 feat/v3.18-race-tempo@3.26-farm-meta ·
 自测 <code>python3 selftest.py</code>（220 项）· 回归 <code>python3 regress.py</code>（六形态）</p>
 </div>
 
