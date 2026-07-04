@@ -2345,6 +2345,27 @@ def test_race_tempo():
     ok &= check("竞速: 同路先到设卡优先于脚下任务",
                 a is not None and a["action"] == "SET_GUARD"
                 and a["targetNodeId"] == "S09", str(a))
+    # 8c) 追分合流卡：复盘 2744vs2617，前段任务分 0:60 落后但我们
+    #     先到 S09 10 帧；这 4 帧设卡是破对手 S10 先手的追分动作。
+    gs = gs_race(my_pos="S09", round_no=314, task_score=0,
+                 opp_task_score=60,
+                 opp_moving=("S05", "S09", "E_S05_S09", 10))
+    a = PlannerStrategy()._guard_opportunity(gs, "S09",
+                                             Plan("deliver", slack=10))
+    ok &= check("竞速: 追分态 S09 先到 10 帧设卡",
+                a is not None and a["action"] == "SET_GUARD"
+                and a["targetNodeId"] == "S09", str(a))
+    a = PlannerStrategy().main_action(gs, Plan("deliver", slack=10))
+    ok &= check("竞速: 追分合流卡优先于赶路",
+                a is not None and a["action"] == "SET_GUARD"
+                and a["targetNodeId"] == "S09", str(a))
+    # 8d) 分差不够时仍不把普通驿站泛化成设卡点。
+    gs = gs_race(my_pos="S09", round_no=314, task_score=0,
+                 opp_task_score=30,
+                 opp_moving=("S05", "S09", "E_S05_S09", 10))
+    a = PlannerStrategy()._guard_opportunity(gs, "S09",
+                                             Plan("deliver", slack=10))
+    ok &= check("竞速: 普通驿站无追分分差不设卡", a is None, str(a))
     # 9) RUSH 起点二卡：规则允许 SET_GUARD，只保留交付余量底线
     gs = gs_race(my_pos="S13", opp_pos="S11", round_no=452, phase="RUSH")
     a = PlannerStrategy()._guard_opportunity(gs, "S13",

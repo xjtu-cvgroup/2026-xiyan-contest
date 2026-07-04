@@ -67,4 +67,7 @@
 # 3.32 = FRONT_TEMPO 审计回收：默认关闭前段尾随子系统，保留显式旋钮；
 #        修正 _front_tempo_contested 的领先阈值符号；farm-rusher 12 帧短等
 #        释放仅限已停靠口袋点，汇聚中继续等待；smoke 补 camper17。
-BUILD_VERSION = "3.32-front-tempo-audit"
+# 3.33 = 2744vs2617 复盘：前段任务分 0:60 落后但先到 S09 10 帧时，
+#        普通驿站旧门控 + 45 slack 把反卡机会跳过；新增追分合流卡，
+#        仅在明显任务分落后、对手即将必经、前方仍有关键关隘时低门槛设卡。
+BUILD_VERSION = "3.33-catchup-merge-guard"

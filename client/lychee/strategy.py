@@ -209,6 +209,13 @@ class PlannerStrategy(BaselineStrategy):
     GUARD_REAR_SLACK = 45       # 普通汇入点成本低，但仍要保交付余量
     GUARD_REAR_RUSH_SLACK = 20  # RUSH 起点二卡：只在仍有读条余量时兑现
     GUARD_REAR_TYPES = {"PALACE_STATION"}  # 普通点默认只放宫前驿这类尾段关键点
+    # 追分合流卡（V3.33）：0 vs 60 这类前段任务分落后局，若我们抢先到
+    # S09 式普通合流点且对手 8~18 帧后必经，4 帧读条换对手漏斗前停顿/
+    # 攻坚税，是追分而非保守交付动作，不能套普通反手卡 45 slack。
+    GUARD_CATCHUP_OPP_ETA = 18
+    GUARD_CATCHUP_SLACK = 5
+    GUARD_CATCHUP_TASK_GAP = 60
+    GUARD_CATCHUP_MY_TASK_MAX = 30
 
     # ---- 防中边陷阱（V3.5，V3.12 删证据门）----
     # 设卡必须站在节点上：对手占着/将先到我们的下一跳时，上边就可能被掐点
@@ -807,7 +814,8 @@ class PlannerStrategy(BaselineStrategy):
 
         node_type = node.get("nodeType")
         choke_guard = node_type in self.GUARD_NODE_TYPES
-        rear_guard = self._rear_guard_opportunity(state, cur, opp_eta)
+        catchup_guard = self._catchup_merge_guard_opportunity(state, cur, opp_eta)
+        rear_guard = catchup_guard or self._rear_guard_opportunity(state, cur, opp_eta)
         if not (choke_guard or rear_guard):
             return None
         # slack 闸门分档（V3.18/V3.23）：常规 65；关键关隘热窗口 25；
@@ -820,6 +828,8 @@ class PlannerStrategy(BaselineStrategy):
             slack_min = (self.GUARD_REAR_RUSH_SLACK
                          if state.phase == P.PHASE_RUSH
                          else self.GUARD_REAR_SLACK)
+        elif catchup_guard:
+            slack_min = self.GUARD_CATCHUP_SLACK
         elif rear_guard and not choke_guard:
             slack_min = (self.GUARD_REAR_RUSH_SLACK
                          if state.phase == P.PHASE_RUSH
@@ -852,6 +862,21 @@ class PlannerStrategy(BaselineStrategy):
             return True
         return (self._opp_ordinary_guard_seen
                 or self.planner.farm_rusher_pressure(state, cur))
+
+    def _catchup_merge_guard_opportunity(self, state, cur, opp_eta):
+        """任务分明显落后时，把普通合流点抢先到位转化为对手通行税。"""
+        node_type = state.node(cur).get("nodeType")
+        if node_type in self.GUARD_NODE_TYPES or node_type in ("START", "FINISH"):
+            return False
+        if opp_eta > self.GUARD_CATCHUP_OPP_ETA:
+            return False
+        me_task = state.me.get("taskScore", 0) or 0
+        opp_task = state.opp.get("taskScore", 0) or 0
+        if me_task > self.GUARD_CATCHUP_MY_TASK_MAX:
+            return False
+        if opp_task - me_task < self.GUARD_CATCHUP_TASK_GAP:
+            return False
+        return self.planner._key_pass_ahead(state, cur)
 
     def _my_active_guards(self, state):
         n = 0
