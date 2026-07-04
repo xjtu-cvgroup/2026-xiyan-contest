@@ -170,9 +170,11 @@ class PlannerStrategy(BaselineStrategy):
     SQUAD_CORRIDOR_RESERVE = 4
     GATE_SCOUT_FROM = 355       # 宫门验核最早 ~390 帧，此前派的标记必然过期
     # 顺路领取清单：冰鉴/马之外补上文书（充实验牒 YAN_DIE 出牌池，克强行 QIANG_XING，
-    # 此前从不主动领导致这张克制牌常年打不出）和情报（免费囤着，等空转帧顺手用掉）
+    # 此前从不主动领导致这张克制牌常年打不出）。情报默认不在清单：领取 2 帧
+    # + 使用 1 帧最多省 3 帧，节奏局常是负收益；S03 开局打包/camper 慢局
+    # 由 _should_claim_intel_en_route 动态加入，已持有时仍可在空转帧/读条前使用。
     CLAIM_EN_ROUTE = (P.ICE_BOX, P.FAST_HORSE, P.SHORT_HORSE,
-                      P.PASS_TOKEN, P.OFFICIAL_PERMIT, P.INTEL)
+                      P.PASS_TOKEN, P.OFFICIAL_PERMIT)
     # 竞速模式下的收缩清单（V3.18）：只领交付硬件与速度资源
     RACE_CLAIM_ONLY = (P.ICE_BOX, P.FAST_HORSE, P.SHORT_HORSE)
     CLAIM_LIMIT = {P.ICE_BOX: 2}    # 冰鉴多多益善（+10 鲜度 ≈ 18 分），其余各 1
@@ -791,6 +793,9 @@ class PlannerStrategy(BaselineStrategy):
             # 情报各 2 帧读条在竞争带内是胜负帧，赢下漏斗后有的是空转帧补
             claim_list = self.RACE_CLAIM_ONLY \
                 if self.planner.race_mode(state) else self.CLAIM_EN_ROUTE
+            if stock.get(P.INTEL, 0) > 0 and res.get(P.INTEL, 0) <= 0 \
+                    and self._should_claim_intel_en_route(state, plan, cur):
+                claim_list = tuple(claim_list) + (P.INTEL,)
             if self.planner._front_tempo_active(
                     state, cur, me.get("taskScore", 0)):
                 claim_list = tuple(rt for rt in claim_list
@@ -1343,6 +1348,27 @@ class PlannerStrategy(BaselineStrategy):
         if self.planner._has_our_scout_mark(state, target):
             return None
         return P.a_use_resource(P.INTEL, target)
+
+    def _should_claim_intel_en_route(self, state, plan, cur):
+        """情报主动领取只保留给 S03 开局打包与 camper 慢局。
+
+        情报 2 帧领取 + 1 帧使用最多省 3 帧，在前段竞速/悬崖/直送阶段
+        等价于拿节奏换零收益；但 S03 开局已停车打包、camper seed5 这类
+        极限收盘局，需要这一帧级减读条把 r600 交付救回来。"""
+        if state.phase != P.PHASE_NORMAL:
+            return False
+        if self.planner.race_mode(state) or self.planner.race_cliff(state):
+            return False
+        if self.planner._front_tempo_active(
+                state, cur, (state.me or {}).get("taskScore", 0)):
+            return False
+        if plan.kind == "deliver" and (
+                state.round >= RUSH_EARLIEST
+                or self.planner.farm_rusher_pressure(state, cur)):
+            return False
+        if cur == "S03" and state.round <= 130 and plan.slack >= 50:
+            return True
+        return self._opp_profile == "camper"
 
     @staticmethod
     def _opp_processing_here(state, node_id):
