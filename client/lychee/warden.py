@@ -599,6 +599,8 @@ class WardenStrategy(BaselineStrategy):
         res = me.get("resources") or {}
         has_horse = any(res.get(h, 0) > 0
                         for h in (P.FAST_HORSE, P.SHORT_HORSE))
+        opp = state.opp
+        opp_pos = opp and (opp.get("nextNodeId") or opp.get("currentNodeId"))
         for t in state.claimable_tasks():
             tpl = t.get("taskTemplateId")
             if tpl == "T04" or (tpl == "T06" and not has_horse):
@@ -615,6 +617,11 @@ class WardenStrategy(BaselineStrategy):
                 continue
             if state.round + eta + proc > state.duration_round:
                 continue
+            if opp_pos:
+                oeta, opath = state.graph.shortest_path(
+                    opp_pos, t["nodeId"], P.BASE_SPEED)
+                if opath and oeta <= eta:
+                    continue          # 它更近/同距：别跟屁股，换线抢别的桶
             back = self._farm_backtrack_step(state, cur, path)
             rank = (1 if back else 0, -int(t.get("score", 0) or 0), eta)
             if best_rank is None or rank < best_rank:
@@ -626,9 +633,6 @@ class WardenStrategy(BaselineStrategy):
             cands = set()
             for nodes in (state.task_candidates or {}).values():
                 cands.update(nodes)
-            opp = state.opp
-            opp_pos = opp and (opp.get("nextNodeId")
-                               or opp.get("currentNodeId"))
             fb, fb_rank = None, None
             for nid in cands:
                 if nid == cur and len(cands) > 1:

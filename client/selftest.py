@@ -4588,6 +4588,28 @@ def test_warden_strategy():
                 a and not (a["action"] == "MOVE" and a["targetNodeId"] == "S02"),
                 str(a))
 
+    t_opp_line = {"taskId": "T_OPP_LINE", "taskTemplateId": "T01",
+                  "nodeId": "S04", "processRound": 4, "score": 90,
+                  "expireRound": 600, "active": True, "completed": False,
+                  "failed": False, "ownerPlayerId": 0,
+                  "protectionPlayerId": 0}
+    t_alt_line = {"taskId": "T_ALT_LINE", "taskTemplateId": "T01",
+                  "nodeId": "S03", "processRound": 4, "score": 30,
+                  "expireRound": 600, "active": True, "completed": False,
+                  "failed": False, "ownerPlayerId": 0,
+                  "protectionPlayerId": 0}
+    st = WardenStrategy()
+    st.camp_node = "S10"
+    st._plans_ready = True
+    st._score_farm_mode = True
+    st._processed_here = True
+    a = st.main_action(gs_at("S02", opp_cur="S04", round_no=360,
+                             phase=P.PHASE_RUSH,
+                             tasks=(t_opp_line, t_alt_line)))
+    ok &= check("warden: S02转农不跟对手屁股追同线任务",
+                a and a["action"] == "MOVE" and a["targetNodeId"] == "S03",
+                str(a))
+
     t_s10 = {"taskId": "T_S10", "taskTemplateId": "T01",
              "nodeId": "S10", "processRound": 4, "score": 30,
              "expireRound": 520, "active": True, "completed": False,
