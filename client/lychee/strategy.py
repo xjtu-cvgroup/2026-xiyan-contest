@@ -1238,6 +1238,8 @@ class PlannerStrategy(BaselineStrategy):
         forced_ok = cur != self._last_forced_node
         g = state.enemy_guard(target)
         defense = g.get("defense", 0) or 0
+        invest = self._break_invest(defense, me.get("goodFruit", 0),
+                                    me.get("badFruit", 0))
 
         if self._opp_at_node(state, target):
             base = 1 if state.node(target).get("nodeType") in ("KEY_PASS", "GATE") else 0
@@ -1252,6 +1254,13 @@ class PlannerStrategy(BaselineStrategy):
                                first - stay_since >= self.CAMPER_ESTABLISHED)
                 if not established and state.round - first < self.CAMPER_GRACE:
                     return self._idle_upgrade(state, plan)  # 宽限：等它迈步
+                node_type = state.node(target).get("nodeType")
+                if not established and invest and node_type not in ("KEY_PASS", "GATE"):
+                    gf, bf = invest
+                    if self.log:
+                        self.log.info("break transient guard %s def=%d with good=%d bad=%d",
+                                      target, defense, gf, bf)
+                    return P.a_break_guard(target, gf, bf)
                 if forced_ok:
                     if self.log:
                         self.log.info("camper holds %s past grace, forced pass",
@@ -1260,8 +1269,6 @@ class PlannerStrategy(BaselineStrategy):
                 return P.a_wait()
 
         # 1) 一击必破：攻坚值 = 好果x2 + 坏果x3，投入各最多 2 篓，无读条
-        invest = self._break_invest(defense, me.get("goodFruit", 0),
-                                    me.get("badFruit", 0))
         if invest:
             gf, bf = invest
             if self.log:

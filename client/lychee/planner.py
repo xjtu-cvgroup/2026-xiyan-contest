@@ -107,6 +107,13 @@ FRONT_TEMPO_HEAVY_MOUNTAIN_MIN_BASE = 30
 FRONT_TEMPO_HEAVY_MOUNTAIN_MAX_OPP_LEAD = 20
 FRONT_TEMPO_HEAVY_MOUNTAIN_MIN_LEG = 45
 FRONT_TEMPO_HEAVY_MOUNTAIN_MIN_DETOUR = 28
+FRONT_TEMPO_WATER_DETOUR_GUARD = True
+FRONT_TEMPO_WATER_DETOUR_MIN_BASE = 60
+FRONT_TEMPO_WATER_DETOUR_BASE_CAP = 120
+FRONT_TEMPO_WATER_DETOUR_MIN_LEG = 45
+FRONT_TEMPO_WATER_DETOUR_MIN_DETOUR = 28
+FRONT_TEMPO_WATER_DETOUR_FROM = {"S07", "S09"}
+FRONT_TEMPO_WATER_DETOUR_TARGETS = {"S04", "S05"}
 LATE_RESOURCE_PROGRESS = 0.62
 LATE_RESOURCE_MULT = 1.25
 ICE_AMMO_TARGET_BAD = 1
@@ -898,12 +905,14 @@ class TaskPlanner:
         pos, f_to = self._position_for(state, task, cur, speed, penalty, ecost)
         if pos is None:
             return None
-        if self._front_tempo_task_blocked(state, task, cur, pos, speed,
-                                          penalty, ecost, base):
-            return None
-        if self._keypass_tempo_task_blocked(state, task, cur, pos, speed,
-                                            penalty, ecost, base):
-            return None
+        same_node_rescue = self._same_node_score_rescue(state, task, cur, pos, base)
+        if not same_node_rescue:
+            if self._front_tempo_task_blocked(state, task, cur, pos, speed,
+                                              penalty, ecost, base):
+                return None
+            if self._keypass_tempo_task_blocked(state, task, cur, pos, speed,
+                                                penalty, ecost, base):
+                return None
         f_to += self._backtrack_tax(state, cur, pos)
 
         proc = task.get("processRound", 4) or 4
@@ -971,6 +980,8 @@ class TaskPlanner:
 
         fv = self._frame_value(state, eta_direct,
                                race_adjust=not task_floor)
+        if same_node_rescue:
+            fv = min(fv, _FV)
         # 共点对峙豁免（V3.26，V3.26.1 收紧）：悬崖带内、任务就在脚下、
         # 对手停靠在同一节点 —— 双方同桌，悬崖前提（我停它不停）不成立，
         # 回落竞速帧价。vs2619 实锤：S07 三连任务被悬崖全砍，对手留场
@@ -1336,6 +1347,46 @@ class TaskPlanner:
         return self._front_tempo_heavy_mountain_target_blocked(
             state, cur, target, speed, penalty, ecost, base)
 
+    def _front_tempo_water_detour_task_blocked(self, state, task, cur, pos,
+                                               speed, penalty, ecost, base):
+        """S07 后不为低位水路任务反切，先保住官道合流身位。"""
+        if not FRONT_TEMPO_WATER_DETOUR_GUARD:
+            return False
+        if not cur or not pos or pos == cur:
+            return False
+        if state.phase != P.PHASE_NORMAL:
+            return False
+        base = state.me.get("taskScore", 0) if base is None else base
+        if (base or 0) < FRONT_TEMPO_WATER_DETOUR_MIN_BASE:
+            return False
+        if (base or 0) >= FRONT_TEMPO_WATER_DETOUR_BASE_CAP:
+            return False
+        if cur not in FRONT_TEMPO_WATER_DETOUR_FROM:
+            return False
+        target = task.get("nodeId") or pos
+        if target not in FRONT_TEMPO_WATER_DETOUR_TARGETS:
+            return False
+        if self._task_route_bucket(state, task, pos) != P.WATER:
+            return False
+        if self._opp_committed_corridor(state) not in (None, P.ROAD):
+            return False
+        if not self._front_tempo_contested_raw(state, cur):
+            return False
+        if not self._key_pass_ahead(state, cur, penalty, ecost):
+            return False
+
+        direct, direct_path = state.graph.shortest_path(
+            cur, state.gate_node, speed, penalty, ecost)
+        to_target, target_path = state.graph.shortest_path(
+            cur, pos, speed, penalty, ecost)
+        from_target, onward_path = state.graph.shortest_path(
+            pos, state.gate_node, speed, penalty, ecost)
+        if not direct_path or not target_path or not onward_path:
+            return False
+        detour = to_target + from_target - direct
+        return (to_target >= FRONT_TEMPO_WATER_DETOUR_MIN_LEG
+                or detour >= FRONT_TEMPO_WATER_DETOUR_MIN_DETOUR)
+
     def _keypass_tempo_task_blocked(self, state, task, cur, pos, speed,
                                     penalty, ecost, base):
         """首个关键关前的节奏闸门：120 分够进 S10，非官道先让。"""
@@ -1354,6 +1405,9 @@ class TaskPlanner:
                                   penalty, ecost, base):
         """早段路线承诺闸门：低进度/山线任务先让，等 S07/S10 波次补分。"""
         if self._front_tempo_heavy_mountain_task_blocked(
+                state, task, cur, pos, speed, penalty, ecost, base):
+            return True
+        if self._front_tempo_water_detour_task_blocked(
                 state, task, cur, pos, speed, penalty, ecost, base):
             return True
         if self._front_tempo_corridor_follow_blocked(
@@ -1419,6 +1473,22 @@ class TaskPlanner:
                 and node_id not in self._opp_path_nodes(state):
             return True
         return False
+
+    @staticmethod
+    def _same_node_score_rescue(state, task, cur, pos, base):
+        """已站在任务点且任务分仍低时，用基础帧价估同点补分。"""
+        if pos != cur or state.me.get("verified"):
+            return False
+        if cur not in ("S09", "S10", "S11"):
+            return False
+        if (base or 0) >= TASK_FLOOR_BASE:
+            return False
+        if (task.get("score", 0) or 0) <= 0:
+            return False
+        proc = task.get("processRound", 4) or 4
+        if proc > TASK_FLOOR_MAX_FRAMES:
+            return False
+        return state.node(cur).get("nodeType") != "GATE"
 
     def _break_capacity(self, state):
         """当前可立即投入的攻坚值：坏果优先，好果保留交付底仓。"""

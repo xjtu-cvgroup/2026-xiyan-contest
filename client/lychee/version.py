@@ -113,4 +113,9 @@
 #        领先局不再一刀切禁止小分队续防，若对手正在攻坚我方有效卡且
 #        defense+2 不超过 maxDefense，使用富余人手 SQUAD_REINFORCE；
 #        仍保留走廊人手底仓，且不为只剩 1 点上限空间的卡白烧人手。
-BUILD_VERSION = "3.41-aggressive-denial-reinforce"
+# 3.42 = lose(5) 复盘：① S07/S09 后官道合流竞争态不再为 S04/S05
+#        低位水路任务反切；② 卡主未坐实为 camper 且我方可秒破时优先
+#        攻坚，避免 2814 S09 这类过路卡误走 122 帧强通；③ 已站在
+#        任务点且任务分 <120 时，同点任务用基础帧价估值，补掉 S09/S10
+#        低分直奔终点的假负收益。
+BUILD_VERSION = "3.42-water-detour-breakthrough-rescue"

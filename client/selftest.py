@@ -577,6 +577,19 @@ def test_breakthrough():
                          routeEdgeId=None, delivered=False, retired=False)
         return gs
 
+    def camped_ordinary_state(**kw):
+        gs = blocked_state(**kw)
+        for p in gs.players.values():
+            if p["playerId"] == 1001:
+                p.update(currentNodeId="S07", taskScore=60)
+            else:
+                p.update(state="IDLE", currentNodeId="S09", nextNodeId=None,
+                         routeEdgeId=None, delivered=False, retired=False)
+        gs.nodes["S10"]["guard"] = None
+        gs.nodes["S09"]["guard"] = {"ownerTeamId": "BLUE", "defense": kw.get("defense", 6),
+                                    "maxDefense": 6, "active": True}
+        return gs
+
     # 7) 卡主在场且补得起卡：先给 CAMPER_GRACE 帧宽限（语料 6/6 它读完临别卡
     #    次帧就走），赖着不走才认定真蹲点转强通（免试探——拆掉即被补满）
     st = PlannerStrategy()
@@ -587,6 +600,19 @@ def test_breakthrough():
                 any(x["action"] == "FORCED_PASS" and x["targetNodeId"] == "S10"
                     for x in a)
                 and not any(x["action"] == "BREAK_GUARD" for x in a),
+                json.dumps(a, ensure_ascii=False))
+
+    # 7a) lose(5) vs2814：普通合流点过路卡未坐实为 camper，且当前弹药
+    #     可秒破时，不能误走强通税（S09 防6 强通锁了 122 帧）。
+    st = PlannerStrategy()
+    a = None
+    for i in range(st.CAMPER_GRACE + 2):
+        a = st.decide(camped_ordinary_state(defense=6, good=96, bad=1,
+                                            round_no=330 + i))
+    ok &= check("突破: 普通过路卡可秒破时不强通",
+                any(x["action"] == "BREAK_GUARD" and x["targetNodeId"] == "S09"
+                    for x in a)
+                and not any(x["action"] == "FORCED_PASS" for x in a),
                 json.dumps(a, ensure_ascii=False))
 
     # 7b) 临别卡宽限：卡主在宽限窗内离开 → 站在节点上白菜价攻坚
@@ -3958,6 +3984,27 @@ def test_front_tempo_tail_follow():
                 and a["targetNodeId"] == "S07",
                 f"{plan} -> {a}")
 
+    t_s05_water = {"taskId": "T_S05_WATER", "taskTemplateId": "T02",
+                   "nodeId": "S05", "processRound": 4, "score": 30,
+                   "expireRound": 320, "active": True, "completed": False,
+                   "failed": False, "ownerPlayerId": 0,
+                   "protectionPlayerId": 0, "routeBucket": P.WATER}
+    gs = gs_front(tasks=(t_s05_water,), obstacle=False)
+    e04_total = gs.graph.edge_total_move(gs.graph.edges["E04"])
+    gs.players[1001].update(currentNodeId="S07", taskScore=60,
+                            resources={}, goodFruit=96, badFruit=1)
+    gs.players[2002].update(state="MOVING", currentNodeId="S07",
+                            nextNodeId="S09", routeEdgeId="E04",
+                            edgeTotalMs=e04_total, edgeProgressMs=1000,
+                            taskScore=60, currentProcess=None)
+    st_water = PlannerStrategy()
+    plan = st_water.planner.plan(gs)
+    a = st_water.main_action(gs, plan)
+    ok &= check("前段走廊: S07 后不为 S05 水路任务反切",
+                plan.kind != "task" and a and a["action"] == "MOVE"
+                and a["targetNodeId"] == "S09",
+                f"{plan} -> {a}")
+
     t_s07_road = {"taskId": "T_S07_ROAD", "taskTemplateId": "T01",
                   "nodeId": "S07", "processRound": 4, "score": 30,
                   "expireRound": 320, "active": True, "completed": False,
@@ -4049,6 +4096,30 @@ def test_front_tempo_tail_follow():
                 plan.kind != "task" and a and a["action"] == "MOVE"
                 and a["targetNodeId"] == "S07",
                 f"{plan} -> {a}")
+
+    t_s10_same = {"taskId": "T_S10_SAME", "taskTemplateId": "T01",
+                  "nodeId": "S10", "processRound": 4, "score": 30,
+                  "expireRound": 420, "active": True, "completed": False,
+                  "failed": False, "ownerPlayerId": 0,
+                  "protectionPlayerId": 0, "routeBucket": P.WATER}
+    gs = gs_replay93("S10", 90, (t_s10_same,), "S09", "S10", "E05",
+                     opp_task_score=120)
+    plan = PlannerStrategy().planner.plan(gs)
+    ok &= check("前段保速: S10 同点 90->120 任务要补",
+                plan.kind == "task" and plan.position == "S10",
+                repr(plan))
+
+    t_s09_same = {"taskId": "T_S09_SAME_LOW", "taskTemplateId": "T01",
+                  "nodeId": "S09", "processRound": 5, "score": 15,
+                  "expireRound": 540, "active": True, "completed": False,
+                  "failed": False, "ownerPlayerId": 0,
+                  "protectionPlayerId": 0, "routeBucket": P.WATER}
+    gs = gs_replay93("S09", 60, (t_s09_same,), "S09", "S10", "E05",
+                     opp_task_score=120)
+    plan = PlannerStrategy().planner.plan(gs)
+    ok &= check("前段保速: S09 低分同点任务不被悬崖价误杀",
+                plan.kind == "task" and plan.position == "S09",
+                repr(plan))
 
     t_s07 = {"taskId": "T_S07_OVER", "taskTemplateId": "T01",
              "nodeId": "S07", "processRound": 4, "score": 30,
