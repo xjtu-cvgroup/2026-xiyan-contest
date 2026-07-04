@@ -161,6 +161,13 @@ class WardenStrategy(BaselineStrategy):
     def _defense_card(self, state, contest):
         me = state.me
         res = me.get("resources") or {}
+        # 码头窗（S02 开局争先手）：双方此时都无马 → 强行不存在 →
+        # 鲜供不败（对鲜供平、对其余全胜）。1 好果/拍；若演化成镜像
+        # 锁死，未交付世界里好果一文不值，烧果免费
+        if contest.get("contestType") == P.CONTEST_DOCK \
+                and me.get("freshness", 0) >= 80 \
+                and me.get("goodFruit", 0) > 10:
+            return P.CARD_XIAN_GONG
         pool = []
         if (me.get("guardActionPoint") or 0) > 0:
             pool.append(P.CARD_BING_ZHENG)   # 克强行（攻方骑马强通的主牌）
@@ -200,6 +207,17 @@ class WardenStrategy(BaselineStrategy):
 
         cur = me.get("currentNodeId")
         gate, terminal = state.gate_node, state.terminal_node
+        remain = state.duration_round - state.round
+
+        # ---- 农任务终局（S02 镜像锁死等场景）----
+        # 我方交付已不可能：分数只剩未交付任务分可挣。但对手还活着时
+        # 必须继续争（让行=放它出去交付）；对手也死了才让行转农
+        if not me.get("verified") \
+                and remain < self._my_need(state, cur) - 5:
+            if self._opp_alive_can_deliver(state, remain):
+                pass          # 对手未死：按原逻辑继续争/驻守拖死它
+            else:
+                return self._farm_endgame(state, cur)
 
         # ---- 交付线 ----
         if cur == terminal:
@@ -389,6 +407,74 @@ class WardenStrategy(BaselineStrategy):
             return P.a_claim_task(t["taskId"])
         return self._claim_en_route(state, cur)
 
+    # ---- 农任务终局 ----
+
+    def _opp_alive_can_deliver(self, state, remain):
+        """还需要用争夺/驻守拖住对手吗？对手已交付/退赛/数学死=不需要。"""
+        opp = state.opp
+        if not opp or opp.get("delivered") or opp.get("retired"):
+            return False
+        pos = opp.get("nextNodeId") or opp.get("currentNodeId")
+        if not pos:
+            return True
+        to_gate, p1 = state.graph.shortest_path(
+            pos, state.gate_node, P.BASE_SPEED)
+        gate_term, p2 = state.graph.shortest_path(
+            state.gate_node, state.terminal_node, P.BASE_SPEED)
+        if not p1 or not p2:
+            return False
+        need = (to_gate + gate_term) * self.OPP_SPEED_MARGIN \
+            + GATE_VERIFY_FRAMES + DELIVER_FRAMES
+        return need <= remain + self.OPP_DEAD_BUFFER
+
+    def _farm_endgame(self, state, cur):
+        """交付双死后的任务分收割：让行出站 → 追最近可达任务 →
+        小分队全转探路标记提速领取。"""
+        me = state.me
+        node = state.node(cur)
+        needs = (node.get("processType") and node.get("processType") != "VERIFY"
+                 and node.get("processRound", 0) > 0)
+        if needs and not self._processed_here:
+            # 奇偶让行防镜像双让锁死：一方先起手，另一方吃 OBJECT_BUSY 排队
+            opp = state.opp
+            opp_here = (opp and not opp.get("routeEdgeId")
+                        and opp.get("currentNodeId") == cur
+                        and not (opp.get("currentProcess") or {}))
+            # 让行边：pid 小的偶帧起手、pid 大的奇帧——互补保证不撞车
+            side = 0 if state.player_id < (state.opp_id or 0) else 1
+            if opp_here and state.round % 2 != side:
+                return P.a_wait()
+            proc = (state.opp.get("currentProcess") or {})
+            if proc.get("targetNodeId") == cur:
+                return P.a_wait()
+            return P.a_process()
+        # 脚下任务直接吃
+        task = self._farm_here(state, cur)
+        if task:
+            return task
+        # 追最近的赶得上的任务
+        best, best_eta = None, float("inf")
+        res = me.get("resources") or {}
+        has_horse = any(res.get(h, 0) > 0
+                        for h in (P.FAST_HORSE, P.SHORT_HORSE))
+        for t in state.claimable_tasks():
+            tpl = t.get("taskTemplateId")
+            if tpl == "T04" or (tpl == "T06" and not has_horse):
+                continue
+            eta, path = state.graph.shortest_path(
+                t["nodeId"], t["nodeId"]) if False else \
+                state.graph.shortest_path(cur, t["nodeId"], state.my_speed())
+            if not path or eta >= best_eta:
+                continue
+            expire = t.get("expireRound") or 0
+            if expire and state.round + eta + 6 > expire:
+                continue
+            best, best_eta = t["nodeId"], eta
+        self._farm_target = best
+        if best:
+            return self._advance(state, cur, best)
+        return P.a_wait()
+
     # ---- 收官判定 ----
 
     def _my_need(self, state, cur):
@@ -467,6 +553,15 @@ class WardenStrategy(BaselineStrategy):
             self._clear_sent[nid] = rnd
             self._squad_spent += 2
             return P.a_squad_clear(nid)
+
+        # 2.4) 农任务终局：人手全转任务点标记（处理帧 -3 提速领取）
+        target = getattr(self, "_farm_target", None)
+        if target and avail >= 1 and not self._has_our_mark(state, target) \
+                and rnd - self._scout_sent.get(target, -999) >= 20 \
+                and self._my_eta(state, target) <= self.SCOUT_DISPATCH_ETA:
+            self._scout_sent[target] = rnd
+            self._squad_spent += 1
+            return P.a_squad_scout(target)
 
         # 2.5) 处理站探路标记：真实 ETA（含边上剩余进度）进入寿命窗口
         #      （≤38）才派——落地早于我们进站、45 帧寿命盖住到站
