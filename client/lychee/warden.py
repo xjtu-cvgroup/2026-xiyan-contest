@@ -404,7 +404,7 @@ class WardenStrategy(BaselineStrategy):
         """S02 镜像码头窗：RUSH 前目标是拖住双方，不是抢先离站。"""
         if cur != "S02" or state.phase == P.PHASE_RUSH:
             return False
-        if state.me.get("verified"):
+        if state.me.get("verified") or self._processed_here:
             return False
         opp = state.opp
         return bool(opp and not opp.get("delivered") and not opp.get("retired")

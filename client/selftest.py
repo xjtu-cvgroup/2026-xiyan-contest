@@ -4560,10 +4560,19 @@ def test_warden_strategy():
     st = WardenStrategy()
     st.camp_node = "S10"
     st._plans_ready = True
+    st._processed_here = False
+    a = st.main_action(gs_at("S02", opp_cur="S02", round_no=220))
+    ok &= check("warden: S02未完成时继续争换乘",
+                a and a["action"] == "PROCESS", str(a))
+
+    st = WardenStrategy()
+    st.camp_node = "S10"
+    st._plans_ready = True
     st._processed_here = True
     a = st.main_action(gs_at("S02", opp_cur="S02", round_no=220))
-    ok &= check("warden: S02 RUSH前同站继续锁局不离站",
-                a and a["action"] == "WAIT", str(a))
+    ok &= check("warden: S02已完成后不原地等待，直奔S10",
+                a and a["action"] == "MOVE" and a.get("targetNodeId") != "S02",
+                str(a))
 
     t_back = {"taskId": "T_BACK", "taskTemplateId": "T01",
               "nodeId": "S05", "processRound": 4, "score": 30,
