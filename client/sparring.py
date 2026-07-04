@@ -238,4 +238,101 @@ class RusherBot(ScriptedBot):
         return self._walk_to(state, state.gate_node) or P.a_wait()
 
 
-BOTS = {"camper": CamperBot, "rusher": RusherBot}
+class FarmerBot(ScriptedBot):
+    """农任务型：巡回抢任务刷分，走廊控制零投入，尾段才动身交付。
+
+    replay36 对手（首卡 r314 的"先农后卡"）的极端化形态，也是主动设卡
+    收益窗口的假设对手——它注定落后走廊竞速、必须晚过关隘。
+    按 match_id 抖动：动身帧 / 任务分上限 / 是否顺路捡冰。
+    """
+
+    LEAVE_ROUND = 380          # 动身帧（S09 起步到交付含处理站 ~205 帧）
+    TASK_CAP = 230
+    DEADLINE_PAD = 100         # 验核 6 + 宫门→终点 + 处理站/攻坚余量
+    PICK_ICE = True
+    RANDOMIZE = True
+
+    def _setup(self, state):
+        if getattr(self, "_cfg_done", False):
+            return
+        self._cfg_done = True
+        if not self.RANDOMIZE:
+            return
+        rng = random.Random(f"{state.match_id}:farmerbot")
+        self.LEAVE_ROUND = rng.randrange(320, 431)
+        self.TASK_CAP = rng.randrange(200, 261)
+        self.PICK_ICE = rng.random() < 0.7
+
+    def bot_action(self, state):
+        self._setup(state)
+        me = state.me
+        if me.get("routeEdgeId"):
+            return None
+        cur = me.get("currentNodeId")
+
+        if me.get("verified"):
+            step = self._walk_to(state, state.terminal_node)
+            if step:
+                return step
+            if cur == state.terminal_node:
+                return P.a_deliver()
+            return P.a_wait()
+
+        # 动态死线：剩余帧不够 走到宫门+验核+走终点 就立刻动身
+        # （首版实测 r380 后从 S05 起步必然未交付——脚本也不该自杀）
+        eta_gate, pg = state.graph.shortest_path(
+            cur, state.gate_node, state.my_speed())
+        deadline = pg and state.round + eta_gate + self.DEADLINE_PAD >= 600
+        leaving = deadline or state.round >= self.LEAVE_ROUND \
+            or (me.get("taskScore", 0) or 0) >= self.TASK_CAP
+        if leaving:
+            res = me.get("resources") or {}
+            if me.get("freshness", 100) < 88 and res.get(P.ICE_BOX, 0) > 0:
+                return P.a_use_resource(P.ICE_BOX)
+            if cur == state.gate_node:
+                if state.phase == P.PHASE_RUSH:
+                    return P.a_verify_gate()
+                return P.a_wait()
+            return self._walk_to(state, state.gate_node) or P.a_wait()
+
+        # 农任务巡回：脚下有任务先做，否则走向最近的活跃任务节点
+        if self.PICK_ICE:
+            claim = self._claim_here(state, (P.ICE_BOX,))
+            if claim:
+                return claim
+        res = me.get("resources") or {}
+        has_horse = any(res.get(h, 0) > 0
+                        for h in (P.FAST_HORSE, P.SHORT_HORSE))
+        # T04 要在障碍点做；T06 领取要消耗一匹马（没马领取被拒，
+        # 每帧重试会把自己钉死到任务过期——首版实测 S09 蹲 150 帧零收）
+        tasks = [t for t in state.claimable_tasks()
+                 if t.get("taskTemplateId") != "T04"
+                 and (t.get("taskTemplateId") != "T06" or has_horse)]
+        here = [t for t in tasks if t.get("nodeId") == cur]
+        if here:
+            return P.a_claim_task(here[0]["taskId"])
+        best = None
+        best_eta = float("inf")
+        for t in tasks:
+            eta, path = state.graph.shortest_path(
+                cur, t["nodeId"], state.my_speed())
+            if not path or eta >= best_eta:
+                continue
+            # 只追赶得上的：到点还得赶在过期前领上（首版实测追了
+            # 114 帧奔 S05，到点任务已过期，交付窗口也搭进去了）
+            expire = t.get("expireRound") or 0
+            if expire and state.round + eta + 6 > expire:
+                continue
+            # 且做完还得赶得上交付：长边一旦踏上就是 80+ 帧的承诺，
+            # 不做"回不了家"的远征（seed5 实测 S07→S04 一步走进死局）
+            back, pb = state.graph.shortest_path(
+                t["nodeId"], state.gate_node, state.my_speed())
+            if not pb or state.round + eta + back + self.DEADLINE_PAD > 600:
+                continue
+            best_eta, best = eta, t["nodeId"]
+        if best:
+            return self._walk_to(state, best) or P.a_wait()
+        return P.a_wait()
+
+
+BOTS = {"camper": CamperBot, "rusher": RusherBot, "farmer": FarmerBot}

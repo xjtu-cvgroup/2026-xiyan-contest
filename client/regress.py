@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """全形态回归矩阵（V3.20 起每轮收尾必跑）：python3 regress.py
 
-镜像 12 局 / 确定性 camper 48 局 / 随机化 camper 48 局 / rusher 24 局，
-输出各形态胜率、margin、未交付清单与画像命中分布。历史基线见
-docs/opp-profile-2026-07-04.md 附表——数字回退即回归。
+镜像 12 局 / 确定性 camper 48 局 / 随机化 camper 48 局 / rusher 24 局 /
+farmer 48 局，输出各形态胜率、margin、未交付清单与画像命中分布。历史
+基线见 docs/opp-profile-2026-07-04.md 与 docs/guard-audit-2026-07-04.md
+附表——数字回退即回归。
 """
 import os
 import sys
@@ -12,7 +13,7 @@ from multiprocessing import Pool
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from arena import run_match, PID_A, PID_B          # noqa: E402
-from sparring import CamperBot, RusherBot          # noqa: E402
+from sparring import CamperBot, RusherBot, FarmerBot   # noqa: E402
 
 
 class FixedCamper(CamperBot):
@@ -29,7 +30,7 @@ def game(spec):
                 + (not r[PID_B]["delivered"]),
                 "prof": (r[PID_A]["oppProfile"], r[PID_B]["oppProfile"])}
     bot = {"camper": CamperBot, "camper_fixed": FixedCamper,
-           "rusher": RusherBot}[kind]
+           "rusher": RusherBot, "farmer": FarmerBot}[kind]
     if seat == "A":
         r = run_match(seed, cls_b=bot)
         us, them = PID_A, PID_B
@@ -44,13 +45,13 @@ def game(spec):
 
 def main():
     specs = ([("mirror", s, None) for s in range(12)]
-             + [(k, s, seat) for k in ("camper", "camper_fixed")
+             + [(k, s, seat) for k in ("camper", "camper_fixed", "farmer")
                 for s in range(24) for seat in ("A", "B")]
              + [("rusher", s, seat) for s in range(12)
                 for seat in ("A", "B")])
     with Pool(10) as p:
         rows = p.map(game, specs)
-    for kind in ("mirror", "camper_fixed", "camper", "rusher"):
+    for kind in ("mirror", "camper_fixed", "camper", "farmer", "rusher"):
         rs = [r for r in rows if r["kind"] == kind]
         n = len(rs)
         w = sum(r["win"] for r in rs)
