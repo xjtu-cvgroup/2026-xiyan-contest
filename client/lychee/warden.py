@@ -67,6 +67,7 @@ class WardenStrategy(BaselineStrategy):
         self._weaken_sent = {}     # nodeId -> 派出帧（被冻自救）
         self._squad_spent = 0
         self._dead_since = None    # 双死判定首次成立的帧（懦夫博弈滞后）
+        self._score_farm_mode = False  # S02 锁死/RUSH 后只抢任务分，不再奔终点
 
     # ================= 初始化 =================
 
@@ -195,8 +196,7 @@ class WardenStrategy(BaselineStrategy):
         # 鲜供不败（对鲜供平、对其余全胜）。1 好果/拍；若演化成镜像
         # 锁死，未交付世界里好果一文不值，烧果免费
         if contest.get("contestType") in (P.CONTEST_DOCK, P.CONTEST_TASK) \
-                and me.get("freshness", 0) >= 80 \
-                and me.get("goodFruit", 0) > 10:
+                and me.get("goodFruit", 0) > 1:
             return P.CARD_XIAN_GONG
         pool = []
         if (me.get("guardActionPoint") or 0) > 0:
@@ -242,8 +242,20 @@ class WardenStrategy(BaselineStrategy):
         # ---- 农任务终局（S02 镜像锁死等场景）----
         # 我方交付已不可能：分数只剩未交付任务分可挣。但对手还活着时
         # 必须继续争（让行=放它出去交付）；对手也死了才让行转农
-        if not me.get("verified") \
-                and remain < self._my_need(state, cur) - 5:
+        if self._score_farm_mode and not me.get("verified"):
+            return self._farm_endgame(state, cur)
+        if self._s02_lock_hold(state, cur):
+            node = state.node(cur)
+            needs = (node.get("processType")
+                     and node.get("processType") != "VERIFY"
+                     and node.get("processRound", 0) > 0)
+            if needs and not self._processed_here:
+                return P.a_process()
+            return P.a_wait()
+
+        farm_deadline = (not me.get("verified")
+                         and remain < self._my_need(state, cur) - 5)
+        if farm_deadline:
             if self._opp_alive_can_deliver(state, remain):
                 # 能守才守：我在关隘/宫门且它去宫门仍必经此处 → 驻守拖死
                 # 它仍有价值；否则（僵持散场/它已越关）我死=立刻转农
@@ -257,10 +269,12 @@ class WardenStrategy(BaselineStrategy):
                         pos, state.gate_node, P.BASE_SPEED)
                     wallable = bool(pth) and cur in pth
                 if not wallable:
+                    self._score_farm_mode = True
                     return self._farm_endgame(state, cur)
             else:
                 # 用户 spec：双死判定成立的那一帧立刻转最优任务，
                 # 不为 9 帧先手多等（早动 = 抢刷新波占位 + 抢短马快马）
+                self._score_farm_mode = True
                 return self._farm_endgame(state, cur)
 
         # ---- 交付线 ----
@@ -279,10 +293,12 @@ class WardenStrategy(BaselineStrategy):
                 if task:
                     return task
                 return P.a_wait()      # 已验核仍守宫门：墙焊到死线再走
+            if cur == gate and self.camp_node == gate:
+                guard = self._depart_guard(state, cur)
+                if guard:
+                    return guard
             return self._advance(state, cur, terminal)
         if cur == gate:
-            if state.phase == P.PHASE_RUSH:
-                return P.a_verify_gate()
             if self.camp_node == gate:
                 guard = self._reactive_guard(state, cur)
                 if guard:
@@ -290,6 +306,8 @@ class WardenStrategy(BaselineStrategy):
                 task = self._farm_here(state, cur)
                 if task:
                     return task
+            if state.phase == P.PHASE_RUSH:
+                return P.a_verify_gate()
             return P.a_wait()
 
         # ---- 固定处理站（途中驿站/码头/水驿必须处理完才能走）----
@@ -327,7 +345,7 @@ class WardenStrategy(BaselineStrategy):
                     oeta, op = state.graph.shortest_path(
                         pos, cur, P.BASE_SPEED)
                     near = bool(op) and oeta <= 12   # 读条4+设卡5+余量
-            if not near:
+            if (not near) or self._my_active_guard(state, cur):
                 task = self._farm_here(state, cur)
                 if task:
                     return task
@@ -367,6 +385,17 @@ class WardenStrategy(BaselineStrategy):
             if stock.get(rt, 0) > 0 and res.get(rt, 0) < 1:
                 return P.a_claim_resource(cur, rt)
         return None
+
+    def _s02_lock_hold(self, state, cur):
+        """S02 镜像码头窗：RUSH 前目标是拖住双方，不是抢先离站。"""
+        if cur != "S02" or state.phase == P.PHASE_RUSH:
+            return False
+        if state.me.get("verified"):
+            return False
+        opp = state.opp
+        return bool(opp and not opp.get("delivered") and not opp.get("retired")
+                    and not opp.get("routeEdgeId")
+                    and opp.get("currentNodeId") == cur)
 
     # ---- 封锁 ----
 
@@ -550,7 +579,7 @@ class WardenStrategy(BaselineStrategy):
         # 现存赶得上的任务优先；没有就驻守刷新候选点等波次（刷新帧
         # r360/420/480 可预测；实战 vs2769 教训：追尸体到点全过期 +
         # 天气边 113 帧 + 干等 54 帧 = 0 任务）
-        best, best_eta = None, float("inf")
+        best, best_rank = None, None
         res = me.get("resources") or {}
         has_horse = any(res.get(h, 0) > 0
                         for h in (P.FAST_HORSE, P.SHORT_HORSE))
@@ -560,12 +589,20 @@ class WardenStrategy(BaselineStrategy):
                 continue
             eta, path = state.graph.shortest_path(
                 cur, t["nodeId"], state.my_speed())
-            if not path or eta >= best_eta:
+            if not path:
                 continue
+            if self._farm_backtrack_step(state, cur, path):
+                continue
+            proc = t.get("processRound", 4) or 4
             expire = t.get("expireRound") or 0
-            if expire and state.round + eta + 8 > expire:
+            if expire and state.round + eta + proc + 2 > expire:
                 continue
-            best, best_eta = t["nodeId"], eta
+            if state.round + eta + proc > state.duration_round:
+                continue
+            back = self._farm_backtrack_step(state, cur, path)
+            rank = (1 if back else 0, -int(t.get("score", 0) or 0), eta)
+            if best_rank is None or rank < best_rank:
+                best, best_rank = t["nodeId"], rank
         if best is None:
             # 无可追实例 → 驻守刷新候选点吃下一波。分桶原则：先手 4 帧
             # 只在争同一实例时值钱——只选"我比对手近"的点，它先出发
@@ -576,27 +613,44 @@ class WardenStrategy(BaselineStrategy):
             opp = state.opp
             opp_pos = opp and (opp.get("nextNodeId")
                                or opp.get("currentNodeId"))
-            fb, fb_eta = None, float("inf")
+            fb, fb_rank = None, None
             for nid in cands:
+                if nid == cur and len(cands) > 1:
+                    continue
                 eta, path = state.graph.shortest_path(
                     cur, nid, state.my_speed())
                 if not path:
                     continue
-                if eta < fb_eta:
-                    fb, fb_eta = nid, eta
+                if state.round + eta > state.duration_round:
+                    continue
+                rank = (1 if self._farm_backtrack_step(state, cur, path)
+                        else 0, eta)
+                if fb_rank is None or rank < fb_rank:
+                    fb, fb_rank = nid, rank
                 if opp_pos:
                     oeta, opath = state.graph.shortest_path(
                         opp_pos, nid, P.BASE_SPEED)
                     if opath and oeta <= eta:
                         continue          # 它更近：让给它，别追尾
-                if eta < best_eta:
-                    best, best_eta = nid, eta
+                if best_rank is None or rank < best_rank:
+                    best, best_rank = nid, rank
             if best is None:
-                best, best_eta = fb, fb_eta
+                best, best_rank = fb, fb_rank
         self._farm_target = best
         if best and best != cur:
             return self._advance(state, cur, best)
         return P.a_wait()   # 已在候选点上：守波次，脚下刷出即被 _farm_here 吃
+
+    def _farm_backtrack_step(self, state, cur, path):
+        """转农后避免 S03->S02 这类向起点折返。"""
+        if not path or len(path) < 2:
+            return False
+        here = state.node(cur)
+        nxt = state.node(path[1])
+        hx, nx = here.get("x", here.get("X")), nxt.get("x", nxt.get("X"))
+        if hx is None or nx is None:
+            return False
+        return nx < hx
 
     # ---- 收官判定 ----
 
@@ -618,20 +672,9 @@ class WardenStrategy(BaselineStrategy):
         opp = state.opp
         if not opp or opp.get("delivered") or opp.get("retired"):
             return True
-        # ① 死线余量；对手长期未逼近关隘且未交付=埋伏流（vs2982 在
-        #    S14 掐我们踏边的形态），多留一张防4卡的风化税提前动身
-        pad = self.EXIT_PAD
-        opp0 = state.opp
-        opos = opp0 and (opp0.get("nextNodeId") or opp0.get("currentNodeId"))
-        if opos != getattr(self, "_opp_last_pos", None):
-            self._opp_last_pos, self._opp_pos_since = opos, state.round
-        opp_static = state.round - getattr(self, "_opp_pos_since", 0) >= 100
-        if opp_static \
-                and state.round - getattr(self, "_last_inbound", 0) > 120 \
-                and cur == self.camp_node \
-                and cur != state.gate_node:   # 宫门→S15 边规则禁卡，无伏可防
-            pad += 90                          # 真埋伏流才提前留卡税
-        if remain <= self._my_need(state, cur) + pad:
+        # ① 死线余量：只看我方最迟出发帧。对手静止多久不是出发条件；
+        #    warden 的目标是焊到最后一刻，不能被"它等了 100 帧"吓走。
+        if remain <= self._my_need(state, cur) + self.EXIT_PAD:
             return True
         # ② 数学判死：对手全速（含骑马余量）也到不了终点
         if True:

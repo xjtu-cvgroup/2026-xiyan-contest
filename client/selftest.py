@@ -20,6 +20,7 @@ from lychee.planner import (TaskPlanner, marginal_task_value,
                             task_component_score, Plan, RUSH_EARLIEST)
 from lychee.state import GameState
 from lychee.strategy import BaselineStrategy, PlannerStrategy
+from lychee.warden import WardenStrategy
 from lychee_basic_client.framing import read_frame, write_frame
 
 DOC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
@@ -4506,6 +4507,114 @@ def test_front_tempo_tail_follow():
     return ok
 
 
+def test_warden_strategy():
+    """exp/v3.96 守望者线：S02 锁局、转农不回头、S10/S14 虚卡墙。"""
+    ok = True
+    with open(os.path.join(DOC_DIR, "start消息.json"), encoding="utf-8") as f:
+        start = json.load(f)["msg_data"]
+    with open(os.path.join(DOC_DIR, "inquire消息.json"), encoding="utf-8") as f:
+        inquire = json.load(f)["msg_data"]
+
+    def gs_at(cur, opp_cur="S09", opp_next=None, opp_edge=None,
+              round_no=320, phase=P.PHASE_NORMAL, verified=False,
+              task_score=0, tasks=()):
+        gs = GameState(1001)
+        gs.on_start(start)
+        d = json.loads(json.dumps(inquire))
+        d["round"] = round_no
+        d["phase"] = phase
+        d["contests"], d["tasks"] = [], list(tasks)
+        d["weather"] = {"active": [], "forecast": []}
+        for p in d["players"]:
+            if p["playerId"] == 1001:
+                p.update(state="IDLE", currentNodeId=cur, nextNodeId=None,
+                         routeEdgeId=None, currentProcess=None, buffs=[],
+                         resources={}, freshness=85.0, goodFruit=70,
+                         badFruit=1, taskScore=task_score,
+                         squadAvailable=8, verified=verified,
+                         delivered=False, retired=False)
+            else:
+                st = "MOVING" if opp_edge else "IDLE"
+                p.update(state=st, currentNodeId=opp_cur, nextNodeId=opp_next,
+                         routeEdgeId=opp_edge, edgeTotalMs=24000,
+                         edgeProgressMs=1000, currentProcess=None,
+                         delivered=False, retired=False, goodFruit=70,
+                         badFruit=1, taskScore=0, squadAvailable=8)
+        for n in d["nodes"]:
+            n["hasObstacle"] = False
+            n["guard"] = None
+            n["resourceStock"] = {}
+            n["scouted"] = []
+            n.pop("processType", None)
+            n["processRound"] = 0
+        if cur == "S02":
+            for n in d["nodes"]:
+                if n["nodeId"] == "S02":
+                    n["processType"] = "前段交接"
+                    n["processRound"] = 4
+        gs.on_inquire(d)
+        return gs
+
+    st = WardenStrategy()
+    st.camp_node = "S10"
+    st._plans_ready = True
+    st._processed_here = True
+    a = st.main_action(gs_at("S02", opp_cur="S02", round_no=220))
+    ok &= check("warden: S02 RUSH前同站继续锁局不离站",
+                a and a["action"] == "WAIT", str(a))
+
+    t_back = {"taskId": "T_BACK", "taskTemplateId": "T01",
+              "nodeId": "S05", "processRound": 4, "score": 30,
+              "expireRound": 600, "active": True, "completed": False,
+              "failed": False, "ownerPlayerId": 0, "protectionPlayerId": 0}
+    st = WardenStrategy()
+    st.camp_node = "S10"
+    st._plans_ready = True
+    st._score_farm_mode = True
+    a = st.main_action(gs_at("S03", round_no=355, phase=P.PHASE_RUSH,
+                             task_score=30, tasks=(t_back,)))
+    ok &= check("warden: 转农不从S03回头S02",
+                a and not (a["action"] == "MOVE" and a["targetNodeId"] == "S02"),
+                str(a))
+
+    t_s10 = {"taskId": "T_S10", "taskTemplateId": "T01",
+             "nodeId": "S10", "processRound": 4, "score": 30,
+             "expireRound": 520, "active": True, "completed": False,
+             "failed": False, "ownerPlayerId": 0, "protectionPlayerId": 0}
+    gs = gs_at("S10", opp_cur="S09", opp_next="S10", opp_edge="E05",
+               round_no=258, tasks=(t_s10,))
+    gs.nodes["S10"]["guard"] = {"ownerTeamId": gs.my_team, "defense": 6,
+                                "maxDefense": 7, "active": True}
+    st = WardenStrategy()
+    st.camp_node = "S10"
+    st._plans_ready = True
+    a = st.main_action(gs)
+    ok &= check("warden: S10有自家卡仍吃脚下任务",
+                a and a["action"] == "CLAIM_TASK" and a["taskId"] == "T_S10",
+                str(a))
+
+    st = WardenStrategy()
+    st.camp_node = "S14"
+    st._plans_ready = True
+    a = st.main_action(gs_at("S14", opp_cur="S13", opp_next="S14",
+                             opp_edge="E09", round_no=452,
+                             phase=P.PHASE_RUSH))
+    ok &= check("warden: S14未验核时反应卡优先于验核",
+                a and a["action"] == "SET_GUARD" and a["targetNodeId"] == "S14",
+                str(a))
+
+    st = WardenStrategy()
+    st.camp_node = "S14"
+    st._plans_ready = True
+    a = st.main_action(gs_at("S14", opp_cur="S13", opp_next="S14",
+                             opp_edge="E09", round_no=520,
+                             phase=P.PHASE_RUSH, verified=True))
+    ok &= check("warden: S14已验核离场前先临别卡",
+                a and a["action"] == "SET_GUARD" and a["targetNodeId"] == "S14",
+                str(a))
+    return ok
+
+
 def main():
     ok = test_codec()
     ok &= test_state_and_strategy()
@@ -4544,6 +4653,7 @@ def main():
     ok &= test_rule_fixes()
     ok &= test_farmer_walkin()
     ok &= test_front_tempo_tail_follow()
+    ok &= test_warden_strategy()
     print()
     print("ALL PASS" if ok else "SOME FAILED")
     sys.exit(0 if ok else 1)
