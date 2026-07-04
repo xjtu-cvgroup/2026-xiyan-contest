@@ -5,8 +5,14 @@
   平台位置参数（任务书 10.2）: python3 main.py <playerId> <host> <port> [playerName]
   官方命名参数（py-cli-26）  : python3 main.py --host H --port P --player-id ID
                                [--player-name NAME] [--version V]
+                               [--strategy planner|warden]
+
+策略选择（对练演练用）：
+  命名参数 --strategy warden，或环境变量 LYCHEE_STRATEGY=warden
+  （位置参数风格下只能用环境变量）。默认 planner（主线策略）。
 """
 import argparse
+import os
 import re
 import socket
 import sys
@@ -18,6 +24,18 @@ from lychee.session import StrategySession
 from lychee.version import BUILD_VERSION
 
 VERSION = BUILD_VERSION
+STRATEGIES = ("planner", "warden")
+
+
+def build_strategy(name, log):
+    """按名字构造策略实例；未知名字回退主线并告警。"""
+    if name == "warden":
+        from lychee.warden import WardenStrategy
+        return WardenStrategy(log)
+    if name != "planner" and log:
+        log.warning("unknown strategy %r, falling back to planner", name)
+    from lychee.strategy import PlannerStrategy
+    return PlannerStrategy(log)
 
 
 def _parse_player_id(raw):
@@ -39,10 +57,14 @@ def parse_cli(argv):
         parser.add_argument("--player-id", type=int, default=1006)
         parser.add_argument("--player-name", default=None)
         parser.add_argument("--version", default=VERSION)
+        parser.add_argument("--strategy", choices=STRATEGIES,
+                            default=os.environ.get("LYCHEE_STRATEGY",
+                                                   "planner"))
         a = parser.parse_args(argv)
-        return Config(host=a.host, port=a.port, player_id=a.player_id,
-                      player_name=a.player_name or f"team-{a.player_id}",
-                      version=a.version)
+        cfg = Config(host=a.host, port=a.port, player_id=a.player_id,
+                     player_name=a.player_name or f"team-{a.player_id}",
+                     version=a.version)
+        return cfg, a.strategy
 
     # 平台位置参数风格
     if len(argv) < 3:
@@ -52,8 +74,9 @@ def parse_cli(argv):
         raise SystemExit(1)
     player_id = _parse_player_id(argv[0])
     name = argv[3] if len(argv) > 3 else f"team-{player_id}"
-    return Config(host=argv[1], port=int(argv[2]), player_id=player_id,
-                  player_name=name, version=VERSION)
+    cfg = Config(host=argv[1], port=int(argv[2]), player_id=player_id,
+                 player_name=name, version=VERSION)
+    return cfg, os.environ.get("LYCHEE_STRATEGY", "planner")
 
 
 def connect_with_retry(host, port, log, retries=30, delay=1.0):
@@ -72,14 +95,17 @@ def connect_with_retry(host, port, log, retries=30, delay=1.0):
 
 
 def main():
-    config = parse_cli(sys.argv[1:])
+    config, strategy_name = parse_cli(sys.argv[1:])
     log = get_logger(config.player_id)
-    log.info("=== lychee client BUILD %s ===", BUILD_VERSION)
+    log.info("=== lychee client BUILD %s strategy=%s ===",
+             BUILD_VERSION, strategy_name)
+    strategy = build_strategy(strategy_name, log)
     sock = connect_with_retry(config.host, config.port, log)
     log.info("connected to %s:%s as player %s (%s)",
              config.host, config.port, config.player_id, config.player_name)
     try:
-        return StrategySession(sock, config, logger=log).run()
+        return StrategySession(sock, config, strategy=strategy,
+                               logger=log).run()
     finally:
         sock.close()
 
