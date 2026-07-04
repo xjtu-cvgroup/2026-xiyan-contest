@@ -2487,6 +2487,97 @@ def test_parting_guard():
     return ok
 
 
+def test_contest_phase():
+    """分段争夺折扣（V3.23）：反事实实测外部性只存在于关前。
+
+    关前 0.5 不动（放宽被 840 局扫描证伪——贴身绕路外部性）；
+    关后 0.9（硬抢真实胜率 97~100%）；对手已交付 1.0（规则上不可能
+    被抢，曾漏检查白砍尾段任务）。"""
+    ok = True
+    with open(os.path.join(DOC_DIR, "start消息.json"), encoding="utf-8") as f:
+        start = json.load(f)["msg_data"]
+    with open(os.path.join(DOC_DIR, "inquire消息.json"), encoding="utf-8") as f:
+        inquire = json.load(f)["msg_data"]
+    from lychee.planner import (TaskPlanner, CONTEST_RISK_DISCOUNT,
+                                POST_CHOKE_CONTEST_DISCOUNT)
+
+    def gs_cp(my_pos, opp_pos, opp_delivered=False, round_no=200,
+              task_at=None):
+        gs = GameState(1001)
+        gs.on_start(start)
+        d = json.loads(json.dumps(inquire))
+        d["round"] = round_no
+        d["contests"], d["tasks"] = [], []
+        d["weather"] = {"active": [], "forecast": []}
+        # 任务放在对手更近的节点（触发争夺折扣需要 opp_eta < f_to）
+        d["tasks"] = [{"taskId": "T_X", "taskTemplateId": "T02",
+                       "name": "测试", "nodeId": task_at or opp_pos,
+                       "active": True,
+                       "completed": False, "failed": False,
+                       "ownerPlayerId": 0, "protectionPlayerId": 0,
+                       "processRound": 4, "score": 30,
+                       "refreshRound": round_no - 10,
+                       "expireRound": round_no + 200}]
+        for p in d["players"]:
+            if p["playerId"] == 1001:
+                p.update(state="IDLE", currentNodeId=my_pos, nextNodeId=None,
+                         routeEdgeId=None, currentProcess=None, buffs=[],
+                         resources={}, freshness=95.0, goodFruit=90,
+                         badFruit=0, taskScore=45)
+            else:
+                p.update(state="IDLE", currentNodeId=opp_pos,
+                         nextNodeId=None, routeEdgeId=None,
+                         currentProcess=None, delivered=opp_delivered,
+                         retired=False, taskScore=0)
+        for n in d["nodes"]:
+            n["hasObstacle"] = False
+            n["guard"] = None
+            n["resourceStock"] = {}
+            n.pop("processType", None)
+            n["processRound"] = 0
+        gs.on_inquire(d)
+        return gs
+
+    def disc(pl, gs):
+        """任务净值反推折扣：对手在任务点同点（gap 恒正）时的 value 缩放。"""
+        me = gs.me
+        cur = me["currentNodeId"]
+        speed = gs.my_speed()
+        pen = pl._penalty_fn(gs)
+        task = gs.tasks[0]
+        r = pl._evaluate(gs, task, cur, 45, 100, 100, 300, speed, pen)
+        return r
+
+    # 1) 关前（S07，前方有武关）对手更近 → 0.5 折扣照旧
+    gs = gs_cp("S07", "S09")
+    pl = TaskPlanner()
+    ok &= check("分段折扣: 关前照旧激进折扣",
+                pl._choke_ahead(gs), "")
+    # 2) 关后（S12，前方无咽喉）→ 不再是 0.5 段
+    gs = gs_cp("S12", "S13")
+    pl2 = TaskPlanner()
+    ok &= check("分段折扣: 关后判定", not pl2._choke_ahead(gs), "")
+    # 3) 行为级：关后对手更近的同一任务，净值高于关前口径（0.9 > 0.5）
+    gs_post = gs_cp("S12", "S13")
+    pl_on = TaskPlanner()
+    r_on = disc(pl_on, gs_post)
+    pl_off = TaskPlanner()
+    pl_off.CONTEST_PHASE_ENABLED = False
+    r_off = disc(pl_off, gs_post)
+    ok &= check("分段折扣: 关后净值高于平折扣口径",
+                r_on is not None and r_off is not None
+                and r_on[0] > r_off[0],
+                f"on={r_on} off={r_off}")
+    # 4) 对手已交付 → 完全不折（净值又高于 0.9 口径；任务同在 S13）
+    gs_done = gs_cp("S12", "S15", opp_delivered=True, task_at="S13")
+    pl3 = TaskPlanner()
+    r_done = disc(pl3, gs_done)
+    ok &= check("分段折扣: 对手已交付不折扣",
+                r_done is not None and r_done[0] > r_on[0],
+                f"done={r_done} post={r_on}")
+    return ok
+
+
 def test_target_stickiness():
     """V3.18 目标粘性：换目标要求 15% 净值优势，消除同级目标间的震荡。"""
     ok = True
@@ -2800,6 +2891,7 @@ def main():
     ok &= test_race_tempo()
     ok &= test_race_cliff()
     ok &= test_parting_guard()
+    ok &= test_contest_phase()
     ok &= test_target_stickiness()
     ok &= test_trap_ransom()
     ok &= test_card_profile()

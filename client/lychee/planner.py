@@ -31,6 +31,12 @@ CONTEST_RISK_DISCOUNT = 0.5  # 对手比我们更近时的估值折扣
 # 没显式定价的"贴身绕路外部性"买单。真要动它，先给走廊外部性建模
 CONTEST_GRACE_FRAMES = 0     # 0 = 现行行为（任何落后都吃满折扣）
 CONTEST_GRACE_DISCOUNT = 0.9
+# 分段争夺折扣（V3.23）：反事实按博弈阶段切分（48 局 2000+ 样本）后
+# 发现外部性完全集中在关前——关后所有 gap 桶硬抢真实胜率 97~100%
+# （走廊已过，没有悬崖可输，输了只亏一趟路），对手已交付后更是规则上
+# 不可能被抢（7.4 + 交付队伍跳过主动作）。0.5 只该活在关前竞速段
+POST_CHOKE_CONTEST_DISCOUNT = 0.9   # 关后：P≈0.98 × 湿件谦逊
+CONTEST_PHASE_ENABLED = True
 # 阻挡节点的寻路惩罚按真实处理代价估：会计入 ETA，不能虚高
 OBSTACLE_PENALTY = 10       # 清障 6 帧读条 + 1 好果 / 强通税 8 帧
 GUARD_PENALTY = 35          # 强通时间税 min(40, 10+防守值×5) 量级
@@ -218,6 +224,9 @@ class TaskPlanner:
         self.CONTEST_RISK_DISCOUNT = CONTEST_RISK_DISCOUNT
         self.CONTEST_GRACE_FRAMES = CONTEST_GRACE_FRAMES
         self.CONTEST_GRACE_DISCOUNT = CONTEST_GRACE_DISCOUNT
+        self.POST_CHOKE_CONTEST_DISCOUNT = POST_CHOKE_CONTEST_DISCOUNT
+        self.CONTEST_PHASE_ENABLED = CONTEST_PHASE_ENABLED
+        self._choke_ahead_cache = (-1, False)
         self.SHADOW_CHOKE_PENALTY = SHADOW_CHOKE_PENALTY
         self.CHOKE_PASS_FALLBACK = True   # 潼关回退（V3.20），A/B 可关
         self.blacklist = {}   # taskId -> 解禁帧（吃到拒绝后临时拉黑）
@@ -670,12 +679,20 @@ class TaskPlanner:
         # 概率低（与资源折扣对称）——曾把走官道的 2614 判定会来抢山地任务
         if self._opp_processing_task(state, task):
             return None
+        opp = state.opp or {}
+        opp_out = opp.get("delivered") or opp.get("retired")
         opp_eta = self._opp_eta(state, pos)
-        if opp_eta < f_to:
+        if opp_eta < f_to and not opp_out:
+            # 分段折扣（V3.23）：对手已交付/退赛不折（规则上不可能被抢，
+            # 曾漏此检查白砍尾段任务）；关后 0.9（反事实 97~100%）；
+            # 关前保持 0.5（含贴身绕路外部性的补偿定价，放宽已被证伪）
             gap = f_to - opp_eta
-            d = (self.CONTEST_GRACE_DISCOUNT
-                 if gap <= self.CONTEST_GRACE_FRAMES
-                 else self.CONTEST_RISK_DISCOUNT)
+            if self.CONTEST_PHASE_ENABLED and not self._choke_ahead(state):
+                d = self.POST_CHOKE_CONTEST_DISCOUNT
+            else:
+                d = (self.CONTEST_GRACE_DISCOUNT
+                     if gap <= self.CONTEST_GRACE_FRAMES
+                     else self.CONTEST_RISK_DISCOUNT)
             if pos not in self._opp_path_nodes(state):
                 d = max(d, self.OFFPATH_RACE_FLOOR)
             value *= d
@@ -787,6 +804,17 @@ class TaskPlanner:
             self._cliff_choke = None
         self._cliff_cache = (state.round, active)
         return active
+
+    def _choke_ahead(self, state):
+        """前方是否还有咽喉（漏斗 ctx 存在）——争夺折扣的阶段判定。"""
+        if self._choke_ahead_cache[0] == state.round:
+            return self._choke_ahead_cache[1]
+        cur = self._anchor_node(state)
+        ctx = self._funnel_ctx(state, cur, self._penalty_fn(state),
+                               self._edge_cost_fn(state)) if cur else None
+        val = bool(ctx)
+        self._choke_ahead_cache = (state.round, val)
+        return val
 
     # ================= 帧价值与辅助 =================
 
