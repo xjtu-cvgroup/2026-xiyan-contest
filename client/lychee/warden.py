@@ -32,6 +32,9 @@ from .strategy import BaselineStrategy
 
 GATE_VERIFY_FRAMES = 6
 DELIVER_FRAMES = 2
+FAST_HORSE_FRAMES = 20
+SHORT_HORSE_FRAMES = 14
+RUSH_SPEED_FRAMES = 15
 FARM_TASK_RACE_MARGIN = 2  # S02转农任务必须真实完成领先，不追同帧/贴身局
 FARM_TASK_CAP = 150        # 未交付刷分以任务基础分封顶为一阶目标
 FARM_CONTEST_DISCOUNT = 0.28
@@ -55,6 +58,8 @@ class WardenStrategy(BaselineStrategy):
     EXIT_PAD = 10              # 终点安全余量：覆盖帧序/天气/处理站量化误差
     FARM_DEAD_PAD = 0          # 真到不了终点才转农；安全垫只用于离墙
     HANDOFF_GUARD_DEFENSE = 2  # S10 卡快风化时提前转 S14 接墙
+    HANDOFF_EXIT_PAD = 10      # S10->S14 接墙只在最后可行窗口内启动
+    GATE_GUARD_DEFENSE = 4     # 宫门 extra=1 拉满防4；只作接墙证明下界
     GUARD_DECAY_FRAMES = 30    # 设卡每 30 帧风化 1 点防守
     OPP_SPEED_MARGIN = 0.8     # 判死时对手 ETA 打折（骑马/疾行令余量）
     OPP_DEAD_BUFFER = 8        # 判死额外缓冲：宁可多守 8 帧不误判
@@ -319,8 +324,8 @@ class WardenStrategy(BaselineStrategy):
         # ---- 最高优先级：我方理论上已到不了终点 → 立刻转农 ----
         # EXIT_PAD 是离墙安全垫，不是放弃交付阈值；否则到 S14 临界帧会
         # 误判成转农 WAIT，白白错过验核/交付。
-        if not me.get("verified") and remain < self._my_need(state, cur) \
-                + self.FARM_DEAD_PAD:
+        if not self._delivery_committed and not me.get("verified") \
+                and remain < self._my_need(state, cur) + self.FARM_DEAD_PAD:
             self._score_farm_mode = True
             return self._farm_endgame(state, cur)
 
@@ -407,7 +412,7 @@ class WardenStrategy(BaselineStrategy):
             return handoff_task
         old_camp = self.camp_node
         leaving = self._should_leave(state, cur)
-        if leaving and cur == old_camp and self.camp_node == old_camp:
+        if leaving and cur == old_camp:
             self._delivery_committed = True
 
         # ---- 竞速段：直奔关隘 ----
@@ -1015,6 +1020,173 @@ class WardenStrategy(BaselineStrategy):
         return self._node_process_frames(
             state, state.gate_node, include_verify=True) or GATE_VERIFY_FRAMES
 
+    @staticmethod
+    def _buff_remaining(buff, default=0):
+        for key in ("remainRound", "remainingRound", "remain", "durationRound"):
+            if buff.get(key) is not None:
+                try:
+                    return max(0, int(buff[key]))
+                except (TypeError, ValueError):
+                    return default
+        return default
+
+    def _active_speed_buff(self, state, player=None, optimistic=False):
+        """当前公开移动增益。未知剩余时长：我方按 1 帧，对手乐观按满额。"""
+        player = player or state.me
+        best = (None, 0, P.BASE_SPEED)
+        defaults = {
+            P.FAST_HORSE: FAST_HORSE_FRAMES,
+            P.SHORT_HORSE: SHORT_HORSE_FRAMES,
+            P.RUSH_SPEED: RUSH_SPEED_FRAMES,
+        }
+        speeds = {
+            P.FAST_HORSE: P.SPEED_FAST_HORSE,
+            P.SHORT_HORSE: P.SPEED_SHORT_HORSE,
+            P.RUSH_SPEED: P.SPEED_RUSH,
+        }
+        for b in player.get("buffs") or []:
+            typ = b.get("type") or b.get("buffType")
+            if typ not in speeds:
+                continue
+            rem = self._buff_remaining(
+                b, defaults[typ] if optimistic else 1)
+            if rem <= 0:
+                continue
+            cand = (typ, rem, speeds[typ])
+            if cand[2] > best[2]:
+                best = cand
+        return best
+
+    @staticmethod
+    def _consume_boost(boost_type, boost_rem, frames):
+        if boost_type and boost_rem > 0:
+            boost_rem = max(0, boost_rem - int(frames))
+            if boost_rem <= 0:
+                return None, 0
+        return boost_type, boost_rem
+
+    @staticmethod
+    def _boost_speed(boost_type):
+        return {
+            P.FAST_HORSE: P.SPEED_FAST_HORSE,
+            P.SHORT_HORSE: P.SPEED_SHORT_HORSE,
+            P.RUSH_SPEED: P.SPEED_RUSH,
+        }.get(boost_type, P.BASE_SPEED)
+
+    def _weather_tax_at(self, state, route_type, abs_round, conservative=True):
+        """按公开天气计算某一帧通行倍率。
+
+        我方账本使用当前/预告天气；对手判死下界可传 conservative=False，
+        等价于给对手晴天极速，避免误判它到不了。
+        """
+        if not conservative:
+            return 1000
+        weather = state.weather or {}
+        for w in weather.get("active") or []:
+            rem = w.get("remainRound") or w.get("remainingRound") or 0
+            if state.round <= abs_round < state.round + rem:
+                tax = P.WEATHER_MOVE_TAX.get((w.get("type"), route_type))
+                if tax:
+                    return tax
+        for w in weather.get("forecast") or []:
+            start = w.get("startRound") or w.get("start") or 10 ** 9
+            dur = w.get("durationRound") or w.get("duration") or 0
+            if start <= abs_round < start + dur:
+                tax = P.WEATHER_MOVE_TAX.get((w.get("type"), route_type))
+                if tax:
+                    return tax
+        return 1000
+
+    def _edge_dynamic_frames(self, state, edge, elapsed, boost_type, boost_rem,
+                             conservative_weather=True):
+        """逐帧推进一条边，真实消耗有限时长的马/疾行。"""
+        need = state.graph.edge_total_move(edge)
+        moved = 0
+        frames = 0
+        route_type = edge.get("routeType")
+        while moved < need and frames < 1000:
+            speed = self._boost_speed(boost_type) if boost_rem > 0 \
+                else P.BASE_SPEED
+            tax = self._weather_tax_at(
+                state, route_type, state.round + elapsed + frames,
+                conservative=conservative_weather)
+            moved += max(1, int(speed * 1000 / tax))
+            frames += 1
+            if boost_rem > 0:
+                boost_rem -= 1
+                if boost_rem <= 0:
+                    boost_type = None
+        return frames, boost_type, boost_rem
+
+    def _travel_dynamic(self, state, src, dst, boost_type=None, boost_rem=0,
+                        start_elapsed=0, include_current_process=False,
+                        include_intermediate_process=True,
+                        conservative_weather=True, return_boost=False):
+        """规则口径 ETA：路线距离/类型 + 公开天气 + 有限马/疾行时长。
+
+        Dijkstra 状态携带 boost_rem，确保疾行令 15 帧、快马 20 帧、短马
+        14 帧不会被错误套到整段终局路线。
+        """
+        import heapq
+        if not src or not dst:
+            if return_boost:
+                return 999, [], None, 0
+            return 999, []
+        init_type, init_rem = boost_type, boost_rem
+        elapsed0 = int(start_elapsed)
+        if include_current_process:
+            proc = self._node_process_frames(state, src)
+            elapsed0 += proc
+            init_type, init_rem = self._consume_boost(init_type, init_rem, proc)
+        if src == dst:
+            if return_boost:
+                return elapsed0, [src], init_type, init_rem
+            return elapsed0, [src]
+        start_state = (src, init_type or "", int(init_rem))
+        dist = {start_state: elapsed0}
+        prev = {}
+        pq = [(elapsed0, start_state)]
+        best_state = None
+        while pq:
+            elapsed, cur_state = heapq.heappop(pq)
+            if elapsed > dist.get(cur_state, 999):
+                continue
+            node_id, btype, brem = cur_state
+            btype = btype or None
+            if node_id == dst:
+                best_state = cur_state
+                break
+            for nb, edge in state.graph.neighbors(node_id):
+                ef, nb_type, nb_rem = self._edge_dynamic_frames(
+                    state, edge, elapsed, btype, brem,
+                    conservative_weather=conservative_weather)
+                nd = elapsed + ef
+                if include_intermediate_process and nb != dst:
+                    proc = self._node_process_frames(state, nb)
+                    if proc:
+                        nd += proc
+                        nb_type, nb_rem = self._consume_boost(
+                            nb_type, nb_rem, proc)
+                nxt_state = (nb, nb_type or "", int(nb_rem))
+                if nd < dist.get(nxt_state, 999):
+                    dist[nxt_state] = nd
+                    prev[nxt_state] = cur_state
+                    heapq.heappush(pq, (nd, nxt_state))
+        if best_state is None:
+            if return_boost:
+                return 999, [], None, 0
+            return 999, []
+        path = [best_state[0]]
+        cur_state = best_state
+        while cur_state != start_state:
+            cur_state = prev[cur_state]
+            path.append(cur_state[0])
+        path.reverse()
+        _, final_type, final_rem = best_state
+        if return_boost:
+            return dist[best_state], path, final_type or None, final_rem
+        return dist[best_state], path
+
     def _delivery_need(self, state, cur, speed, move_factor=1.0,
                        include_current_process=False):
         """从 cur 到可交付的真实剩余帧：边长 + 处理中转 + 验核 + 交付。
@@ -1040,12 +1212,29 @@ class WardenStrategy(BaselineStrategy):
                                    and node.get("processType") != "VERIFY"
                                    and (node.get("processRound") or 0) > 0
                                    and not self._node_processed(state, cur))
-        speed = P.SPEED_RUSH if self._can_rush_speed(state) \
-            else state.my_speed()
-        start_cost = 1 if speed == P.SPEED_RUSH \
-            and not state.has_move_buff() else 0
-        return start_cost + self._delivery_need(
-            state, cur, speed, include_current_process=include_current)
+        boost_type, boost_rem, _ = self._active_speed_buff(state)
+        start_cost = 0
+        if not boost_type and self._can_rush_speed(state):
+            # 疾行令占主车队动作；本帧不能同时 MOVE，但下一帧起有 15 帧增益。
+            boost_type, boost_rem = P.RUSH_SPEED, RUSH_SPEED_FRAMES
+            start_cost = 1
+        to_gate, _, boost_type, boost_rem = self._travel_dynamic(
+            state, cur, state.gate_node, boost_type, boost_rem,
+            start_elapsed=start_cost,
+            include_current_process=include_current,
+            conservative_weather=True, return_boost=True)
+        if to_gate >= 999:
+            return 999
+        verify = self._gate_verify_frames(state)
+        boost_type, boost_rem = self._consume_boost(
+            boost_type, boost_rem, verify)
+        gate_term, _ = self._travel_dynamic(
+            state, state.gate_node, state.terminal_node,
+            boost_type, boost_rem, start_elapsed=to_gate + verify,
+            conservative_weather=True)
+        if gate_term >= 999:
+            return 999
+        return gate_term + DELIVER_FRAMES
 
     def _beats_opp_to_task(self, state, task, my_eta, proc, opp_pos):
         return self._farm_task_race_factor(
@@ -1069,21 +1258,38 @@ class WardenStrategy(BaselineStrategy):
         #    warden 的目标是焊到最后一刻，不能被"它等了 100 帧"吓走。
         if remain <= self._my_need(state, cur) + self.EXIT_PAD:
             return True
-        # ② 数学判死：对手全速（含骑马余量）也到不了终点
-        if True:
-            pos = opp.get("nextNodeId") or opp.get("currentNodeId")
-            if pos:
-                opp_need = self._delivery_need(
-                    state, pos, P.BASE_SPEED,
-                    move_factor=self.OPP_SPEED_MARGIN)
-                if opp_need < 999 and opp_need > remain + self.OPP_DEAD_BUFFER:
-                    if self.log:
-                        self.log.info(
-                            "warden: opp mathematically dead "
-                            "(need %.0f > remain %d), leaving",
-                            opp_need, remain)
-                    return True
+        # ② 数学判死：只能用对手最快下界判死。这里故意不计处理中转/验核，
+        # 也按疾行速度打折；若这个理想下界都超时，才算真的死。
+        pos = opp.get("nextNodeId") or opp.get("currentNodeId")
+        if pos:
+            opp_need = self._opp_delivery_lower_bound(state, pos)
+            if opp_need < 999 and opp_need > remain + self.OPP_DEAD_BUFFER:
+                if self.log:
+                    self.log.info(
+                        "warden: opp mathematically dead "
+                        "(lower-bound need %.0f > remain %d), leaving",
+                        opp_need, remain)
+                return True
         return False
+
+    def _opp_delivery_lower_bound(self, state, cur):
+        """对手可交付时间下界：只用于判死，必须极度保守。
+
+        不加中途处理站/宫门验核/起手急策帧；给对手完整 15 帧疾行，
+        并忽略天气减速。只有这份极限账本都来不及时，才算真的死。
+        """
+        to_gate, p1, boost_type, boost_rem = self._travel_dynamic(
+            state, cur, state.gate_node, P.RUSH_SPEED, RUSH_SPEED_FRAMES,
+            include_intermediate_process=False,
+            conservative_weather=False, return_boost=True)
+        gate_term, p2 = self._travel_dynamic(
+            state, state.gate_node, state.terminal_node,
+            boost_type, boost_rem, start_elapsed=to_gate,
+            include_intermediate_process=False,
+            conservative_weather=False)
+        if not p1 or not p2:
+            return 999
+        return max(0, gate_term * self.OPP_SPEED_MARGIN) + DELIVER_FRAMES
 
     def _eta_to_gate(self, state, cur, speed, include_current=False):
         frames, path = self._shortest(state, cur, state.gate_node, speed)
@@ -1151,38 +1357,66 @@ class WardenStrategy(BaselineStrategy):
                 and edge_remain >= self.GUARD_MIN_LEAD:
             return None
         remain = state.duration_round - state.round
-        if self._my_need(state, cur) >= remain:
+        if self._my_need(state, cur) + self.EXIT_PAD >= remain:
             return None
 
-        my_speed = P.SPEED_RUSH if self._can_rush_speed(state) \
-            else state.my_speed()
-        my_gate_eta = self._eta_to_gate(state, cur, my_speed)
-        if my_speed == P.SPEED_RUSH and not state.has_move_buff():
-            my_gate_eta += 1       # 本帧先开疾行令，下帧才开始移动
-        if my_gate_eta == float("inf"):
+        boost_type, boost_rem, _ = self._active_speed_buff(state)
+        start_cost = 0
+        if not boost_type and self._can_rush_speed(state):
+            boost_type, boost_rem = P.RUSH_SPEED, RUSH_SPEED_FRAMES
+            start_cost = 1
+        my_gate_eta, path = self._travel_dynamic(
+            state, cur, state.gate_node, boost_type, boost_rem,
+            start_elapsed=start_cost, conservative_weather=True)
+        if not path:
             return None
 
-        # 对手被当前墙挡到风化，再按最乐观疾行速度冲宫门。
+        # 对手被当前墙挡到风化，再按最乐观规则冲宫门：
+        # 不计天气/中转处理，只要这个下界仍能接死才允许换墙。
         opp_gate_eta = max(edge_remain, self._my_guard_remaining(state, cur))
-        opp_gate_eta += self._eta_to_gate(state, cur, P.SPEED_RUSH)
-        if opp_gate_eta == float("inf"):
+        opp_to_gate, path = self._travel_dynamic(
+            state, cur, state.gate_node, P.RUSH_SPEED, RUSH_SPEED_FRAMES,
+            include_intermediate_process=False, conservative_weather=False)
+        if not path:
             return None
+        opp_gate_eta += opp_to_gate
 
         slack = opp_gate_eta - my_gate_eta - self.GUARD_MIN_LEAD
         if slack < 0:
             return None
-
-        gate_wall = 4 * self.GUARD_DECAY_FRAMES
-        gate_term, path = self._shortest(
-            state, state.gate_node, state.terminal_node, P.SPEED_RUSH)
-        if not path:
+        if slack > self.HANDOFF_EXIT_PAD:
             return None
-        opp_after_wall_delivery = opp_gate_eta + gate_wall \
-            + self._gate_verify_frames(state) + gate_term + DELIVER_FRAMES
+
+        gate_wall = self._gate_wall_hold_lower_bound(state)
+        after_gate = self._opp_delivery_lower_bound(state, state.gate_node)
+        if after_gate >= 999:
+            return None
+        opp_after_wall_delivery = opp_gate_eta + gate_wall + after_gate
         if opp_after_wall_delivery <= remain:
             return None
         return {"slack": slack, "my_gate_eta": my_gate_eta,
                 "opp_gate_eta": opp_gate_eta}
+
+    def _gate_wall_hold_lower_bound(self, state):
+        """S14 墙能拖住对手多久的保守下界。
+
+        对手有足够果子或非 RUSH 期能用小分队补足破防时，不能把宫门卡
+        当作 120 帧自然风化墙；接墙证明必须按它会被快速打穿处理。
+        """
+        opp = state.opp or {}
+        good = opp.get("goodFruit")
+        bad = opp.get("badFruit")
+        if good is None or bad is None:
+            return 0
+        attack = min(2, max(0, good)) * 2 + min(2, max(0, bad)) * 3
+        if attack >= self.GATE_GUARD_DEFENSE:
+            return 0
+        squad = opp.get("squadAvailable")
+        if state.phase != P.PHASE_RUSH and squad is not None \
+                and squad >= self.SQUAD_WEAKEN_COST \
+                and attack + 2 >= self.GATE_GUARD_DEFENSE:
+            return 0
+        return self.GATE_GUARD_DEFENSE * self.GUARD_DECAY_FRAMES
 
     def _can_rush_speed(self, state):
         me = state.me
