@@ -31,7 +31,7 @@ from .strategy import BaselineStrategy
 
 GATE_VERIFY_FRAMES = 6
 DELIVER_FRAMES = 2
-STATION_PAD = 10           # 最短路不含途中固定处理站读条，补齐
+FARM_TASK_RACE_MARGIN = 2  # S02转农任务必须真实完成领先，不追同帧/贴身局
 
 
 class WardenStrategy(BaselineStrategy):
@@ -617,14 +617,10 @@ class WardenStrategy(BaselineStrategy):
         pos = opp.get("nextNodeId") or opp.get("currentNodeId")
         if not pos:
             return True
-        to_gate, p1 = state.graph.shortest_path(
-            pos, state.gate_node, P.BASE_SPEED)
-        gate_term, p2 = state.graph.shortest_path(
-            state.gate_node, state.terminal_node, P.BASE_SPEED)
-        if not p1 or not p2:
+        need = self._delivery_need(state, pos, P.BASE_SPEED,
+                                   move_factor=self.OPP_SPEED_MARGIN)
+        if need >= 999:
             return False
-        need = (to_gate + gate_term) * self.OPP_SPEED_MARGIN \
-            + GATE_VERIFY_FRAMES + DELIVER_FRAMES
         return need <= remain      # 零缓冲：它数学死即死，秒让抢农起跑
 
     def _farm_endgame(self, state, cur):
@@ -686,11 +682,8 @@ class WardenStrategy(BaselineStrategy):
                 continue
             if state.round + eta + proc > state.duration_round:
                 continue
-            if opp_pos:
-                oeta, opath = state.graph.shortest_path(
-                    opp_pos, t["nodeId"], P.BASE_SPEED)
-                if opath and oeta <= eta:
-                    continue          # 它更近/同距：别跟屁股，换线抢别的桶
+            if not self._beats_opp_to_task(state, t, eta, proc, opp_pos):
+                continue          # 它更近/贴身完成：别跟屁股，换线抢别的桶
             back = self._farm_backtrack_step(state, cur, path)
             rank = (1 if back else 0, -int(t.get("score", 0) or 0), eta)
             if best_rank is None or rank < best_rank:
@@ -717,12 +710,12 @@ class WardenStrategy(BaselineStrategy):
                 if self._farm_backtrack_step(state, cur, path):
                     continue
                 rank = (0, eta)
-                if fb_rank is None or rank < fb_rank:
+                if not opp_pos and (fb_rank is None or rank < fb_rank):
                     fb, fb_rank = nid, rank
                 if opp_pos:
                     oeta, opath = state.graph.shortest_path(
                         opp_pos, nid, P.BASE_SPEED)
-                    if opath and oeta <= eta:
+                    if opath and oeta <= eta + FARM_TASK_RACE_MARGIN:
                         continue          # 它更近：让给它，别追尾
                 if best_rank is None or rank < best_rank:
                     best, best_rank = nid, rank
@@ -746,15 +739,71 @@ class WardenStrategy(BaselineStrategy):
 
     # ---- 收官判定 ----
 
-    def _my_need(self, state, cur):
+    def _node_process_frames(self, state, node_id, include_verify=False):
+        """读当前地图的固定处理帧；宫门验核单独按 include_verify 计入。"""
+        node = state.node(node_id)
+        proc = node.get("processRound") or 0
+        if proc <= 0:
+            return 0
+        ptype = node.get("processType")
+        is_gate = node_id == state.gate_node or ptype == "VERIFY"
+        if is_gate:
+            return proc if include_verify else 0
+        return proc if ptype else 0
+
+    def _path_process_frames(self, state, path, include_current=False):
+        """最短路上的中途固定处理站读条，随地图 JSON 动态变化。"""
+        total = 0
+        for i, nid in enumerate(path or []):
+            if i == 0 and not include_current:
+                continue
+            if nid == state.gate_node or nid == state.terminal_node:
+                continue
+            total += self._node_process_frames(state, nid)
+        return total
+
+    def _gate_verify_frames(self, state):
+        return self._node_process_frames(
+            state, state.gate_node, include_verify=True) or GATE_VERIFY_FRAMES
+
+    def _delivery_need(self, state, cur, speed, move_factor=1.0,
+                       include_current_process=False):
+        """从 cur 到可交付的真实剩余帧：边长 + 处理中转 + 验核 + 交付。
+
+        move_factor 只作用在移动帧上；处理/验核读条不因对手速度余量打折。
+        """
         g = state.graph
-        to_gate, p1 = g.shortest_path(cur, state.gate_node, state.my_speed())
+        to_gate, p1 = g.shortest_path(cur, state.gate_node, speed)
         gate_term, p2 = g.shortest_path(state.gate_node, state.terminal_node,
-                                        state.my_speed())
+                                        speed)
         if not p1 or not p2:
             return 999
-        return (to_gate + GATE_VERIFY_FRAMES + gate_term + DELIVER_FRAMES
-                + STATION_PAD)
+        proc = self._path_process_frames(
+            state, p1, include_current=include_current_process)
+        return (to_gate + gate_term) * move_factor + proc \
+            + self._gate_verify_frames(state) + DELIVER_FRAMES
+
+    def _my_need(self, state, cur):
+        include_current = False
+        if cur != state.gate_node:
+            node = state.node(cur)
+            include_current = bool(node.get("processType")
+                                   and node.get("processType") != "VERIFY"
+                                   and (node.get("processRound") or 0) > 0
+                                   and not self._processed_here)
+        return self._delivery_need(state, cur, state.my_speed(),
+                                   include_current_process=include_current)
+
+    def _beats_opp_to_task(self, state, task, my_eta, proc, opp_pos):
+        if not opp_pos:
+            return True
+        oeta, opath = state.graph.shortest_path(
+            opp_pos, task["nodeId"], P.BASE_SPEED)
+        if not opath:
+            return True
+        my_finish = state.round + my_eta + proc
+        opp_finish = state.round + oeta + proc
+        return my_finish + FARM_TASK_RACE_MARGIN < opp_finish
 
     def _should_leave(self, state, cur):
         rnd = state.round
@@ -772,20 +821,16 @@ class WardenStrategy(BaselineStrategy):
         if True:
             pos = opp.get("nextNodeId") or opp.get("currentNodeId")
             if pos:
-                to_gate, p1 = state.graph.shortest_path(
-                    pos, state.gate_node, P.BASE_SPEED)
-                gate_term, p2 = state.graph.shortest_path(
-                    state.gate_node, state.terminal_node, P.BASE_SPEED)
-                if p1 and p2:
-                    opp_need = (to_gate + gate_term) * self.OPP_SPEED_MARGIN \
-                        + GATE_VERIFY_FRAMES + DELIVER_FRAMES
-                    if opp_need > remain + self.OPP_DEAD_BUFFER:
-                        if self.log:
-                            self.log.info(
-                                "warden: opp mathematically dead "
-                                "(need %.0f > remain %d), leaving",
-                                opp_need, remain)
-                        return True
+                opp_need = self._delivery_need(
+                    state, pos, P.BASE_SPEED,
+                    move_factor=self.OPP_SPEED_MARGIN)
+                if opp_need < 999 and opp_need > remain + self.OPP_DEAD_BUFFER:
+                    if self.log:
+                        self.log.info(
+                            "warden: opp mathematically dead "
+                            "(need %.0f > remain %d), leaving",
+                            opp_need, remain)
+                    return True
         return False
 
     # ================= 小分队 =================

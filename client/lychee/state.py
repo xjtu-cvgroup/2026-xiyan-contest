@@ -53,8 +53,22 @@ class GameState:
         game_play = (d.get("map") or {}).get("gameplay") or {}
         self.roles = game_play.get("roles") or {}
 
+        process_nodes = {
+            p["nodeId"]: p for p in game_play.get("processNodes") or []
+            if p.get("nodeId")
+        }
         nodes = d.get("nodes") or (d.get("map") or {}).get("nodes") or []
-        self.static_nodes = {n["nodeId"]: n for n in nodes}
+        normalized = []
+        for n in nodes:
+            node = dict(n)
+            if "nodeType" not in node and node.get("type"):
+                node["nodeType"] = node["type"]
+            proc = process_nodes.get(node.get("nodeId")) or {}
+            for k in ("processType", "processRound", "canWindow"):
+                if k not in node and k in proc:
+                    node[k] = proc[k]
+            normalized.append(node)
+        self.static_nodes = {n["nodeId"]: n for n in normalized}
 
         edges = d.get("edges") or (d.get("map") or {}).get("edges") or []
         self.graph = MapGraph(edges)
@@ -71,7 +85,22 @@ class GameState:
         self.round = d["round"]
         self.phase = d.get("phase", P.PHASE_NORMAL)
         self.players = {p["playerId"]: p for p in d.get("players", [])}
-        self.nodes = {n["nodeId"]: n for n in d.get("nodes", [])}
+        merged_nodes = {}
+        for n in d.get("nodes", []):
+            node_id = n.get("nodeId")
+            if not node_id:
+                continue
+            base = self.static_nodes.get(node_id) or {}
+            node = dict(base)
+            node.update(n)
+            if "nodeType" not in node and node.get("type"):
+                node["nodeType"] = node["type"]
+            if "processRound" not in n and "processType" not in n:
+                for k in ("processType", "processRound", "canWindow"):
+                    if k in base:
+                        node[k] = base[k]
+            merged_nodes[node_id] = node
+        self.nodes = merged_nodes
         self.tasks = d.get("tasks") or []
         self.bounties = d.get("bounties") or []
         self.contests = d.get("contests") or []

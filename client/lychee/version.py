@@ -187,4 +187,8 @@
 # 3.96.14 = S02 假锁止损：码头窗鲜度<80 时不再提交非法献贡，改用兵争/
 #        弃权防 RESOURCE_NOT_ENOUGH；献贡不可用或 RUSH 已到时，未完成
 #        S02 也切入转农处理，优先抢任务分而不是继续开无效窗口。
-BUILD_VERSION = "3.96.14-s02-lock-spent-farm"
+# 3.96.15 = 守望者动态死线：raw 地图 processNodes/type 归一化入节点；
+#        S10/S14 离场账本改为地图最短路 + 路径处理站 processRound +
+#        宫门 VERIFY 读条，不再用固定 STATION_PAD/GATE 常数；S02 RUSH
+#        转农任务必须完成时间明确赢过对手，贴身/同帧任务不追。
+BUILD_VERSION = "3.96.15-dynamic-depart-task-race"

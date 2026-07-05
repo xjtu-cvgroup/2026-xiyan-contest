@@ -20,7 +20,7 @@ from lychee.planner import (TaskPlanner, marginal_task_value,
                             task_component_score, Plan, RUSH_EARLIEST)
 from lychee.state import GameState
 from lychee.strategy import BaselineStrategy, PlannerStrategy
-from lychee.warden import WardenStrategy
+from lychee.warden import DELIVER_FRAMES, WardenStrategy
 from lychee_basic_client.framing import read_frame, write_frame
 
 DOC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
@@ -89,6 +89,26 @@ def test_state_and_strategy():
     ok &= check("start: 资源配置回退 gameplay", len(gs.resource_config) > 0,
                 f"{len(gs.resource_config)} entries")
 
+    raw_map_start = json.loads(json.dumps(start))
+    raw_nodes = raw_map_start.get("nodes") or raw_map_start.get("map", {}).get("nodes") or []
+    for n in raw_nodes:
+        n.pop("nodeType", None)
+        n.pop("processType", None)
+        n.pop("processRound", None)
+        if n.get("nodeId") == "S14":
+            n["type"] = "GATE"
+    raw_gp = raw_map_start.setdefault("map", {}).setdefault("gameplay", {})
+    raw_gp["processNodes"] = [
+        {"nodeId": "S14", "processType": "VERIFY", "processRound": 9,
+         "canWindow": True}
+    ]
+    gs_raw = GameState(1001)
+    gs_raw.on_start(raw_map_start)
+    ok &= check("start: raw地图processNodes合入节点",
+                gs_raw.node("S14").get("processRound") == 9
+                and gs_raw.node("S14").get("nodeType") == "GATE",
+                str(gs_raw.node("S14")))
+
     # 寻路：S01 -> S14 存在路径且帧数合理
     frames, path = gs.graph.shortest_path("S01", "S14")
     ok &= check("寻路 S01->S14", 0 < frames < 600, f"{frames} 帧, path={'>'.join(path)}")
@@ -105,6 +125,17 @@ def test_state_and_strategy():
                 f"pos={me.get('currentNodeId')} state={me.get('state')}")
     ok &= check("inquire: 增益识别", gs.has_move_buff() and gs.my_speed() == P.SPEED_RUSH,
                 f"speed={gs.my_speed()}")
+
+    raw_inquire = json.loads(json.dumps(inquire))
+    for n in raw_inquire["nodes"]:
+        if n.get("nodeId") == "S14":
+            n.pop("processType", None)
+            n.pop("processRound", None)
+            n.pop("nodeType", None)
+    gs_raw.on_inquire(raw_inquire)
+    ok &= check("inquire: 缺省processRound回退静态地图",
+                gs_raw.node("S14").get("processRound") == 9,
+                str(gs_raw.node("S14")))
 
     # 策略：样例中自己 PROCESSING，主车队应不出动作；有窗口则出牌
     st = BaselineStrategy()
@@ -4560,6 +4591,10 @@ def test_warden_strategy():
         gs.on_inquire(d)
         return gs
 
+    def set_proc(gs, node_id, proc_type, frames):
+        gs.nodes[node_id]["processType"] = proc_type
+        gs.nodes[node_id]["processRound"] = frames
+
     st = WardenStrategy()
     st.camp_node = "S10"
     st._plans_ready = True
@@ -4745,6 +4780,43 @@ def test_warden_strategy():
     ok &= check("warden: S14对手未踏边不提前临别卡",
                 a and a["action"] != "SET_GUARD",
                 str(a))
+
+    gs = gs_at("S10", round_no=420, phase=P.PHASE_RUSH)
+    set_proc(gs, "S11", "TRANSFER", 7)
+    set_proc(gs, "S13", "TRANSFER", 5)
+    set_proc(gs, "S14", "VERIFY", 9)
+    st = WardenStrategy()
+    to_gate, p1 = gs.graph.shortest_path("S10", gs.gate_node,
+                                         gs.my_speed())
+    gate_term, _ = gs.graph.shortest_path(gs.gate_node, gs.terminal_node,
+                                          gs.my_speed())
+    proc = (7 if "S11" in p1 else 0) + (5 if "S13" in p1 else 0)
+    expected = to_gate + proc + 9 + gate_term + DELIVER_FRAMES
+    ok &= check("warden: S10离场账本随地图处理站动态计算",
+                st._my_need(gs, "S10") == expected,
+                f"need={st._my_need(gs, 'S10')} expected={expected}")
+
+    gs = gs_at("S14", round_no=520, phase=P.PHASE_RUSH)
+    set_proc(gs, "S11", "TRANSFER", 7)
+    set_proc(gs, "S13", "TRANSFER", 5)
+    set_proc(gs, "S14", "VERIFY", 9)
+    st = WardenStrategy()
+    gate_term, _ = gs.graph.shortest_path(gs.gate_node, gs.terminal_node,
+                                          gs.my_speed())
+    expected = 9 + gate_term + DELIVER_FRAMES
+    ok &= check("warden: S14起步不再吃固定STATION_PAD",
+                st._my_need(gs, "S14") == expected,
+                f"need={st._my_need(gs, 'S14')} expected={expected}")
+
+    gs = gs_at("S02", opp_cur="S02", round_no=380, phase=P.PHASE_RUSH)
+    st = WardenStrategy()
+    t_race = {"taskId": "T_RACE", "taskTemplateId": "T01",
+              "nodeId": "S04", "processRound": 4}
+    opp_eta, _ = gs.graph.shortest_path("S02", "S04", P.BASE_SPEED)
+    ok &= check("warden: S02转农只快1帧不算能做过对手",
+                not st._beats_opp_to_task(gs, t_race, opp_eta - 1, 4,
+                                          "S02"),
+                f"opp_eta={opp_eta}")
     return ok
 
 
