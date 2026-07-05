@@ -32,6 +32,13 @@ from .strategy import BaselineStrategy
 GATE_VERIFY_FRAMES = 6
 DELIVER_FRAMES = 2
 FARM_TASK_RACE_MARGIN = 2  # S02转农任务必须真实完成领先，不追同帧/贴身局
+FARM_TASK_CAP = 150        # 未交付刷分以任务基础分封顶为一阶目标
+FARM_CONTEST_DISCOUNT = 0.28
+FARM_REFRESH_VALUE = 8     # 无活跃任务时，蹲任务候选点的保底期望
+FARM_RESOURCE_VALUE = {
+    P.FAST_HORSE: 16,
+    P.SHORT_HORSE: 11,
+}
 
 
 class WardenStrategy(BaselineStrategy):
@@ -682,10 +689,12 @@ class WardenStrategy(BaselineStrategy):
                 continue
             if state.round + eta + proc > state.duration_round:
                 continue
-            if not self._beats_opp_to_task(state, t, eta, proc, opp_pos):
-                continue          # 它更近/贴身完成：别跟屁股，换线抢别的桶
+            ev = self._farm_task_expected_value(state, t, eta, proc, opp_pos)
+            if ev <= 0:
+                continue          # 它必先完成：别追尸体，换线抢别的桶
             back = self._farm_backtrack_step(state, cur, path)
-            rank = (1 if back else 0, -int(t.get("score", 0) or 0), eta)
+            busy = max(1, eta + proc)
+            rank = (1 if back else 0, -ev / busy, -ev, eta)
             if best_rank is None or rank < best_rank:
                 best, best_rank = t["nodeId"], rank
         if best is None:
@@ -695,6 +704,9 @@ class WardenStrategy(BaselineStrategy):
             cands = set()
             for nodes in (state.task_candidates or {}).values():
                 cands.update(nodes)
+            for nid, node in state.nodes.items():
+                if self._farm_visible_resource_value(state, nid) > 0:
+                    cands.add(nid)
             fb, fb_rank = None, None
             for nid in cands:
                 if nid == cur and len(cands) > 1:
@@ -709,14 +721,17 @@ class WardenStrategy(BaselineStrategy):
                     continue
                 if self._farm_backtrack_step(state, cur, path):
                     continue
-                rank = (0, eta)
-                if not opp_pos and (fb_rank is None or rank < fb_rank):
+                value = (FARM_REFRESH_VALUE
+                         + self._farm_visible_resource_value(state, nid))
+                busy = max(1, eta)
+                rank = (-value / busy, -value, eta)
+                if fb_rank is None or rank < fb_rank:
                     fb, fb_rank = nid, rank
                 if opp_pos:
                     oeta, opath = state.graph.shortest_path(
                         opp_pos, nid, P.BASE_SPEED)
                     if opath and oeta <= eta + FARM_TASK_RACE_MARGIN:
-                        continue          # 它更近：让给它，别追尾
+                        continue          # 它更近：优先换桶，别追尾
                 if best_rank is None or rank < best_rank:
                     best, best_rank = nid, rank
             if best is None:
@@ -736,6 +751,38 @@ class WardenStrategy(BaselineStrategy):
         if hx is None or nx is None:
             return False
         return nx < hx
+
+    def _farm_visible_resource_value(self, state, node_id):
+        stock = state.node(node_id).get("resourceStock") or {}
+        res = state.me.get("resources") or {}
+        value = 0
+        for rt, v in FARM_RESOURCE_VALUE.items():
+            if stock.get(rt, 0) > 0 and res.get(rt, 0) < 1:
+                value += v
+        return value
+
+    def _farm_task_expected_value(self, state, task, my_eta, proc, opp_pos):
+        base = state.me.get("taskScore", 0) or 0
+        raw = min(task.get("score", 0) or 0, max(0, FARM_TASK_CAP - base))
+        if raw <= 0:
+            return 0
+        return raw * self._farm_task_race_factor(
+            state, task["nodeId"], my_eta, proc, opp_pos)
+
+    def _farm_task_race_factor(self, state, node_id, my_eta, proc, opp_pos):
+        if not opp_pos:
+            return 1.0
+        oeta, opath = state.graph.shortest_path(opp_pos, node_id,
+                                                P.BASE_SPEED)
+        if not opath:
+            return 1.0
+        my_finish = state.round + my_eta + proc
+        opp_finish = state.round + oeta + proc
+        if my_finish + FARM_TASK_RACE_MARGIN < opp_finish:
+            return 1.0
+        if my_finish < opp_finish:
+            return FARM_CONTEST_DISCOUNT
+        return 0.0
 
     # ---- 收官判定 ----
 
@@ -795,15 +842,8 @@ class WardenStrategy(BaselineStrategy):
                                    include_current_process=include_current)
 
     def _beats_opp_to_task(self, state, task, my_eta, proc, opp_pos):
-        if not opp_pos:
-            return True
-        oeta, opath = state.graph.shortest_path(
-            opp_pos, task["nodeId"], P.BASE_SPEED)
-        if not opath:
-            return True
-        my_finish = state.round + my_eta + proc
-        opp_finish = state.round + oeta + proc
-        return my_finish + FARM_TASK_RACE_MARGIN < opp_finish
+        return self._farm_task_race_factor(
+            state, task["nodeId"], my_eta, proc, opp_pos) >= 1.0
 
     def _should_leave(self, state, cur):
         rnd = state.round

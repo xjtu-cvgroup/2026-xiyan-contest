@@ -191,4 +191,7 @@
 #        S10/S14 离场账本改为地图最短路 + 路径处理站 processRound +
 #        宫门 VERIFY 读条，不再用固定 STATION_PAD/GATE 常数；S02 RUSH
 #        转农任务必须完成时间明确赢过对手，贴身/同帧任务不追。
-BUILD_VERSION = "3.96.15-dynamic-depart-task-race"
+# 3.96.16 = 转农目标从"避追尾"升级为 600 帧分数最大化：任务按边际基础分
+#        /耗时/被抢风险排序，贴身任务低折扣而非机械删除；无活跃任务时
+#        把可见马类资源点纳入刷新候选，避免 RUSH 农场空等。
+BUILD_VERSION = "3.96.16-farm-ev-resource"

@@ -4687,6 +4687,19 @@ def test_warden_strategy():
                 a and a["action"] == "MOVE" and a["targetNodeId"] == "S03",
                 str(a))
 
+    st = WardenStrategy()
+    st.camp_node = "S10"
+    st._plans_ready = True
+    st._score_farm_mode = True
+    st._processed_here = True
+    gs = gs_at("S02", opp_cur="S10", round_no=380,
+               phase=P.PHASE_RUSH, tasks=())
+    gs.nodes["S04"]["resourceStock"] = {P.SHORT_HORSE: 1}
+    a = st.main_action(gs)
+    ok &= check("warden: S02转农无任务时奔可见速度资源/刷新点",
+                a and a["action"] == "MOVE" and a["targetNodeId"] == "S04",
+                str(a))
+
     t_blocked = {"taskId": "T_BLOCKED", "taskTemplateId": "T01",
                  "nodeId": "S06", "processRound": 6, "score": 90,
                  "expireRound": 520, "active": True, "completed": False,
