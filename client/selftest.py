@@ -4915,8 +4915,20 @@ def test_warden_strategy():
     st.camp_node = "S10"
     st._plans_ready = True
     a = st.main_action(gs)
-    ok &= check("warden: S10低防墙且对手仍入边时提前转S14",
+    ok &= check("warden: S10低防墙且可证明接死时提前转S14",
                 a and a["action"] == "MOVE" and a.get("targetNodeId") != "S10",
+                str(a))
+
+    gs = gs_at("S10", opp_cur="S08", opp_next="S10", opp_edge="E17",
+               round_no=250, phase=P.PHASE_NORMAL)
+    gs.nodes["S10"]["guard"] = {"ownerTeamId": gs.my_team, "defense": 2,
+                                "maxDefense": 7, "active": True}
+    st = WardenStrategy()
+    st.camp_node = "S10"
+    st._plans_ready = True
+    a = st.main_action(gs)
+    ok &= check("warden: S10低防但接墙后杀不死则不早走",
+                not (a and a["action"] == "MOVE"),
                 str(a))
 
     st = WardenStrategy()

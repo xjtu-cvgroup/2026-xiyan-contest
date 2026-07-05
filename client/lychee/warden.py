@@ -55,6 +55,7 @@ class WardenStrategy(BaselineStrategy):
     EXIT_PAD = 10              # 终点安全余量：覆盖帧序/天气/处理站量化误差
     FARM_DEAD_PAD = 0          # 真到不了终点才转农；安全垫只用于离墙
     HANDOFF_GUARD_DEFENSE = 2  # S10 卡快风化时提前转 S14 接墙
+    GUARD_DECAY_FRAMES = 30    # 设卡每 30 帧风化 1 点防守
     OPP_SPEED_MARGIN = 0.8     # 判死时对手 ETA 打折（骑马/疾行令余量）
     OPP_DEAD_BUFFER = 8        # 判死额外缓冲：宁可多守 8 帧不误判
     WEAKEN_RESEND_GAP = 12     # 被冻在边上时的削弱重发间隔
@@ -1030,11 +1031,10 @@ class WardenStrategy(BaselineStrategy):
         opp = state.opp
         if not opp or opp.get("delivered") or opp.get("retired"):
             return True
-        # ⓪b 当前 S10 墙快风化且对手仍被卡在入边上：继续站到卡自然死
-        # 会让对手先入 S10 再抢 S14；应提前转宫门接第二道墙。
-        if cur != state.gate_node and self._opp_inbound(state, cur) \
-                and 0 < self._my_guard_defense(state, cur) \
-                <= self.HANDOFF_GUARD_DEFENSE:
+        # ⓪b 当前 S10 墙快风化且可以证明 S14 接墙后对手到不了终点：
+        # 才提前转宫门。不能只看防守值低，否则会把"守到数学死"
+        # 误改成无谓早走。
+        if self._handoff_kills(state, cur):
             return True
         # ① 死线余量：只看我方最迟出发帧。对手静止多久不是出发条件；
         #    warden 的目标是焊到最后一刻，不能被"它等了 100 帧"吓走。
@@ -1055,6 +1055,46 @@ class WardenStrategy(BaselineStrategy):
                             opp_need, remain)
                     return True
         return False
+
+    def _eta_to_gate(self, state, cur, speed, include_current=False):
+        frames, path = self._shortest(state, cur, state.gate_node, speed)
+        if not path:
+            return float("inf")
+        return frames + self._path_process_frames(
+            state, path, include_current=include_current)
+
+    def _handoff_kills(self, state, cur):
+        """S10 -> S14 接墙必须可证明，而不是见低防就跑。"""
+        if cur == state.gate_node or not self._opp_inbound(state, cur):
+            return False
+        defense = self._my_guard_defense(state, cur)
+        if not (0 < defense <= self.HANDOFF_GUARD_DEFENSE):
+            return False
+        remain = state.duration_round - state.round
+        if self._my_need(state, cur) >= remain:
+            return False
+
+        my_gate_eta = self._eta_to_gate(state, cur, state.my_speed())
+        if my_gate_eta == float("inf"):
+            return False
+
+        # 对手被当前墙挡到风化，再按最乐观疾行速度冲宫门。
+        opp_gate_eta = defense * self.GUARD_DECAY_FRAMES
+        opp_gate_eta += self._eta_to_gate(state, cur, P.SPEED_RUSH)
+        if opp_gate_eta == float("inf"):
+            return False
+
+        if my_gate_eta + self.GUARD_MIN_LEAD > opp_gate_eta:
+            return False
+
+        gate_wall = 4 * self.GUARD_DECAY_FRAMES
+        gate_term, path = self._shortest(
+            state, state.gate_node, state.terminal_node, P.SPEED_RUSH)
+        if not path:
+            return False
+        opp_after_wall_delivery = opp_gate_eta + gate_wall \
+            + self._gate_verify_frames(state) + gate_term + DELIVER_FRAMES
+        return opp_after_wall_delivery > remain
 
     # ================= 小分队 =================
 
