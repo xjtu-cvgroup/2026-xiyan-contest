@@ -4947,6 +4947,18 @@ def test_warden_strategy():
                 not (a and a["action"] == "CLAIM_TASK"),
                 f"need={need} action={a}")
 
+    st = WardenStrategy()
+    st.camp_node = "S10"
+    st._plans_ready = True
+    st._delivery_committed = True
+    st._processed_nodes.add("S13")
+    gs = gs_at("S13", opp_cur="S09", round_no=477)
+    set_proc(gs, "S13", "TRANSFER", 5)
+    a = st.main_action(gs)
+    ok &= check("warden: S10离墙后到S13不再回头S10",
+                a and a["action"] == "MOVE" and a["targetNodeId"] == "S14",
+                str(a))
+
     gs = gs_at("S10", opp_cur="S08", opp_next="S10", opp_edge="E17",
                round_no=420, phase=P.PHASE_RUSH)
     for p in gs.players.values():

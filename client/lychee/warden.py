@@ -93,6 +93,7 @@ class WardenStrategy(BaselineStrategy):
         self._score_farm_mode = False  # S02 锁死/RUSH 后只抢任务分，不再奔终点
         self._s02_won_window = False   # 我方赢下 S02 窗口：处理完必须抢 S10
         self._rush_tactic_tried = False
+        self._delivery_committed = False  # 离墙收官后一律去宫门/终点，禁止回头
 
     # ================= 初始化 =================
 
@@ -219,6 +220,8 @@ class WardenStrategy(BaselineStrategy):
         读条，继续守原点的收益会快速归零；原先套路就是果断放弃，到
         下一个唯一汇合点继续埋伏。
         """
+        if self._delivery_committed:
+            return
         camp = self.camp_node
         gate = state.gate_node
         if not camp or camp == gate:
@@ -392,10 +395,20 @@ class WardenStrategy(BaselineStrategy):
                 return P.a_wait()            # 排队，别开无谓的码头窗口
             return P.a_process()
 
+        # ---- 已离墙收官：这是单向阶段，不能因为下一帧余量变化又回 S10 ----
+        if self._delivery_committed:
+            rush = self._rush_speed_action(state)
+            if rush:
+                return rush
+            return self._advance(state, cur, gate)
+
         handoff_task = self._handoff_farm_action(state, cur)
         if handoff_task:
             return handoff_task
+        old_camp = self.camp_node
         leaving = self._should_leave(state, cur)
+        if leaving and cur == old_camp and self.camp_node == old_camp:
+            self._delivery_committed = True
 
         # ---- 竞速段：直奔关隘 ----
         if cur != camp and not leaving:
