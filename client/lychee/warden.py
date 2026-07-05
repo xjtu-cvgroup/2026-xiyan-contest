@@ -668,6 +668,11 @@ class WardenStrategy(BaselineStrategy):
         needs = (node.get("processType") and node.get("processType") != "VERIFY"
                  and node.get("processRound", 0) > 0)
         if needs and not self._node_processed(state, cur):
+            if cur == "S02":
+                proc = (state.opp.get("currentProcess") or {})
+                if proc.get("targetNodeId") == cur:
+                    return P.a_wait()
+                return P.a_process()
             # 奇偶让行防镜像双让锁死：一方先起手，另一方吃 OBJECT_BUSY 排队
             opp = state.opp
             opp_here = (opp and not opp.get("routeEdgeId")
@@ -972,6 +977,18 @@ class WardenStrategy(BaselineStrategy):
             self._squad_spent += self.SQUAD_WEAKEN_COST
             return P.a_squad_weaken(nxt)
 
+        # S02 长锁收尾：只提前标记本站，不预投互斥分叉。回放 093732
+        # 里转农后才派 S02 标记，落地虽赶上但仍多等一拍；临界鲜度时
+        # 提前把本站 4 帧处理压到 2 帧，锁结束后每帧都能抢。
+        if self._s02_finish_scout_due(state) \
+                and self._can_spend_squad(state, self.SQUAD_SCOUT_COST,
+                                          purpose="farm_scout") \
+                and not self._has_our_mark(state, "S02") \
+                and rnd - self._scout_sent.get("S02", -999) >= 20:
+            self._scout_sent["S02"] = rnd
+            self._squad_spent += self.SQUAD_SCOUT_COST
+            return P.a_squad_scout("S02")
+
         # 主车队还卡在 S02 镜像锁/处理站争用时，探路标记和预清障很容易
         # 在离站前过期；人手留给后段削弱、续防和真正临近的处理站标记。
         if self._defer_nonurgent_squad(state):
@@ -1053,6 +1070,19 @@ class WardenStrategy(BaselineStrategy):
                 self._squad_spent += self.SQUAD_SCOUT_COST
                 return P.a_squad_scout(nid)
         return None
+
+    def _s02_finish_scout_due(self, state):
+        me = state.me
+        if me.get("routeEdgeId") or me.get("currentNodeId") != "S02":
+            return False
+        if self._node_processed(state, "S02") or self._s02_won_window:
+            return False
+        node = state.node("S02")
+        if not (node.get("processType")
+                and node.get("processType") != "VERIFY"
+                and (node.get("processRound") or 0) > 0):
+            return False
+        return self._score_farm_mode or me.get("freshness", 100.0) <= 81.7
 
     def _squad_reinforce_action(self, state):
         if not self._can_spend_squad(state, self.SQUAD_REINFORCE_COST,
