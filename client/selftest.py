@@ -4673,6 +4673,16 @@ def test_warden_strategy():
     st = WardenStrategy()
     st.camp_node = "S10"
     st._plans_ready = True
+    st._processed_here = True
+    gs = gs_at("S04", opp_cur="S02", round_no=260)
+    set_proc(gs, "S04", "登船", 7)
+    a = st.main_action(gs)
+    ok &= check("warden: S02处理完成不污染后续处理站",
+                a and a["action"] == "PROCESS", str(a))
+
+    st = WardenStrategy()
+    st.camp_node = "S10"
+    st._plans_ready = True
     st._score_farm_mode = True
     gs = gs_at("S02", opp_cur="S02", round_no=49,
                events=({"type": "DOCK_CONTEST_WIN",
@@ -4760,6 +4770,24 @@ def test_warden_strategy():
                 and a.get("targetNodeId") not in ("S06", "S02"),
                 str(a))
 
+    t_chain_a = {"taskId": "T_CHAIN_A", "taskTemplateId": "T01",
+                 "nodeId": "S04", "processRound": 4, "score": 30,
+                 "expireRound": 600, "active": True, "completed": False,
+                 "failed": False, "ownerPlayerId": 0,
+                 "protectionPlayerId": 0}
+    t_chain_b = {"taskId": "T_CHAIN_B", "taskTemplateId": "T01",
+                 "nodeId": "S05", "processRound": 4, "score": 90,
+                 "expireRound": 600, "active": True, "completed": False,
+                 "failed": False, "ownerPlayerId": 0,
+                 "protectionPlayerId": 0}
+    st = WardenStrategy()
+    gs = gs_at("S02", round_no=380, phase=P.PHASE_RUSH,
+               task_score=30, tasks=(t_chain_a, t_chain_b))
+    eta, _ = gs.graph.shortest_path("S02", "S04", gs.my_speed())
+    follow = st._farm_followup_value(gs, t_chain_a, eta, 4, None, True)
+    ok &= check("warden: 转农目标估值计入一跳后继收益",
+                follow > 0, f"follow={follow}")
+
     t_s10 = {"taskId": "T_S10", "taskTemplateId": "T01",
              "nodeId": "S10", "processRound": 4, "score": 30,
              "expireRound": 520, "active": True, "completed": False,
@@ -4784,6 +4812,32 @@ def test_warden_strategy():
     a = st.main_action(gs)
     ok &= check("warden: S10有自家卡仍吃脚下任务",
                 a and a["action"] == "CLAIM_TASK" and a["taskId"] == "T_S10",
+                str(a))
+
+    st = WardenStrategy()
+    st.camp_node = "S10"
+    st._plans_ready = True
+    st._clear_plan = ["S10"]
+    gs = gs_at("S02", opp_cur="S09", round_no=230)
+    gs.players[1001]["squadAvailable"] = 4
+    gs.nodes["S10"]["hasObstacle"] = True
+    a = st.squad_action(gs)
+    ok &= check("warden: 非紧急小分队动作保留4人墙战底仓",
+                a is None and st._squad_spent == 0,
+                f"{a} spent={st._squad_spent}")
+
+    st = WardenStrategy()
+    st.camp_node = "S10"
+    st._plans_ready = True
+    st._score_farm_mode = True
+    st._farm_target = "S02"
+    gs = gs_at("S02", opp_cur="S10", round_no=430, phase=P.PHASE_RUSH)
+    gs.phase = P.PHASE_NORMAL
+    gs.players[1001]["squadAvailable"] = 1
+    a = st.squad_action(gs)
+    ok &= check("warden: 转农期最后1人也可用于任务探路",
+                a and a["action"] == "SQUAD_SCOUT"
+                and a["targetNodeId"] == "S02",
                 str(a))
 
     gs = gs_at("S10", opp_cur="S09", round_no=282, tasks=(t_s10,),

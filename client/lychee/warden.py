@@ -60,6 +60,11 @@ class WardenStrategy(BaselineStrategy):
     # 水路 S02 交接 4→2 / S04 登船 7→4 / S05 换运 6→3，3 人手买 8 帧。
     # 距站 ETA ≤ 此值才派（落地延迟 3~15 帧 + 寿命 45，窗口刚好盖住到站）
     SCOUT_DISPATCH_ETA = 38
+    SQUAD_WEAKEN_COST = 2
+    SQUAD_CLEAR_COST = 2
+    SQUAD_REINFORCE_COST = 2
+    SQUAD_SCOUT_COST = 1
+    SQUAD_NONURGENT_RESERVE = 4  # 非转农期至少留两次削弱/续防弹药
 
     def __init__(self, logger=None):
         super().__init__(logger)
@@ -74,6 +79,8 @@ class WardenStrategy(BaselineStrategy):
         self._weaken_sent = {}     # nodeId -> 派出帧（被冻自救）
         self._squad_spent = 0
         self._dead_since = None    # 双死判定首次成立的帧（懦夫博弈滞后）
+        self._processed_here = False   # 兼容旧 S02 状态；新逻辑用 _processed_nodes
+        self._processed_nodes = set()  # 已完成固定处理的节点，避免 S02 污染后站
         self._score_farm_mode = False  # S02 锁死/RUSH 后只抢任务分，不再奔终点
         self._s02_won_window = False   # 我方赢下 S02 窗口：处理完必须抢 S10
 
@@ -170,9 +177,10 @@ class WardenStrategy(BaselineStrategy):
             p = e.get("payload") or {}
             target = p.get("targetNodeId") or p.get("nodeId")
             etype = e.get("type")
-            if target == "S02" and etype in ("PROCESS_COMPLETE",
-                                             "PROCESS_COMPLETED"):
-                self._processed_here = True
+            if target and etype in ("PROCESS_COMPLETE", "PROCESS_COMPLETED"):
+                self._processed_nodes.add(target)
+                if target == "S02":
+                    self._processed_here = True
             if target == "S02" and etype == "DOCK_CONTEST_WIN" \
                     and p.get("playerId") == state.player_id:
                 self._s02_won_window = True
@@ -290,9 +298,10 @@ class WardenStrategy(BaselineStrategy):
         # ---- 农任务终局（S02 镜像锁死等场景）----
         # 我方交付已不可能：分数只剩未交付任务分可挣。但对手还活着时
         # 必须继续争（让行=放它出去交付）；对手也死了才让行转农
-        if cur == "S02" and self._s02_won_window and self._processed_here:
+        if cur == "S02" and self._s02_won_window \
+                and self._node_processed(state, cur):
             return self._advance(state, cur, camp)
-        if cur == "S02" and not self._processed_here \
+        if cur == "S02" and not self._node_processed(state, cur) \
                 and self._s02_lock_spent(state):
             self._score_farm_mode = True
             return self._farm_endgame(state, cur)
@@ -303,7 +312,7 @@ class WardenStrategy(BaselineStrategy):
             needs = (node.get("processType")
                      and node.get("processType") != "VERIFY"
                      and node.get("processRound", 0) > 0)
-            if needs and not self._processed_here:
+            if needs and not self._node_processed(state, cur):
                 return P.a_process()
             return P.a_wait()
 
@@ -368,7 +377,7 @@ class WardenStrategy(BaselineStrategy):
         node = state.node(cur)
         needs = (node.get("processType") and node.get("processType") != "VERIFY"
                  and node.get("processRound", 0) > 0)
-        if needs and not self._processed_here:
+        if needs and not self._node_processed(state, cur):
             proc = (state.opp.get("currentProcess") or {})
             if proc.get("targetNodeId") == cur:
                 return P.a_wait()            # 排队，别开无谓的码头窗口
@@ -447,7 +456,7 @@ class WardenStrategy(BaselineStrategy):
         """S02 镜像码头窗：RUSH 前目标是拖住双方，不是抢先离站。"""
         if cur != "S02" or state.phase == P.PHASE_RUSH:
             return False
-        if state.me.get("verified") or self._processed_here:
+        if state.me.get("verified") or self._node_processed(state, cur):
             return False
         if self._s02_lock_spent(state):
             return False
@@ -461,6 +470,14 @@ class WardenStrategy(BaselineStrategy):
         me = state.me
         return bool(me.get("freshness", 0) >= 80
                     and me.get("goodFruit", 0) > 1)
+
+    def _node_processed(self, state, node_id=None):
+        node_id = node_id or state.me.get("currentNodeId")
+        if not node_id:
+            return False
+        # 兼容旧状态钉子：_processed_here 只代表 S02，不再代表任意处理站。
+        return node_id in self._processed_nodes \
+            or (node_id == "S02" and self._processed_here)
 
     def _s02_lock_spent(self, state):
         """S02 假锁识别：献贡/兵争都不可用或 RUSH 已到，才停止开窗。"""
@@ -615,7 +632,7 @@ class WardenStrategy(BaselineStrategy):
         opp = state.opp
         return bool(node.get("processType")
                     and (node.get("processRound") or 0) > 0
-                    and not self._processed_here
+                    and not self._node_processed(state, cur)
                     and opp and opp.get("currentNodeId") == cur)
 
     def _opp_alive_can_deliver(self, state, remain):
@@ -639,7 +656,7 @@ class WardenStrategy(BaselineStrategy):
         node = state.node(cur)
         needs = (node.get("processType") and node.get("processType") != "VERIFY"
                  and node.get("processRound", 0) > 0)
-        if needs and not self._processed_here:
+        if needs and not self._node_processed(state, cur):
             # 奇偶让行防镜像双让锁死：一方先起手，另一方吃 OBJECT_BUSY 排队
             opp = state.opp
             opp_here = (opp and not opp.get("routeEdgeId")
@@ -692,6 +709,8 @@ class WardenStrategy(BaselineStrategy):
             if state.round + eta + proc > state.duration_round:
                 continue
             ev = self._farm_task_expected_value(state, t, eta, proc, opp_pos)
+            ev += self._farm_followup_value(
+                state, t, eta, proc, opp_pos, has_horse)
             if ev <= 0:
                 continue          # 它必先完成：别追尸体，换线抢别的桶
             back = self._farm_backtrack_step(state, cur, path)
@@ -771,6 +790,50 @@ class WardenStrategy(BaselineStrategy):
         return raw * self._farm_task_race_factor(
             state, task["nodeId"], my_eta, proc, opp_pos)
 
+    def _farm_followup_value(self, state, first, first_eta, first_proc,
+                             opp_pos, has_horse):
+        """转农看一跳后继收益：600 帧分数最大化，不只贪最近一个任务。"""
+        base = state.me.get("taskScore", 0) or 0
+        gained = min(first.get("score", 0) or 0,
+                     max(0, FARM_TASK_CAP - base))
+        base_after = min(FARM_TASK_CAP, base + gained)
+        if base_after >= FARM_TASK_CAP:
+            return 0
+        node_id = first.get("nodeId")
+        arrive_round = state.round + first_eta + first_proc
+        best = 0
+        for t in state.claimable_tasks():
+            if t.get("taskId") == first.get("taskId"):
+                continue
+            if self._farm_task_blocked(state, t, has_horse):
+                continue
+            eta, path = state.graph.shortest_path(
+                node_id, t["nodeId"], state.my_speed())
+            if not path or self._farm_path_blocked(state, path):
+                continue
+            if self._farm_backtrack_step(state, node_id, path):
+                continue
+            proc = t.get("processRound", 4) or 4
+            finish = arrive_round + eta + proc
+            expire = t.get("expireRound") or 0
+            if expire and finish + 2 > expire:
+                continue
+            if finish > state.duration_round:
+                continue
+            raw = min(t.get("score", 0) or 0,
+                      max(0, FARM_TASK_CAP - base_after))
+            if raw <= 0:
+                continue
+            factor = 1.0
+            if opp_pos:
+                oeta, opath = state.graph.shortest_path(
+                    opp_pos, t["nodeId"], P.BASE_SPEED)
+                if opath and state.round + oeta + proc \
+                        <= finish + FARM_TASK_RACE_MARGIN:
+                    factor = 0.0
+            best = max(best, raw * factor)
+        return best * 0.55
+
     def _farm_task_race_factor(self, state, node_id, my_eta, proc, opp_pos):
         if not opp_pos:
             return 1.0
@@ -839,7 +902,7 @@ class WardenStrategy(BaselineStrategy):
             include_current = bool(node.get("processType")
                                    and node.get("processType") != "VERIFY"
                                    and (node.get("processRound") or 0) > 0
-                                   and not self._processed_here)
+                                   and not self._node_processed(state, cur))
         return self._delivery_need(state, cur, state.my_speed(),
                                    include_current_process=include_current)
 
@@ -887,18 +950,19 @@ class WardenStrategy(BaselineStrategy):
         if state.phase == P.PHASE_RUSH:
             return None
         avail = self._squad_avail(state)
-        if avail < 2:
+        if avail <= 0:
             return None
         me = state.me
         rnd = state.round
 
         # 1) 被冻在边上：削弱自救（守望者也可能被对手狙击）
         nxt = me.get("nextNodeId")
-        if me.get("routeEdgeId") and nxt and state.enemy_guard(nxt) \
+        if avail >= self.SQUAD_WEAKEN_COST \
+                and me.get("routeEdgeId") and nxt and state.enemy_guard(nxt) \
                 and rnd - self._weaken_sent.get(nxt, -999) \
                 >= self.WEAKEN_RESEND_GAP:
             self._weaken_sent[nxt] = rnd
-            self._squad_spent += 2
+            self._squad_spent += self.SQUAD_WEAKEN_COST
             return P.a_squad_weaken(nxt)
 
         # 主车队还卡在 S02 镜像锁/处理站争用时，探路标记和预清障很容易
@@ -906,23 +970,21 @@ class WardenStrategy(BaselineStrategy):
         if self._defer_nonurgent_squad(state):
             return None
 
-        # 2) 开局清障计划：沿途 + 关隘的障碍逐个远程清掉
-        for nid in self._clear_plan:
-            if not state.has_obstacle(nid):
-                continue
-            if rnd - self._clear_sent.get(nid, -999) < 20:
-                continue
-            self._clear_sent[nid] = rnd
-            self._squad_spent += 2
-            return P.a_squad_clear(nid)
+        # 2) 守墙增援：卡在挨打/风化且对手仍在边上 → 续防。
+        # 这是墙的一部分，优先级高于探路和清障。
+        reinforce = self._squad_reinforce_action(state)
+        if reinforce:
+            return reinforce
 
         # 2.4) 农任务终局：人手全转任务点标记（处理帧 -3 提速领取）
         target = getattr(self, "_farm_target", None)
-        if target and avail >= 1 and not self._has_our_mark(state, target) \
+        if target and self._can_spend_squad(state, self.SQUAD_SCOUT_COST,
+                                            purpose="farm_scout") \
+                and not self._has_our_mark(state, target) \
                 and rnd - self._scout_sent.get(target, -999) >= 20 \
                 and self._my_eta(state, target) <= self.SCOUT_DISPATCH_ETA:
             self._scout_sent[target] = rnd
-            self._squad_spent += 1
+            self._squad_spent += self.SQUAD_SCOUT_COST
             return P.a_squad_scout(target)
 
         # 2.5) 处理站探路标记：真实 ETA（含边上剩余进度）进入寿命窗口
@@ -936,9 +998,10 @@ class WardenStrategy(BaselineStrategy):
             opp = state.opp
             locked = (nd.get("processType")
                       and (nd.get("processRound") or 0) > 0
-                      and not self._processed_here
+                      and not self._node_processed(state, cur_n)
                       and bool(opp and opp.get("currentNodeId") == cur_n))
-        if avail >= 1 and not locked \
+        if self._can_spend_squad(state, self.SQUAD_SCOUT_COST,
+                                 purpose="route_scout") and not locked \
                 and me.get("currentNodeId") != self.camp_node:
             for nid in self._scout_plan:
                 if self._scout_sent.get(nid):
@@ -950,10 +1013,28 @@ class WardenStrategy(BaselineStrategy):
                 if eta > self.SCOUT_DISPATCH_ETA:
                     continue
                 self._scout_sent[nid] = rnd
-                self._squad_spent += 1
+                self._squad_spent += self.SQUAD_SCOUT_COST
                 return P.a_squad_scout(nid)
 
-        # 3) 守墙增援：卡在挨打/风化且对手仍在边上 → 续防
+        # 3) 预清障：只有路线已确定且不会买穿后段弹药时才做。
+        if self._can_spend_squad(state, self.SQUAD_CLEAR_COST,
+                                 purpose="clear"):
+            for nid in self._clear_plan:
+                if not state.has_obstacle(nid):
+                    continue
+                if rnd - self._clear_sent.get(nid, -999) < 20:
+                    continue
+                self._clear_sent[nid] = rnd
+                self._squad_spent += self.SQUAD_CLEAR_COST
+                return P.a_squad_clear(nid)
+        return None
+
+    def _squad_reinforce_action(self, state):
+        if not self._can_spend_squad(state, self.SQUAD_REINFORCE_COST,
+                                     purpose="reinforce"):
+            return None
+        me = state.me
+        rnd = state.round
         camp = self.camp_node
         if me.get("currentNodeId") == camp:
             g = state.node(camp).get("guard")
@@ -964,9 +1045,24 @@ class WardenStrategy(BaselineStrategy):
                 if defense + 2 <= cap and self._opp_inbound(state, camp) \
                         and rnd - self._reinforce_sent >= 20:
                     self._reinforce_sent = rnd
-                    self._squad_spent += 2
+                    self._squad_spent += self.SQUAD_REINFORCE_COST
                     return P.a_squad_reinforce(camp)
         return None
+
+    def _can_spend_squad(self, state, cost, purpose="misc"):
+        avail = self._squad_avail(state)
+        if avail < cost:
+            return False
+        if purpose in ("weaken", "reinforce"):
+            return True
+        me = state.me
+        opp = state.opp
+        guard_threat = (not self._score_farm_mode
+                        and not me.get("verified")
+                        and opp and not opp.get("delivered")
+                        and not opp.get("retired"))
+        floor = self.SQUAD_NONURGENT_RESERVE if guard_threat else 0
+        return avail - cost >= floor
 
     def _defer_nonurgent_squad(self, state):
         me = state.me
@@ -975,9 +1071,11 @@ class WardenStrategy(BaselineStrategy):
         cur = me.get("currentNodeId")
         if not cur:
             return False
+        if self._score_farm_mode:
+            return False
         # S02 的战略是 RUSH 前锁住对手；未赢窗/未换乘时离站时间不可控，
         # 此时派出的 S04/S05/S10 标记大概率白白过期。
-        if cur == "S02" and not self._processed_here \
+        if cur == "S02" and not self._node_processed(state, cur) \
                 and not self._s02_won_window:
             return True
         if cur == "S02":
@@ -986,5 +1084,5 @@ class WardenStrategy(BaselineStrategy):
         opp = state.opp
         return (bool(nd.get("processType"))
                 and (nd.get("processRound") or 0) > 0
-                and not self._processed_here
+                and not self._node_processed(state, cur)
                 and bool(opp and opp.get("currentNodeId") == cur))
