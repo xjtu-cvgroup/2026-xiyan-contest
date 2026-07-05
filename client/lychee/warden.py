@@ -52,7 +52,7 @@ class WardenStrategy(BaselineStrategy):
     GUARD_EXTRA = 2            # 反应卡额外投入（关键关隘 → 防 6）
     GUARD_RETRY_GAP = 25       # 同节点补卡最小间隔（防拒绝风暴）
     FRUIT_RESERVE = 5          # 好果底仓：交付要求 >0，窗口牌还要嚼几篓
-    EXIT_PAD = 2               # 终点安全余量：不赌极限，也不提前太多离墙
+    EXIT_PAD = 10              # 终点安全余量：覆盖帧序/天气/处理站量化误差
     OPP_SPEED_MARGIN = 0.8     # 判死时对手 ETA 打折（骑马/疾行令余量）
     OPP_DEAD_BUFFER = 8        # 判死额外缓冲：宁可多守 8 帧不误判
     WEAKEN_RESEND_GAP = 12     # 被冻在边上时的削弱重发间隔
