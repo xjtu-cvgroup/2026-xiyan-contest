@@ -4785,6 +4785,29 @@ def test_warden_strategy():
                 a and a["action"] == "MOVE" and a["targetNodeId"] == "S04",
                 str(a))
 
+    t_seen_road = {"taskId": "T_SEEN_ROAD", "taskTemplateId": "T02",
+                   "nodeId": "S03", "processRound": 4, "score": 30,
+                   "expireRound": 300, "active": False, "completed": True,
+                   "failed": False, "ownerPlayerId": 1001,
+                   "protectionPlayerId": 0, "routeBucket": P.ROAD}
+    t_seen_water = {"taskId": "T_SEEN_WATER", "taskTemplateId": "T08",
+                    "nodeId": "S04", "processRound": 4, "score": 30,
+                    "expireRound": 300, "active": False, "completed": True,
+                    "failed": False, "ownerPlayerId": 1002,
+                    "protectionPlayerId": 0, "routeBucket": P.WATER}
+    st = WardenStrategy()
+    st.camp_node = "S10"
+    st._plans_ready = True
+    st._score_farm_mode = True
+    st._processed_here = True
+    gs = gs_at("S02", opp_cur="S04", round_no=380,
+               phase=P.PHASE_RUSH, tasks=(t_seen_road, t_seen_water))
+    gs.nodes["S04"]["resourceStock"] = {P.SHORT_HORSE: 1}
+    a = st.main_action(gs)
+    ok &= check("warden: S02转农无活跃任务时预判对手占桶换线",
+                a and a["action"] == "MOVE" and a["targetNodeId"] == "S03",
+                str(a))
+
     t_blocked = {"taskId": "T_BLOCKED", "taskTemplateId": "T01",
                  "nodeId": "S06", "processRound": 6, "score": 90,
                  "expireRound": 520, "active": True, "completed": False,

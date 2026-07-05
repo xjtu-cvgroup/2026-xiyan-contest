@@ -36,6 +36,10 @@ FARM_TASK_RACE_MARGIN = 2  # S02转农任务必须真实完成领先，不追同
 FARM_TASK_CAP = 150        # 未交付刷分以任务基础分封顶为一阶目标
 FARM_CONTEST_DISCOUNT = 0.28
 FARM_REFRESH_VALUE = 8     # 无活跃任务时，蹲任务候选点的保底期望
+FARM_BUCKET_VALUE_MULT = 0.32
+FARM_BUCKET_HISTORY_WEIGHT = 0.55
+FARM_BUCKET_VALUE_CAP = 70
+FARM_SAME_BUCKET_LEAD_PENALTY = 24
 FARM_RESOURCE_VALUE = {
     P.FAST_HORSE: 16,
     P.SHORT_HORSE: 11,
@@ -741,6 +745,10 @@ class WardenStrategy(BaselineStrategy):
             cands = set()
             for nodes in (state.task_candidates or {}).values():
                 cands.update(nodes)
+            for t in state.tasks:
+                nid = t.get("nodeId")
+                if nid:
+                    cands.add(nid)
             for nid, node in state.nodes.items():
                 if self._farm_visible_resource_value(state, nid) > 0:
                     cands.add(nid)
@@ -759,7 +767,9 @@ class WardenStrategy(BaselineStrategy):
                 if self._farm_backtrack_step(state, cur, path):
                     continue
                 value = (FARM_REFRESH_VALUE
-                         + self._farm_visible_resource_value(state, nid))
+                         + self._farm_visible_resource_value(state, nid)
+                         + self._farm_bucket_value(state, cur, nid, eta,
+                                                   path, opp_pos))
                 busy = max(1, eta)
                 rank = (-value / busy, -value, eta)
                 if fb_rank is None or rank < fb_rank:
@@ -795,6 +805,102 @@ class WardenStrategy(BaselineStrategy):
         for rt, v in FARM_RESOURCE_VALUE.items():
             if stock.get(rt, 0) > 0 and res.get(rt, 0) < 1:
                 value += v
+        return value
+
+    def _farm_node_bucket(self, state, origin, node_id, path=None):
+        """转农路线桶：优先用任务/节点语义，其次看路径上首个非普通特征。"""
+        for t in state.tasks:
+            if t.get("nodeId") == node_id:
+                bucket = t.get("routeBucket") or t.get("routeType")
+                if bucket:
+                    return bucket
+        node = state.node(node_id)
+        ntype = node.get("nodeType") or node.get("type")
+        ptype = node.get("processType") or ""
+        if ntype in ("DOCK", "WATER_STATION") or "船" in str(ptype) \
+                or "水" in str(ptype):
+            return P.WATER
+        if path is None:
+            _, path = self._shortest(state, origin, node_id,
+                                     state.my_speed())
+        path = path or ()
+        seen = None
+        for a, b in zip(path, path[1:]):
+            edge = state.graph.edge_between(a, b)
+            rt = edge.get("routeType") if edge else None
+            if rt in (P.WATER, P.MOUNTAIN, P.BRANCH):
+                return rt
+            if rt:
+                seen = seen or rt
+        return seen
+
+    def _farm_opp_bucket(self, state, cur):
+        opp = state.opp or {}
+        if not opp or opp.get("delivered") or opp.get("retired"):
+            return None
+        pos = opp.get("nextNodeId") or opp.get("currentNodeId")
+        if pos:
+            bucket = self._farm_node_bucket(state, cur, pos)
+            if bucket:
+                return bucket
+        edge_id = opp.get("routeEdgeId")
+        if edge_id and edge_id in state.graph.edges:
+            return state.graph.edges[edge_id].get("routeType")
+        return None
+
+    def _farm_task_score_hint(self, state, task):
+        score = task.get("score")
+        if score is not None:
+            return score or 0
+        tpl = state.task_templates.get(task.get("taskTemplateId")) or {}
+        return tpl.get("score") or tpl.get("baseScore") or 30
+
+    def _farm_bucket_score_ceiling(self, state, bucket, origin, base_score):
+        """估算某路线桶到 600 帧前还能支撑的任务分上限。"""
+        if not bucket:
+            return 0
+        remaining = max(0, FARM_TASK_CAP - (base_score or 0))
+        if remaining <= 0:
+            return 0
+        total = 0.0
+        seen = set()
+        for t in state.tasks:
+            tid = t.get("taskId") or (t.get("taskTemplateId"), t.get("nodeId"))
+            if tid in seen:
+                continue
+            seen.add(tid)
+            tb = t.get("routeBucket") or t.get("routeType") \
+                or self._farm_node_bucket(state, origin, t.get("nodeId"))
+            if tb != bucket:
+                continue
+            weight = 1.0 if (t.get("active") and not t.get("completed")
+                             and not t.get("failed")) \
+                else FARM_BUCKET_HISTORY_WEIGHT
+            total += self._farm_task_score_hint(state, t) * weight
+        for tpl_id, nodes in (state.task_candidates or {}).items():
+            tpl = state.task_templates.get(tpl_id) or {}
+            score = tpl.get("score") or tpl.get("baseScore") or 30
+            for node_id in nodes:
+                tb = self._farm_node_bucket(state, origin, node_id)
+                if tb == bucket:
+                    total += score * FARM_BUCKET_HISTORY_WEIGHT
+        return min(remaining, total)
+
+    def _farm_bucket_value(self, state, cur, node_id, eta, path, opp_pos):
+        bucket = self._farm_node_bucket(state, cur, node_id, path)
+        ceiling = self._farm_bucket_score_ceiling(
+            state, bucket, cur, state.me.get("taskScore", 0) or 0)
+        value = min(FARM_BUCKET_VALUE_CAP, ceiling) * FARM_BUCKET_VALUE_MULT
+        opp_bucket = self._farm_opp_bucket(state, cur)
+        if bucket and opp_bucket == bucket and opp_pos:
+            oeta, opath = self._shortest(state, opp_pos, node_id)
+            if opath and oeta <= eta + FARM_TASK_RACE_MARGIN:
+                opp_base = (state.opp or {}).get("taskScore", 0) or 0
+                opp_cap = self._farm_bucket_score_ceiling(
+                    state, bucket, opp_pos, opp_base)
+                value -= FARM_SAME_BUCKET_LEAD_PENALTY \
+                    + min(FARM_BUCKET_VALUE_CAP, opp_cap) \
+                    * FARM_BUCKET_VALUE_MULT * 0.35
         return value
 
     def _farm_task_expected_value(self, state, task, my_eta, proc, opp_pos):
