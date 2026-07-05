@@ -4907,6 +4907,18 @@ def test_warden_strategy():
                 a and a["action"] == "CLAIM_TASK" and a["taskId"] == "T_S10",
                 str(a))
 
+    gs = gs_at("S10", opp_cur="S08", opp_next="S10", opp_edge="E17",
+               round_no=420, phase=P.PHASE_RUSH)
+    gs.nodes["S10"]["guard"] = {"ownerTeamId": gs.my_team, "defense": 2,
+                                "maxDefense": 7, "active": True}
+    st = WardenStrategy()
+    st.camp_node = "S10"
+    st._plans_ready = True
+    a = st.main_action(gs)
+    ok &= check("warden: S10低防墙且对手仍入边时提前转S14",
+                a and a["action"] == "MOVE" and a.get("targetNodeId") != "S10",
+                str(a))
+
     st = WardenStrategy()
     st.camp_node = "S10"
     st._plans_ready = True
@@ -5003,6 +5015,18 @@ def test_warden_strategy():
                              phase=P.PHASE_RUSH, verified=True))
     ok &= check("warden: S14对手未踏边不提前临别卡",
                 a and a["action"] != "SET_GUARD",
+                str(a))
+
+    st = WardenStrategy()
+    st.camp_node = "S10"
+    st._plans_ready = True
+    gs = gs_at("S14", opp_cur="S10", round_no=568,
+               phase=P.PHASE_RUSH)
+    set_proc(gs, "S14", "VERIFY", 6)
+    a = st.main_action(gs)
+    ok &= check("warden: S14临界余量仍验核不误转农等待",
+                a and a["action"] == "VERIFY_GATE"
+                and not st._score_farm_mode,
                 str(a))
 
     gs = gs_at("S10", round_no=420, phase=P.PHASE_RUSH)

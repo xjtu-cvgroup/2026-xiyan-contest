@@ -53,6 +53,8 @@ class WardenStrategy(BaselineStrategy):
     GUARD_RETRY_GAP = 25       # 同节点补卡最小间隔（防拒绝风暴）
     FRUIT_RESERVE = 5          # 好果底仓：交付要求 >0，窗口牌还要嚼几篓
     EXIT_PAD = 10              # 终点安全余量：覆盖帧序/天气/处理站量化误差
+    FARM_DEAD_PAD = 0          # 真到不了终点才转农；安全垫只用于离墙
+    HANDOFF_GUARD_DEFENSE = 2  # S10 卡快风化时提前转 S14 接墙
     OPP_SPEED_MARGIN = 0.8     # 判死时对手 ETA 打折（骑马/疾行令余量）
     OPP_DEAD_BUFFER = 8        # 判死额外缓冲：宁可多守 8 帧不误判
     WEAKEN_RESEND_GAP = 12     # 被冻在边上时的削弱重发间隔
@@ -306,10 +308,11 @@ class WardenStrategy(BaselineStrategy):
         gate, terminal = state.gate_node, state.terminal_node
         remain = state.duration_round - state.round
 
-        # ---- 最高优先级：我方已安全到不了终点 → 立刻转农 ----
-        # 这时 S10/S14 卡人不再是主收益；未交付结算只看任务分等账面分。
-        if not me.get("verified") and remain <= self._my_need(state, cur) \
-                + self.EXIT_PAD:
+        # ---- 最高优先级：我方理论上已到不了终点 → 立刻转农 ----
+        # EXIT_PAD 是离墙安全垫，不是放弃交付阈值；否则到 S14 临界帧会
+        # 误判成转农 WAIT，白白错过验核/交付。
+        if not me.get("verified") and remain < self._my_need(state, cur) \
+                + self.FARM_DEAD_PAD:
             self._score_farm_mode = True
             return self._farm_endgame(state, cur)
 
@@ -517,6 +520,13 @@ class WardenStrategy(BaselineStrategy):
         g = state.node(node_id).get("guard")
         return bool(g and g.get("ownerTeamId") == state.my_team
                     and g.get("active", g.get("defense", 0) > 0))
+
+    def _my_guard_defense(self, state, node_id):
+        g = state.node(node_id).get("guard")
+        if not (g and g.get("ownerTeamId") == state.my_team
+                and g.get("active", g.get("defense", 0) > 0)):
+            return 0
+        return g.get("defense", 0) or 0
 
     def _guardable(self, state, node_id):
         """该节点当前无任何有效卡且我方成本可负担。"""
@@ -1019,6 +1029,12 @@ class WardenStrategy(BaselineStrategy):
         #    后还站到 r475 的 63 帧站岗白丢 3 鲜度）
         opp = state.opp
         if not opp or opp.get("delivered") or opp.get("retired"):
+            return True
+        # ⓪b 当前 S10 墙快风化且对手仍被卡在入边上：继续站到卡自然死
+        # 会让对手先入 S10 再抢 S14；应提前转宫门接第二道墙。
+        if cur != state.gate_node and self._opp_inbound(state, cur) \
+                and 0 < self._my_guard_defense(state, cur) \
+                <= self.HANDOFF_GUARD_DEFENSE:
             return True
         # ① 死线余量：只看我方最迟出发帧。对手静止多久不是出发条件；
         #    warden 的目标是焊到最后一刻，不能被"它等了 100 帧"吓走。
