@@ -4620,8 +4620,8 @@ def test_warden_strategy():
     st._processed_here = False
     a = st.main_action(gs_at("S02", opp_cur="S02", round_no=366,
                              freshness=79.8, good_fruit=29, guard_ap=4))
-    ok &= check("warden: S02献贡不可用但兵争可用时继续开窗",
-                not st._score_farm_mode and a and a["action"] == "PROCESS",
+    ok &= check("warden: S02终点已死时兵争可用也转农",
+                st._score_farm_mode and a and a["action"] == "PROCESS",
                 str(a))
 
     st = WardenStrategy()
@@ -4630,7 +4630,7 @@ def test_warden_strategy():
     st._processed_here = False
     a = st.main_action(gs_at("S02", opp_cur="S02", round_no=366,
                              freshness=79.8, good_fruit=29, guard_ap=0))
-    ok &= check("warden: S02献贡和兵争都不可用时才转农处理",
+    ok &= check("warden: S02献贡和兵争都不可用时转农处理",
                 st._score_farm_mode and a and a["action"] == "PROCESS",
                 str(a))
 
@@ -4735,6 +4735,23 @@ def test_warden_strategy():
                 main and main["action"] == "MOVE"
                 and main["targetNodeId"] == "S04",
                 str(acts))
+
+    t_late_s03 = {"taskId": "T_LATE_S03", "taskTemplateId": "T01",
+                  "nodeId": "S03", "processRound": 4, "score": 30,
+                  "expireRound": 600, "active": True, "completed": False,
+                  "failed": False, "ownerPlayerId": 0,
+                  "protectionPlayerId": 0}
+    st = WardenStrategy()
+    st.camp_node = "S10"
+    st._plans_ready = True
+    st._s02_won_window = True
+    st._processed_here = True
+    a = st.main_action(gs_at("S02", opp_cur="S10", round_no=430,
+                             phase=P.PHASE_RUSH, tasks=(t_late_s03,)))
+    ok &= check("warden: S02赢太晚到不了终点则转农不冲S10",
+                st._score_farm_mode and a and a["action"] == "MOVE"
+                and a["targetNodeId"] == "S03",
+                str(a))
 
     t_back = {"taskId": "T_BACK", "taskTemplateId": "T01",
               "nodeId": "S05", "processRound": 4, "score": 30,
@@ -4861,6 +4878,21 @@ def test_warden_strategy():
     a = st.main_action(gs)
     ok &= check("warden: S10敌已踏边时设卡优先于任务",
                 a and a["action"] == "SET_GUARD" and a["targetNodeId"] == "S10",
+                str(a))
+
+    t_late_s10 = {"taskId": "T_LATE_S10", "taskTemplateId": "T01",
+                  "nodeId": "S10", "processRound": 4, "score": 30,
+                  "expireRound": 600, "active": True, "completed": False,
+                  "failed": False, "ownerPlayerId": 0,
+                  "protectionPlayerId": 0}
+    gs = gs_at("S10", opp_cur="S09", opp_next="S10", opp_edge="E05",
+               round_no=560, phase=P.PHASE_RUSH, tasks=(t_late_s10,))
+    st = WardenStrategy()
+    st.camp_node = "S10"
+    st._plans_ready = True
+    a = st.main_action(gs)
+    ok &= check("warden: 到不了终点时不再为了S10墙放弃脸上任务",
+                st._score_farm_mode and a and a["action"] == "CLAIM_TASK",
                 str(a))
 
     gs = gs_at("S10", opp_cur="S09", opp_next="S10", opp_edge="E05",

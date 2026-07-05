@@ -306,6 +306,12 @@ class WardenStrategy(BaselineStrategy):
         gate, terminal = state.gate_node, state.terminal_node
         remain = state.duration_round - state.round
 
+        # ---- 最高优先级：我方已数学上到不了终点 → 立刻转农 ----
+        # 这时 S10/S14 卡人不再是主收益；未交付结算只看任务分等账面分。
+        if not me.get("verified") and remain < self._my_need(state, cur) - 5:
+            self._score_farm_mode = True
+            return self._farm_endgame(state, cur)
+
         # ---- 墙优先级：对手已经踏边时，本帧能设卡就先设卡 ----
         # 任务是墙成立后的白捡收益；不能反过来让 3-4 帧读条吃掉落卡窗口。
         if cur in (self.camp_node, gate):
@@ -333,29 +339,6 @@ class WardenStrategy(BaselineStrategy):
             if needs and not self._node_processed(state, cur):
                 return P.a_process()
             return P.a_wait()
-
-        farm_deadline = (not me.get("verified")
-                         and remain < self._my_need(state, cur) - 5)
-        if farm_deadline:
-            if self._opp_alive_can_deliver(state, remain):
-                # 能守才守：我在关隘/宫门且它去宫门仍必经此处 → 驻守拖死
-                # 它仍有价值；否则（僵持散场/它已越关）我死=立刻转农
-                opp = state.opp
-                pos = opp and (opp.get("nextNodeId")
-                               or opp.get("currentNodeId"))
-                wallable = False
-                if pos and cur in (self.camp_node, state.gate_node) \
-                        and cur != pos:
-                    _, pth = self._shortest(state, pos, state.gate_node)
-                    wallable = bool(pth) and cur in pth
-                if not wallable:
-                    self._score_farm_mode = True
-                    return self._farm_endgame(state, cur)
-            else:
-                # 用户 spec：双死判定成立的那一帧立刻转最优任务，
-                # 不为 9 帧先手多等（早动 = 抢刷新波占位 + 抢短马快马）
-                self._score_farm_mode = True
-                return self._farm_endgame(state, cur)
 
         # ---- 交付线 ----
         if cur == terminal:
