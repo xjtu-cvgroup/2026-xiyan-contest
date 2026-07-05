@@ -361,7 +361,7 @@ class WardenStrategy(BaselineStrategy):
                 guard = self._reactive_guard(state, cur)
                 if guard:
                     return guard
-                task = self._farm_here(state, cur)
+                task = self._farm_here_safe(state, cur)
                 if task:
                     return task
                 return P.a_wait()      # 已验核仍守宫门：墙焊到死线再走
@@ -375,7 +375,7 @@ class WardenStrategy(BaselineStrategy):
                 guard = self._reactive_guard(state, cur)
                 if guard:
                     return guard
-                task = self._farm_here(state, cur)
+                task = self._farm_here_safe(state, cur)
                 if task:
                     return task
             if state.phase == P.PHASE_RUSH:
@@ -420,7 +420,7 @@ class WardenStrategy(BaselineStrategy):
                     oeta, op = self._shortest(state, pos, cur)
                     near = bool(op) and oeta <= 12   # 读条4+设卡5+余量
             if (not near) or self._my_active_guard(state, cur):
-                task = self._farm_here(state, cur)
+                task = self._farm_here_safe(state, cur)
                 if task:
                     return task
             return P.a_wait()
@@ -1015,6 +1015,7 @@ class WardenStrategy(BaselineStrategy):
             return 999
         proc = self._path_process_frames(
             state, p1, include_current=include_current_process)
+        proc += self._path_process_frames(state, p2)
         return (to_gate + gate_term) * move_factor + proc \
             + self._gate_verify_frames(state) + DELIVER_FRAMES
 
@@ -1095,9 +1096,30 @@ class WardenStrategy(BaselineStrategy):
             if self._farm_task_blocked(state, t, has_horse):
                 continue
             proc = t.get("processRound", 4) or 4
-            if proc + 2 <= plan["slack"]:
+            if proc + 2 <= plan["slack"] \
+                    and self._departure_slack(state, cur) >= proc + 2:
                 return P.a_claim_task(t["taskId"])
         return None
+
+    def _departure_slack(self, state, cur):
+        return state.duration_round - state.round \
+            - self._my_need(state, cur) - self.EXIT_PAD
+
+    def _farm_here_safe(self, state, cur):
+        action = self._farm_here(state, cur)
+        if not action:
+            return None
+        cost = 0
+        if action.get("action") == "CLAIM_TASK":
+            tid = action.get("taskId")
+            task = next((t for t in state.claimable_tasks()
+                         if t.get("taskId") == tid), None)
+            cost = (task.get("processRound", 4) if task else 4) + 2
+        elif action.get("action") == "CLAIM_RESOURCE":
+            cost = 2
+        if cost and self._departure_slack(state, cur) < cost:
+            return None
+        return action
 
     def _handoff_plan(self, state, cur):
         """证明第一墙后转 S14 能接死。

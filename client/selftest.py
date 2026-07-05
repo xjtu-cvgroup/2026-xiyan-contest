@@ -4930,6 +4930,23 @@ def test_warden_strategy():
                 and a["taskId"] == "T_HANDOFF_S10",
                 str(a))
 
+    gs0 = gs_at("S10", round_no=420, phase=P.PHASE_RUSH)
+    st0 = WardenStrategy()
+    need = st0._my_need(gs0, "S10")
+    gs = gs_at("S10", opp_cur="S14",
+               round_no=int(gs0.duration_round - need
+                            - WardenStrategy.EXIT_PAD - 3),
+               phase=P.PHASE_RUSH, tasks=(t_handoff_s10,))
+    gs.nodes["S10"]["guard"] = {"ownerTeamId": gs.my_team, "defense": 6,
+                                "maxDefense": 7, "active": True}
+    st = WardenStrategy()
+    st.camp_node = "S10"
+    st._plans_ready = True
+    a = st.main_action(gs)
+    ok &= check("warden: S10临界余量不为脸上任务误终点",
+                not (a and a["action"] == "CLAIM_TASK"),
+                f"need={need} action={a}")
+
     gs = gs_at("S10", opp_cur="S08", opp_next="S10", opp_edge="E17",
                round_no=420, phase=P.PHASE_RUSH)
     for p in gs.players.values():
@@ -5127,6 +5144,21 @@ def test_warden_strategy():
     ok &= check("warden: S14起步不再吃固定STATION_PAD",
                 st._my_need(gs, "S14") == expected,
                 f"need={st._my_need(gs, 'S14')} expected={expected}")
+
+    gs = gs_at("S14", round_no=520, phase=P.PHASE_RUSH)
+    gs.roles["terminalNodeIds"] = ["S10"]
+    set_proc(gs, "S13", "TRANSFER", 5)
+    set_proc(gs, "S14", "VERIFY", 9)
+    st = WardenStrategy()
+    speed = P.SPEED_RUSH
+    start_cost = 1
+    gate_term, p2 = st._shortest(gs, gs.gate_node, gs.terminal_node,
+                                 speed)
+    proc2 = 5 if "S13" in p2 else 0
+    expected = start_cost + 9 + gate_term + proc2 + DELIVER_FRAMES
+    ok &= check("warden: 宫门后路径处理站也计入终点账本",
+                st._my_need(gs, "S14") == expected,
+                f"path={p2} need={st._my_need(gs, 'S14')} expected={expected}")
 
     gs = gs_at("S02", opp_cur="S02", round_no=380, phase=P.PHASE_RUSH)
     st = WardenStrategy()
