@@ -1026,8 +1026,12 @@ class WardenStrategy(BaselineStrategy):
                                    and node.get("processType") != "VERIFY"
                                    and (node.get("processRound") or 0) > 0
                                    and not self._node_processed(state, cur))
-        return self._delivery_need(state, cur, state.my_speed(),
-                                   include_current_process=include_current)
+        speed = P.SPEED_RUSH if self._can_rush_speed(state) \
+            else state.my_speed()
+        start_cost = 1 if speed == P.SPEED_RUSH \
+            and not state.has_move_buff() else 0
+        return start_cost + self._delivery_need(
+            state, cur, speed, include_current_process=include_current)
 
     def _beats_opp_to_task(self, state, task, my_eta, proc, opp_pos):
         return self._farm_task_race_factor(
