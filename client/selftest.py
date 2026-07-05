@@ -4637,6 +4637,33 @@ def test_warden_strategy():
     st = WardenStrategy()
     st.camp_node = "S10"
     st._plans_ready = True
+    st._processed_here = False
+    st._clear_plan = ["S10"]
+    st._scout_plan = ["S04"]
+    gs = gs_at("S02", opp_cur="S02", round_no=220)
+    gs.nodes["S10"]["hasObstacle"] = True
+    a = st.squad_action(gs)
+    ok &= check("warden: S02锁住时不提前浪费小分队探路清障",
+                a is None and st._squad_spent == 0,
+                f"{a} spent={st._squad_spent}")
+
+    st = WardenStrategy()
+    st.camp_node = "S10"
+    st._plans_ready = True
+    st._processed_here = False
+    st._s02_won_window = True
+    st._clear_plan = ["S10"]
+    gs = gs_at("S02", opp_cur="S02", round_no=220)
+    gs.nodes["S10"]["hasObstacle"] = True
+    a = st.squad_action(gs)
+    ok &= check("warden: S02赢窗后恢复非紧急小分队动作",
+                bool(a) and a["action"] == "SQUAD_CLEAR"
+                and a["targetNodeId"] == "S10",
+                str(a))
+
+    st = WardenStrategy()
+    st.camp_node = "S10"
+    st._plans_ready = True
     st._processed_here = True
     a = st.main_action(gs_at("S02", opp_cur="S02", round_no=220))
     ok &= check("warden: S02已完成后不原地等待，直奔S10",

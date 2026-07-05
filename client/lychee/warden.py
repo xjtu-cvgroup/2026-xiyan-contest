@@ -901,6 +901,11 @@ class WardenStrategy(BaselineStrategy):
             self._squad_spent += 2
             return P.a_squad_weaken(nxt)
 
+        # 主车队还卡在 S02 镜像锁/处理站争用时，探路标记和预清障很容易
+        # 在离站前过期；人手留给后段削弱、续防和真正临近的处理站标记。
+        if self._defer_nonurgent_squad(state):
+            return None
+
         # 2) 开局清障计划：沿途 + 关隘的障碍逐个远程清掉
         for nid in self._clear_plan:
             if not state.has_obstacle(nid):
@@ -962,3 +967,24 @@ class WardenStrategy(BaselineStrategy):
                     self._squad_spent += 2
                     return P.a_squad_reinforce(camp)
         return None
+
+    def _defer_nonurgent_squad(self, state):
+        me = state.me
+        if me.get("routeEdgeId"):
+            return False
+        cur = me.get("currentNodeId")
+        if not cur:
+            return False
+        # S02 的战略是 RUSH 前锁住对手；未赢窗/未换乘时离站时间不可控，
+        # 此时派出的 S04/S05/S10 标记大概率白白过期。
+        if cur == "S02" and not self._processed_here \
+                and not self._s02_won_window:
+            return True
+        if cur == "S02":
+            return False
+        nd = state.node(cur)
+        opp = state.opp
+        return (bool(nd.get("processType"))
+                and (nd.get("processRound") or 0) > 0
+                and not self._processed_here
+                and bool(opp and opp.get("currentNodeId") == cur))
