@@ -4566,6 +4566,7 @@ def test_warden_strategy():
                          resources={}, freshness=freshness, goodFruit=good_fruit,
                          badFruit=1, taskScore=task_score,
                          squadAvailable=8, guardActionPoint=guard_ap,
+                         rushTacticUsedCount=0,
                          verified=verified,
                          delivered=False, retired=False)
             else:
@@ -4909,15 +4910,19 @@ def test_warden_strategy():
 
     gs = gs_at("S10", opp_cur="S08", opp_next="S10", opp_edge="E17",
                round_no=420, phase=P.PHASE_RUSH)
-    gs.nodes["S10"]["guard"] = {"ownerTeamId": gs.my_team, "defense": 2,
+    for p in gs.players.values():
+        if p["playerId"] != 1001:
+            p["edgeProgressMs"] = 23000
+    gs.nodes["S10"]["guard"] = {"ownerTeamId": gs.my_team, "defense": 6,
                                 "maxDefense": 7, "active": True}
     st = WardenStrategy()
     st.camp_node = "S10"
     st._plans_ready = True
     a = st.main_action(gs)
-    ok &= check("warden: S10低防墙且可证明接死时提前转S14",
-                a and a["action"] == "MOVE" and a.get("targetNodeId") != "S10",
-                str(a))
+    ok &= check("warden: S10贴脸无法补卡且可接死时提前转S14",
+                a and a["action"] in (P.RUSH_SPEED, "MOVE")
+                and st.camp_node == "S14",
+                f"{a} camp={st.camp_node}")
 
     gs = gs_at("S10", opp_cur="S08", opp_next="S10", opp_edge="E17",
                round_no=250, phase=P.PHASE_NORMAL)
@@ -4929,6 +4934,18 @@ def test_warden_strategy():
     a = st.main_action(gs)
     ok &= check("warden: S10低防但接墙后杀不死则不早走",
                 not (a and a["action"] == "MOVE"),
+                str(a))
+
+    gs = gs_at("S10", round_no=420, phase=P.PHASE_RUSH)
+    for p in gs.players.values():
+        if p["playerId"] != 1001:
+            p["delivered"] = True
+    st = WardenStrategy()
+    st.camp_node = "S10"
+    st._plans_ready = True
+    a = st.main_action(gs)
+    ok &= check("warden: RUSH收官段优先使用宫宴疾行令",
+                a and a["action"] == P.RUSH_SPEED,
                 str(a))
 
     st = WardenStrategy()

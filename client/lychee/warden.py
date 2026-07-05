@@ -92,6 +92,7 @@ class WardenStrategy(BaselineStrategy):
         self._processed_nodes = set()  # 已完成固定处理的节点，避免 S02 污染后站
         self._score_farm_mode = False  # S02 锁死/RUSH 后只抢任务分，不再奔终点
         self._s02_won_window = False   # 我方赢下 S02 窗口：处理完必须抢 S10
+        self._rush_tactic_tried = False
 
     # ================= 初始化 =================
 
@@ -299,6 +300,9 @@ class WardenStrategy(BaselineStrategy):
             nxt = me.get("nextNodeId")
             if nxt and state.enemy_guard(nxt):
                 return None
+            rush = self._rush_speed_action(state)
+            if rush:
+                return rush
             if not state.has_move_buff():
                 for h in (P.FAST_HORSE, P.SHORT_HORSE):
                     if res.get(h, 0) > 0:
@@ -388,6 +392,9 @@ class WardenStrategy(BaselineStrategy):
                 return P.a_wait()            # 排队，别开无谓的码头窗口
             return P.a_process()
 
+        handoff_task = self._handoff_farm_action(state, cur)
+        if handoff_task:
+            return handoff_task
         leaving = self._should_leave(state, cur)
 
         # ---- 竞速段：直奔关隘 ----
@@ -423,6 +430,9 @@ class WardenStrategy(BaselineStrategy):
             guard = self._depart_guard(state, cur)
             if guard:
                 return guard
+        rush = self._rush_speed_action(state)
+        if rush:
+            return rush
         return self._advance(state, cur, gate)
 
     def _advance(self, state, cur, target):
@@ -1035,6 +1045,7 @@ class WardenStrategy(BaselineStrategy):
         # 才提前转宫门。不能只看防守值低，否则会把"守到数学死"
         # 误改成无谓早走。
         if self._handoff_kills(state, cur):
+            self.camp_node = state.gate_node
             return True
         # ① 死线余量：只看我方最迟出发帧。对手静止多久不是出发条件；
         #    warden 的目标是焊到最后一刻，不能被"它等了 100 帧"吓走。
@@ -1065,36 +1076,126 @@ class WardenStrategy(BaselineStrategy):
 
     def _handoff_kills(self, state, cur):
         """S10 -> S14 接墙必须可证明，而不是见低防就跑。"""
+        return self._handoff_plan(state, cur) is not None
+
+    def _handoff_farm_action(self, state, cur):
+        plan = self._handoff_plan(state, cur)
+        if not plan:
+            return None
+        res = state.me.get("resources") or {}
+        has_horse = any(res.get(h, 0) > 0
+                        for h in (P.FAST_HORSE, P.SHORT_HORSE))
+        for t in state.claimable_tasks():
+            if t.get("nodeId") != cur:
+                continue
+            if self._farm_task_blocked(state, t, has_horse):
+                continue
+            proc = t.get("processRound", 4) or 4
+            if proc + 2 <= plan["slack"]:
+                return P.a_claim_task(t["taskId"])
+        return None
+
+    def _handoff_plan(self, state, cur):
+        """证明第一墙后转 S14 能接死。
+
+        两类场景才考虑提前走：低防快风化，或对手已经贴近 S10 到
+        不足以再落第二张 S10 卡。后者是实战里"等风化结束才发现
+        补卡来不及"的根因。
+        """
         if cur == state.gate_node or not self._opp_inbound(state, cur):
-            return False
+            return None
         defense = self._my_guard_defense(state, cur)
-        if not (0 < defense <= self.HANDOFF_GUARD_DEFENSE):
-            return False
+        if defense <= 0:
+            return None
+        edge_remain = self._opp_edge_remain_to(state, cur)
+        if defense > self.HANDOFF_GUARD_DEFENSE \
+                and edge_remain >= self.GUARD_MIN_LEAD:
+            return None
         remain = state.duration_round - state.round
         if self._my_need(state, cur) >= remain:
-            return False
+            return None
 
-        my_gate_eta = self._eta_to_gate(state, cur, state.my_speed())
+        my_speed = P.SPEED_RUSH if self._can_rush_speed(state) \
+            else state.my_speed()
+        my_gate_eta = self._eta_to_gate(state, cur, my_speed)
+        if my_speed == P.SPEED_RUSH and not state.has_move_buff():
+            my_gate_eta += 1       # 本帧先开疾行令，下帧才开始移动
         if my_gate_eta == float("inf"):
-            return False
+            return None
 
         # 对手被当前墙挡到风化，再按最乐观疾行速度冲宫门。
-        opp_gate_eta = defense * self.GUARD_DECAY_FRAMES
+        opp_gate_eta = max(edge_remain, self._my_guard_remaining(state, cur))
         opp_gate_eta += self._eta_to_gate(state, cur, P.SPEED_RUSH)
         if opp_gate_eta == float("inf"):
-            return False
+            return None
 
-        if my_gate_eta + self.GUARD_MIN_LEAD > opp_gate_eta:
-            return False
+        slack = opp_gate_eta - my_gate_eta - self.GUARD_MIN_LEAD
+        if slack < 0:
+            return None
 
         gate_wall = 4 * self.GUARD_DECAY_FRAMES
         gate_term, path = self._shortest(
             state, state.gate_node, state.terminal_node, P.SPEED_RUSH)
         if not path:
-            return False
+            return None
         opp_after_wall_delivery = opp_gate_eta + gate_wall \
             + self._gate_verify_frames(state) + gate_term + DELIVER_FRAMES
-        return opp_after_wall_delivery > remain
+        if opp_after_wall_delivery <= remain:
+            return None
+        return {"slack": slack, "my_gate_eta": my_gate_eta,
+                "opp_gate_eta": opp_gate_eta}
+
+    def _can_rush_speed(self, state):
+        me = state.me
+        return (state.phase == P.PHASE_RUSH
+                and not state.has_move_buff()
+                and (me.get("rushTacticUsedCount") or 0) == 0
+                and not self._rush_tactic_tried
+                and me.get("goodFruit", 0) >= 3)
+
+    def _rush_speed_action(self, state):
+        if not self._can_rush_speed(state):
+            return None
+        self._rush_tactic_tried = True
+        return P.a_rush_speed()
+
+    def _opp_edge_remain_to(self, state, node_id):
+        opp = state.opp
+        if not (opp and opp.get("routeEdgeId")
+                and opp.get("nextNodeId") == node_id):
+            return 0.0
+        total = opp.get("edgeTotalMs") or 0
+        done = opp.get("edgeProgressMs") or 0
+        return max(0, total - done) / 1000.0
+
+    def _my_guard_remaining(self, state, node_id):
+        g = state.node(node_id).get("guard") or {}
+        defense = self._my_guard_defense(state, node_id)
+        if defense <= 0:
+            return 0
+        age = None
+        for key in ("ageRound", "age", "ageFrames"):
+            if g.get(key) is not None:
+                try:
+                    age = int(g[key])
+                    break
+                except (TypeError, ValueError):
+                    pass
+        if age is None:
+            for key in ("completeRound", "completionRound", "finishRound",
+                        "completedRound", "round"):
+                if g.get(key) is not None:
+                    try:
+                        age = max(0, state.round - int(g[key]))
+                        break
+                    except (TypeError, ValueError):
+                        pass
+        if age is not None:
+            rem_to_next = self.GUARD_DECAY_FRAMES \
+                - (age % self.GUARD_DECAY_FRAMES)
+            return rem_to_next + (defense - 1) * self.GUARD_DECAY_FRAMES
+        # 无年龄字段时用保守下界，避免高估第一墙能拖住的时间。
+        return 1 + (defense - 1) * self.GUARD_DECAY_FRAMES
 
     # ================= 小分队 =================
 
