@@ -4829,6 +4829,33 @@ def test_warden_strategy():
     st = WardenStrategy()
     st.camp_node = "S10"
     st._plans_ready = True
+    st._processed_here = True
+    st._s02_won_window = True
+    st._clear_plan = ["S10"]
+    gs = gs_at("S04", opp_cur="S02", round_no=230)
+    gs.players[1001]["squadAvailable"] = 4
+    gs.nodes["S10"]["hasObstacle"] = True
+    a = st.squad_action(gs)
+    ok &= check("warden: 抢S10阶段小分队不保底仓，全力提速清障",
+                a and a["action"] == "SQUAD_CLEAR"
+                and a["targetNodeId"] == "S10",
+                str(a))
+
+    st = WardenStrategy()
+    st.camp_node = "S10"
+    st._plans_ready = True
+    st._clear_plan = ["S11"]
+    gs = gs_at("S10", opp_cur="S09", round_no=300)
+    gs.players[1001]["squadAvailable"] = 4
+    gs.nodes["S11"]["hasObstacle"] = True
+    a = st.squad_action(gs)
+    ok &= check("warden: 驻守阶段非紧急清障仍保留4人墙战底仓",
+                a is None and st._squad_spent == 0,
+                f"{a} spent={st._squad_spent}")
+
+    st = WardenStrategy()
+    st.camp_node = "S10"
+    st._plans_ready = True
     st._score_farm_mode = True
     st._farm_target = "S02"
     gs = gs_at("S02", opp_cur="S10", round_no=430, phase=P.PHASE_RUSH)

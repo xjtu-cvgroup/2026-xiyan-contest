@@ -970,13 +970,21 @@ class WardenStrategy(BaselineStrategy):
         if self._defer_nonurgent_squad(state):
             return None
 
-        # 2) 守墙增援：卡在挨打/风化且对手仍在边上 → 续防。
-        # 这是墙的一部分，优先级高于探路和清障。
+        stage = self._squad_stage(state)
+
+        # 2) S10/S14 竞速占位期：小分队的第一职责是买速度。
+        # 这里不保 4 人墙战底仓，因为没抢到关隘所有权，后面的墙根本立不住。
+        if stage == "rush":
+            speed = self._squad_speed_action(state, reserve=False)
+            if speed:
+                return speed
+
+        # 3) 守墙期：续防是墙的一部分，优先级高于探路和清障。
         reinforce = self._squad_reinforce_action(state)
         if reinforce:
             return reinforce
 
-        # 2.4) 农任务终局：人手全转任务点标记（处理帧 -3 提速领取）
+        # 4) 农任务终局/S02 僵持后转农：人手全转任务点标记（处理帧 -3）
         target = getattr(self, "_farm_target", None)
         if target and self._can_spend_squad(state, self.SQUAD_SCOUT_COST,
                                             purpose="farm_scout") \
@@ -987,10 +995,32 @@ class WardenStrategy(BaselineStrategy):
             self._squad_spent += self.SQUAD_SCOUT_COST
             return P.a_squad_scout(target)
 
-        # 2.5) 处理站探路标记：真实 ETA（含边上剩余进度）进入寿命窗口
-        #      （≤38）才派——落地早于我们进站、45 帧寿命盖住到站。
-        #      锁死前置（实战 vs2769：S02 互锁期间派的 3 个标记全过期
-        #      白烧）：停在未处理完的处理站且对手同站=疑似锁死，不派
+        # 5) 其他阶段只在不买穿墙战底仓时买速度。
+        speed = self._squad_speed_action(state, reserve=True)
+        if speed:
+            return speed
+        return None
+
+    def _squad_speed_action(self, state, reserve=True):
+        me = state.me
+        rnd = state.round
+        clear_purpose = "clear" if reserve else "rush_clear"
+        scout_purpose = "route_scout" if reserve else "rush_scout"
+
+        # 路上有障碍先清：这是最硬的提速，也是拆掉对手白菜价强通把手。
+        if self._can_spend_squad(state, self.SQUAD_CLEAR_COST,
+                                 purpose=clear_purpose):
+            for nid in self._clear_plan:
+                if not state.has_obstacle(nid):
+                    continue
+                if rnd - self._clear_sent.get(nid, -999) < 20:
+                    continue
+                self._clear_sent[nid] = rnd
+                self._squad_spent += self.SQUAD_CLEAR_COST
+                return P.a_squad_clear(nid)
+
+        # 处理站探路标记：真实 ETA（含边上剩余进度）进入寿命窗口
+        # （≤38）才派——落地早于我们进站、45 帧寿命盖住到站。
         cur_n = me.get("currentNodeId")
         locked = False
         if cur_n and not me.get("routeEdgeId"):
@@ -1001,7 +1031,7 @@ class WardenStrategy(BaselineStrategy):
                       and not self._node_processed(state, cur_n)
                       and bool(opp and opp.get("currentNodeId") == cur_n))
         if self._can_spend_squad(state, self.SQUAD_SCOUT_COST,
-                                 purpose="route_scout") and not locked \
+                                 purpose=scout_purpose) and not locked \
                 and me.get("currentNodeId") != self.camp_node:
             for nid in self._scout_plan:
                 if self._scout_sent.get(nid):
@@ -1015,18 +1045,6 @@ class WardenStrategy(BaselineStrategy):
                 self._scout_sent[nid] = rnd
                 self._squad_spent += self.SQUAD_SCOUT_COST
                 return P.a_squad_scout(nid)
-
-        # 3) 预清障：只有路线已确定且不会买穿后段弹药时才做。
-        if self._can_spend_squad(state, self.SQUAD_CLEAR_COST,
-                                 purpose="clear"):
-            for nid in self._clear_plan:
-                if not state.has_obstacle(nid):
-                    continue
-                if rnd - self._clear_sent.get(nid, -999) < 20:
-                    continue
-                self._clear_sent[nid] = rnd
-                self._squad_spent += self.SQUAD_CLEAR_COST
-                return P.a_squad_clear(nid)
         return None
 
     def _squad_reinforce_action(self, state):
@@ -1053,7 +1071,8 @@ class WardenStrategy(BaselineStrategy):
         avail = self._squad_avail(state)
         if avail < cost:
             return False
-        if purpose in ("weaken", "reinforce"):
+        if purpose in ("weaken", "reinforce", "farm_scout",
+                       "rush_clear", "rush_scout"):
             return True
         me = state.me
         opp = state.opp
@@ -1063,6 +1082,17 @@ class WardenStrategy(BaselineStrategy):
                         and not opp.get("retired"))
         floor = self.SQUAD_NONURGENT_RESERVE if guard_threat else 0
         return avail - cost >= floor
+
+    def _squad_stage(self, state):
+        if self._score_farm_mode:
+            return "farm"
+        me = state.me
+        cur = me.get("currentNodeId") or me.get("nextNodeId")
+        if cur and cur == self.camp_node:
+            return "wall"
+        if cur and cur == state.gate_node:
+            return "wall"
+        return "rush"
 
     def _defer_nonurgent_squad(self, state):
         me = state.me
