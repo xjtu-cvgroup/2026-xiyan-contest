@@ -4550,7 +4550,7 @@ def test_warden_strategy():
               opp_process=None,
               round_no=320, phase=P.PHASE_NORMAL, verified=False,
               task_score=0, tasks=(), events=(), freshness=85.0,
-              good_fruit=70, guard_ap=4):
+              good_fruit=70, guard_ap=4, weather=None):
         gs = GameState(1001)
         gs.on_start(start)
         d = json.loads(json.dumps(inquire))
@@ -4558,7 +4558,7 @@ def test_warden_strategy():
         d["phase"] = phase
         d["contests"], d["tasks"] = [], list(tasks)
         d["events"] = list(events)
-        d["weather"] = {"active": [], "forecast": []}
+        d["weather"] = weather or {"active": [], "forecast": []}
         for p in d["players"]:
             if p["playerId"] == 1001:
                 p.update(state="IDLE", currentNodeId=cur, nextNodeId=None,
@@ -4669,6 +4669,21 @@ def test_warden_strategy():
     ok &= check("warden: S02已完成后不原地等待，直奔S10",
                 a and a["action"] == "MOVE" and a.get("targetNodeId") != "S02",
                 str(a))
+
+    rain_now = {"active": [{"type": "HEAVY_RAIN", "region": "WATER",
+                            "remainRound": 80}], "forecast": []}
+    st = WardenStrategy()
+    st.camp_node = "S10"
+    st._plans_ready = True
+    st._processed_here = True
+    st._s02_won_window = True
+    gs = gs_at("S02", opp_cur="S02", round_no=220, weather=rain_now)
+    expected = st._next_hop(gs, "S02", "S10", gs.my_speed())
+    a = st.main_action(gs)
+    ok &= check("warden: 暴雨下抢S10按天气最快路出站",
+                a and a["action"] == "MOVE"
+                and a.get("targetNodeId") == expected,
+                f"{a} expected={expected}")
 
     st = WardenStrategy()
     st.camp_node = "S10"
@@ -4783,7 +4798,7 @@ def test_warden_strategy():
     st = WardenStrategy()
     gs = gs_at("S02", round_no=380, phase=P.PHASE_RUSH,
                task_score=30, tasks=(t_chain_a, t_chain_b))
-    eta, _ = gs.graph.shortest_path("S02", "S04", gs.my_speed())
+    eta, _ = st._shortest(gs, "S02", "S04", gs.my_speed())
     follow = st._farm_followup_value(gs, t_chain_a, eta, 4, None, True)
     ok &= check("warden: 转农目标估值计入一跳后继收益",
                 follow > 0, f"follow={follow}")
@@ -4917,10 +4932,9 @@ def test_warden_strategy():
     set_proc(gs, "S13", "TRANSFER", 5)
     set_proc(gs, "S14", "VERIFY", 9)
     st = WardenStrategy()
-    to_gate, p1 = gs.graph.shortest_path("S10", gs.gate_node,
-                                         gs.my_speed())
-    gate_term, _ = gs.graph.shortest_path(gs.gate_node, gs.terminal_node,
-                                          gs.my_speed())
+    to_gate, p1 = st._shortest(gs, "S10", gs.gate_node, gs.my_speed())
+    gate_term, _ = st._shortest(gs, gs.gate_node, gs.terminal_node,
+                                gs.my_speed())
     proc = (7 if "S11" in p1 else 0) + (5 if "S13" in p1 else 0)
     expected = to_gate + proc + 9 + gate_term + DELIVER_FRAMES
     ok &= check("warden: S10离场账本随地图处理站动态计算",
@@ -4932,8 +4946,8 @@ def test_warden_strategy():
     set_proc(gs, "S13", "TRANSFER", 5)
     set_proc(gs, "S14", "VERIFY", 9)
     st = WardenStrategy()
-    gate_term, _ = gs.graph.shortest_path(gs.gate_node, gs.terminal_node,
-                                          gs.my_speed())
+    gate_term, _ = st._shortest(gs, gs.gate_node, gs.terminal_node,
+                                gs.my_speed())
     expected = 9 + gate_term + DELIVER_FRAMES
     ok &= check("warden: S14起步不再吃固定STATION_PAD",
                 st._my_need(gs, "S14") == expected,
@@ -4943,7 +4957,7 @@ def test_warden_strategy():
     st = WardenStrategy()
     t_race = {"taskId": "T_RACE", "taskTemplateId": "T01",
               "nodeId": "S04", "processRound": 4}
-    opp_eta, _ = gs.graph.shortest_path("S02", "S04", P.BASE_SPEED)
+    opp_eta, _ = st._shortest(gs, "S02", "S04")
     ok &= check("warden: S02转农只快1帧不算能做过对手",
                 not st._beats_opp_to_task(gs, t_race, opp_eta - 1, 4,
                                           "S02"),
