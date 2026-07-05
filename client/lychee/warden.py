@@ -52,7 +52,7 @@ class WardenStrategy(BaselineStrategy):
     GUARD_EXTRA = 2            # 反应卡额外投入（关键关隘 → 防 6）
     GUARD_RETRY_GAP = 25       # 同节点补卡最小间隔（防拒绝风暴）
     FRUIT_RESERVE = 5          # 好果底仓：交付要求 >0，窗口牌还要嚼几篓
-    EXIT_PAD = 25              # 离场安全余量（帧）
+    EXIT_PAD = 2               # 终点安全余量：不赌极限，也不提前太多离墙
     OPP_SPEED_MARGIN = 0.8     # 判死时对手 ETA 打折（骑马/疾行令余量）
     OPP_DEAD_BUFFER = 8        # 判死额外缓冲：宁可多守 8 帧不误判
     WEAKEN_RESEND_GAP = 12     # 被冻在边上时的削弱重发间隔
@@ -306,9 +306,10 @@ class WardenStrategy(BaselineStrategy):
         gate, terminal = state.gate_node, state.terminal_node
         remain = state.duration_round - state.round
 
-        # ---- 最高优先级：我方已数学上到不了终点 → 立刻转农 ----
+        # ---- 最高优先级：我方已安全到不了终点 → 立刻转农 ----
         # 这时 S10/S14 卡人不再是主收益；未交付结算只看任务分等账面分。
-        if not me.get("verified") and remain < self._my_need(state, cur) - 5:
+        if not me.get("verified") and remain <= self._my_need(state, cur) \
+                + self.EXIT_PAD:
             self._score_farm_mode = True
             return self._farm_endgame(state, cur)
 
