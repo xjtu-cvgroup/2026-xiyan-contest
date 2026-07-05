@@ -463,10 +463,12 @@ class WardenStrategy(BaselineStrategy):
                     and me.get("goodFruit", 0) > 1)
 
     def _s02_lock_spent(self, state):
-        """S02 假锁识别：献贡不可用或 RUSH 已到，就别再开无效窗口。"""
+        """S02 假锁识别：献贡/兵争都不可用或 RUSH 已到，才停止开窗。"""
         if state.phase == P.PHASE_RUSH:
             return True
-        return not self._xian_gong_available(state)
+        if self._xian_gong_available(state):
+            return False
+        return (state.me.get("guardActionPoint") or 0) <= 0
 
     # ---- 封锁 ----
 

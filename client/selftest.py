@@ -4619,8 +4619,18 @@ def test_warden_strategy():
     st._plans_ready = True
     st._processed_here = False
     a = st.main_action(gs_at("S02", opp_cur="S02", round_no=366,
-                             freshness=79.8, good_fruit=29))
-    ok &= check("warden: S02献贡不可用时转农处理而非继续硬锁",
+                             freshness=79.8, good_fruit=29, guard_ap=4))
+    ok &= check("warden: S02献贡不可用但兵争可用时继续开窗",
+                not st._score_farm_mode and a and a["action"] == "PROCESS",
+                str(a))
+
+    st = WardenStrategy()
+    st.camp_node = "S10"
+    st._plans_ready = True
+    st._processed_here = False
+    a = st.main_action(gs_at("S02", opp_cur="S02", round_no=366,
+                             freshness=79.8, good_fruit=29, guard_ap=0))
+    ok &= check("warden: S02献贡和兵争都不可用时才转农处理",
                 st._score_farm_mode and a and a["action"] == "PROCESS",
                 str(a))
 
