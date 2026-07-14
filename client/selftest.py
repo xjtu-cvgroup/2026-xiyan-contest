@@ -5793,6 +5793,95 @@ def test_hybrid_strategy():
                 and acts[0]["extraGoodFruit"] == 0,
                 f"plan={plan} acts={acts}")
 
+    # replay.report (2)：S09 免费卡完成后，对手仍明确在 S07->S09 边上。
+    # 我方交付和 S14 先手都有余量时应留到卡亡并复卡，而不是落卡即走。
+    gs_hold = make_state(
+        bypass=True, bypass_distance=85, race_variant=True,
+        cur="S09", opp_cur="S07", opp_next="S09", opp_edge="E04",
+        opp_edge_ms=66240, opp_edge_progress=13000,
+        round_no=367, task_score=30)
+    gs_hold.nodes["S09"]["guard"] = {
+        "ownerTeamId": gs_hold.my_team, "defense": 2,
+        "maxDefense": 6, "active": True, "completeRound": 367}
+    hybrid._mobile_hold_node = "S09"
+    acts = hybrid.decide(gs_hold)
+    ok &= check("hybrid: S09免费卡生效且敌仍在入边时有界留守",
+                any(a["action"] == "WAIT" for a in acts)
+                and not any(a["action"] == "SET_GUARD" for a in acts),
+                f"budget={hybrid._gate_lead_budget(gs_hold)} acts={acts}")
+
+    gs_contest = make_state(
+        bypass=True, bypass_distance=85, race_variant=True,
+        cur="S09", opp_cur="S07", opp_next="S09", opp_edge="E04",
+        opp_edge_ms=66240, opp_edge_progress=13000,
+        round_no=368, task_score=30)
+    gs_contest.nodes["S09"]["guard"] = {
+        "ownerTeamId": gs_contest.my_team, "defense": 2,
+        "maxDefense": 6, "active": True, "completeRound": 367}
+    gs_contest.contests = [{
+        "contestId": "C_S09_PASS", "contestType": P.CONTEST_PASS,
+        "targetNodeId": "S09", "redPlayerId": 1001,
+        "bluePlayerId": 2002, "resolved": False}]
+    contest_hybrid = HybridStrategy()
+    contest_hybrid.mode = HybridStrategy.MODE_MOBILE
+    contest_hybrid._mobile_hold_node = "S09"
+    acts = contest_hybrid.decide(gs_contest)
+    ok &= check("hybrid: S09留守遇通行窗口同时出牌且不离位",
+                any(a["action"] == "WINDOW_CARD" for a in acts)
+                and any(a["action"] == "WAIT" for a in acts)
+                and not any(a["action"] == "MOVE" for a in acts), str(acts))
+
+    gs_reguard = make_state(
+        bypass=True, bypass_distance=85, race_variant=True,
+        cur="S09", opp_cur="S07", opp_next="S09", opp_edge="E04",
+        opp_edge_ms=66240, opp_edge_progress=14000,
+        round_no=375, task_score=30)
+    acts = hybrid.decide(gs_reguard)
+    ok &= check("hybrid: S09免费卡被拆后敌仍在入边则立即复卡",
+                any(a["action"] == "SET_GUARD"
+                    and a["targetNodeId"] == "S09"
+                    and a["extraGoodFruit"] == 0 for a in acts), str(acts))
+
+    # 改线即解除驻守；状态粘性绝不能退化成对手未上边也提前设卡。
+    gs_turn = make_state(
+        bypass=True, bypass_distance=85, race_variant=True,
+        cur="S09", opp_cur="S07", round_no=376, task_score=30)
+    gs_turn.nodes["S09"]["guard"] = {
+        "ownerTeamId": gs_turn.my_team, "defense": 2,
+        "maxDefense": 6, "active": True, "completeRound": 367}
+    acts = hybrid.decide(gs_turn)
+    ok &= check("hybrid: 对手离开S09入边后立即解除驻守且不预卡",
+                hybrid._mobile_hold_node is None
+                and not any(a["action"] in ("WAIT", "SET_GUARD")
+                            for a in acts), str(acts))
+
+    # 最后一帧交付安全垫不能拿去复卡：即使敌人仍在入边也必须转场。
+    probe = make_state(
+        bypass=True, bypass_distance=85, race_variant=True,
+        cur="S09", opp_cur="S07", opp_next="S09", opp_edge="E04",
+        opp_edge_ms=66240, opp_edge_progress=13000,
+        round_no=450, phase=P.PHASE_RUSH, task_score=30)
+    probe_hybrid = HybridStrategy()
+    probe_hybrid.mode = HybridStrategy.MODE_MOBILE
+    my_eta = probe_hybrid._gate_eta(probe, probe.me, optimistic=False)
+    need = probe_hybrid._my_finish_need(probe, my_eta)
+    deadline_round = 600 - need - probe_hybrid.warden.EXIT_PAD
+    gs_deadline = make_state(
+        bypass=True, bypass_distance=85, race_variant=True,
+        cur="S09", opp_cur="S07", opp_next="S09", opp_edge="E04",
+        opp_edge_ms=66240, opp_edge_progress=13000,
+        round_no=deadline_round, phase=P.PHASE_RUSH, task_score=30)
+    gs_deadline.nodes["S09"]["guard"] = {
+        "ownerTeamId": gs_deadline.my_team, "defense": 2,
+        "maxDefense": 6, "active": True, "completeRound": deadline_round}
+    probe_hybrid._mobile_hold_node = "S09"
+    acts = probe_hybrid.decide(gs_deadline)
+    ok &= check("hybrid: 交付安全垫触底时不恋战S09",
+                probe_hybrid._mobile_hold_node is None
+                and not any(a["action"] in ("WAIT", "SET_GUARD")
+                            for a in acts),
+                f"round={deadline_round} need={need} acts={acts}")
+
     gs = make_state(bypass=True, cur="S09", opp_cur="S07",
                     opp_next="S09", opp_edge="E04", round_no=550,
                     phase=P.PHASE_RUSH)

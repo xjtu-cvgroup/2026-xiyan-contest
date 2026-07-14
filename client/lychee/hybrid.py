@@ -39,6 +39,7 @@ class HybridStrategy(Strategy):
         self.primary_choke = None
         self.mobile_target = None
         self.mobile_plan = None
+        self._mobile_hold_node = None
         self._gate_pace_active = False
         self._s02_farm_only = False
         self._s02_deny_only = False
@@ -82,6 +83,13 @@ class HybridStrategy(Strategy):
                 self.warden._score_farm_mode = True
                 return self.warden.decide(state)
             return self._denial_only_actions(state)
+
+        hold = self._mobile_reguard_action(state)
+        if hold:
+            if state.my_open_contests():
+                return self._replace_main_action(
+                    self._score_actions(state), hold)
+            return [hold]
 
         # S02 已拿到明确处理先手时，开始保护最终墙的领先预算。此处不再
         # 直接粘性切到 S14：只要任务的完整机会成本吃不掉先手，就继续得分。
@@ -242,6 +250,12 @@ class HybridStrategy(Strategy):
         """我方交付已死：禁止任务，依次抢动态墙、宫门墙和最近拒止位。"""
         self.warden._deny_only_mode = True
         self.warden._score_farm_mode = False
+        hold = self._mobile_reguard_action(state)
+        if hold:
+            if state.my_open_contests():
+                return self._replace_main_action(
+                    self.warden.decide(state), hold)
+            return [hold]
         actions = self.warden.decide(state)
         main = self._main_action(actions)
         if main and main.get("action") == "SET_GUARD":
@@ -505,8 +519,79 @@ class HybridStrategy(Strategy):
         finish_need = self._my_finish_need(state, my_eta)
         slack = 999 if deny_only else state.duration_round - state.round \
             - finish_need - self.warden.EXIT_PAD
-        return self.warden.mobile_intercept_action(
+        action = self.warden.mobile_intercept_action(
             state, slack, allow_reserve=allow_reserve)
+        if action and action.get("action") == "SET_GUARD":
+            node_id = action.get("targetNodeId")
+            extra = action.get("extraGoodFruit", 0) or 0
+            # 只把普通节点的免费移动卡升级为有界驻守。关键关/宫门仍走
+            # 原 Warden 的付费墙纪律，避免把小补丁扩散成新的固定蹲点。
+            if node_id == state.me.get("currentNodeId") \
+                    and self.warden._guard_base_cost(state, node_id) + extra == 0:
+                self._mobile_hold_node = node_id
+        return action
+
+    def _mobile_reguard_safe(self, state, node_id):
+        """免费移动卡可续守一帧，且仍保住交付与最终墙先手。"""
+        if not node_id or not self.warden._opp_inbound(state, node_id):
+            return False
+        extra = self.warden._mobile_guard_extra(state, node_id)
+        if self.warden._guard_base_cost(state, node_id) + extra != 0:
+            return False
+        edge_remain = self.warden._opp_edge_remaining(state)
+        if edge_remain < self.warden.MOBILE_GUARD_PAD:
+            return False
+        delay = self.warden._mobile_guard_delay(
+            state, node_id, extra, edge_remain)
+        if delay < self.warden.MOBILE_GUARD_MIN_DELAY:
+            return False
+
+        if self._s02_deny_only or self.warden._deny_only_mode:
+            return True
+        if not self._gate_has_reaction_window(state):
+            return False
+        my_eta = self._gate_eta(state, state.me, optimistic=False)
+        if my_eta >= 999:
+            return False
+        finish_need = self._my_finish_need(state, my_eta)
+        remain = state.duration_round - state.round
+        # WAIT 本身也占一帧，不能把 EXIT_PAD 的最后一帧拿去陪卡。
+        if finish_need + self.warden.EXIT_PAD + 1 > remain:
+            return False
+        return self._gate_lead_budget(state) >= 1
+
+    def _mobile_reguard_action(self, state):
+        """对手仍在入边时守住免费卡；拆掉后仍在边上则立即复卡。"""
+        node_id = self._mobile_hold_node
+        if not node_id:
+            return None
+        me = state.me
+        if not me or me.get("routeEdgeId") \
+                or me.get("currentNodeId") != node_id \
+                or me.get("verified") or me.get("delivered") \
+                or me.get("retired"):
+            self._mobile_hold_node = None
+            return None
+        if me.get("state") in P.BUSY_STATES:
+            return None
+        if not self._mobile_reguard_safe(state, node_id):
+            self._mobile_hold_node = None
+            return None
+
+        guard = state.node(node_id).get("guard")
+        active = bool(guard and guard.get("ownerTeamId") == state.my_team
+                      and guard.get("active", guard.get("defense", 0) > 0))
+        if active:
+            return P.a_wait()
+
+        action = self._score_mobile_intercept(
+            state,
+            allow_reserve=self._s02_deny_only or self.warden._deny_only_mode,
+            deny_only=self._s02_deny_only or self.warden._deny_only_mode)
+        if action:
+            return action
+        self._mobile_hold_node = None
+        return None
 
     @staticmethod
     def _replace_main_action(actions, replacement):
