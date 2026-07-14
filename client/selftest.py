@@ -5426,6 +5426,89 @@ def test_hybrid_strategy():
                 and acts_h == acts_w,
                 f"hybrid={acts_h} warden={acts_w}")
 
+    # 隐藏旁路图仍要先证明 S02 最早到达，不得在 S01 把开局交给
+    # Planner。公开 E01=30 ROAD：直走 42 帧；快马领取2帧+起步后
+    # 使用=40帧；短马=42帧，持平时不浪费领取帧。
+    gs = make_state(bypass=True)
+    hybrid = HybridStrategy()
+    acts = hybrid.decide(gs)
+    ok &= check("hybrid: 变种图无S01加速时直冲S02",
+                hybrid.mode == HybridStrategy.MODE_MOBILE
+                and any(a["action"] == "MOVE"
+                        and a["targetNodeId"] == "S02" for a in acts),
+                str(acts))
+
+    gs = make_state(bypass=True)
+    gs.resource_config = list(gs.resource_config) + [{
+        "nodeId": "S01", "resourceType": P.FAST_HORSE,
+        "count": 1, "claimRound": 2}]
+    gs.nodes["S01"]["resourceStock"] = {P.FAST_HORSE: 1}
+    hybrid = HybridStrategy()
+    acts = hybrid.decide(gs)
+    direct_eta, _ = hybrid.warden._travel_dynamic(gs, "S01", "S02")
+    fast_eta, _, _ = hybrid.warden._opening_horse_route(
+        gs, P.FAST_HORSE, 2)
+    ok &= check("hybrid: S01快马严格更早时先领取",
+                direct_eta == 42 and fast_eta == 40
+                and any(a["action"] == "CLAIM_RESOURCE"
+                    and a["resourceType"] == P.FAST_HORSE for a in acts),
+                f"direct={direct_eta} fast={fast_eta} acts={acts}")
+    gs.me.update(resources={P.FAST_HORSE: 1}, state=P.ST_IDLE)
+    gs.nodes["S01"]["resourceStock"] = {}
+    acts = hybrid.decide(gs)
+    ok &= check("hybrid: 领快马后先上S02入边",
+                any(a["action"] == "MOVE"
+                    and a["targetNodeId"] == "S02" for a in acts),
+                str(acts))
+    gs.me.update(state=P.ST_MOVING, currentNodeId="S01",
+                 nextNodeId="S02", routeEdgeId="E01",
+                 edgeTotalMs=41400, edgeProgressMs=1000)
+    acts = hybrid.decide(gs)
+    ok &= check("hybrid: 上边后第一帧合法用快马",
+                any(a["action"] == "USE_RESOURCE"
+                    and a["resourceType"] == P.FAST_HORSE for a in acts),
+                str(acts))
+
+    gs = make_state(bypass=True)
+    gs.resource_config = list(gs.resource_config) + [{
+        "nodeId": "S01", "resourceType": P.SHORT_HORSE,
+        "count": 1, "claimRound": 2}]
+    gs.nodes["S01"]["resourceStock"] = {P.SHORT_HORSE: 1}
+    hybrid = HybridStrategy()
+    acts = hybrid.decide(gs)
+    short_eta, _, _ = hybrid.warden._opening_horse_route(
+        gs, P.SHORT_HORSE, 2)
+    ok &= check("hybrid: S01短马与直走持平时不领",
+                short_eta == 42
+                and any(a["action"] == "MOVE"
+                    and a["targetNodeId"] == "S02" for a in acts)
+                and not any(a["action"] == "CLAIM_RESOURCE" for a in acts),
+                f"short={short_eta} acts={acts}")
+
+    gs = make_state(bypass=True)
+    gs.resource_config = list(gs.resource_config) + [{
+        "nodeId": "S01", "resourceType": P.FAST_HORSE,
+        "count": 1, "claimRound": 2}]
+    gs.nodes["S01"]["resourceStock"] = {P.FAST_HORSE: 1}
+    gs.opp["resources"] = {}
+    st = WardenStrategy()
+    st.s02_opening_active(gs)
+    st._ensure_s02_opening_plan(gs)
+    contest = {"contestType": P.CONTEST_RESOURCE,
+               "targetNodeId": "S01", "resourceType": P.FAST_HORSE}
+    ok &= check("hybrid: S01共享马争夺对手无强行时献贡不败",
+                st._defense_card(gs, contest) == P.CARD_XIAN_GONG,
+                st._defense_card(gs, contest))
+    gs.events = [{"type": "WINDOW_CONTEST_DRAW", "payload": {
+        "contestType": P.CONTEST_RESOURCE, "targetNodeId": "S01",
+        "resourceType": P.FAST_HORSE}}]
+    st._absorb_feedback(gs)
+    action = st.main_action(gs)
+    ok &= check("hybrid: S01马窗平局后放弃重争直冲",
+                action and action["action"] == "MOVE"
+                and action["targetNodeId"] == "S02",
+                str(action))
+
     # replay.report (3)：S10 仍是必经主墙时模式为 PRIMARY，但途中 S09
     # 免费截击卡仍必须完整执行“首设->留守->被拆后复设”。此前测试只强制
     # MODE_MOBILE，导致 PRIMARY 在复卡状态机之前直接返回而漏过实战入口。

@@ -60,6 +60,11 @@ class HybridStrategy(Strategy):
                 self.log.info("hybrid: initial mode=%s primary=%s",
                               self.mode, self.primary_choke)
 
+        # 变种图不能让 Planner 在 S01 自由农资源：先统一执行根据
+        # 本局 JSON/天气/马持续时长证明的最早 S02 方案。
+        if self.warden.s02_opening_active(state):
+            return self.warden.decide(state)
+
         if self.mode == self.MODE_PRIMARY:
             # 公开图/必经主墙仍由 Warden 决策，但它也会在途中发出普通点
             # 免费截击卡。复卡状态机必须包住这条入口，不能只在旁路图的

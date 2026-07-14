@@ -111,6 +111,11 @@ class WardenStrategy(BaselineStrategy):
         self._delivery_committed = False  # 离墙收官后一律去宫门/终点，禁止回头
         self._rolling_wall = False     # 破墙后按2621纪律滚动，普通点只下免费卡
         self._last_forced_node = None  # 6.3.2：该到达点不能再次作为强通起点
+        self._s02_opening = None       # 变种图开局仍须证明最早到 S02
+        self._s02_opening_resource = None
+        self._s02_opening_first_hop = None
+        self._s02_opening_path = []
+        self._s02_resource_drawn = False
 
     # ================= 初始化 =================
 
@@ -222,7 +227,13 @@ class WardenStrategy(BaselineStrategy):
             if state.me.get("routeEdgeId") else state.me.get("currentNodeId")
         path = []
         if me_pos:
-            _, path = self._timed_path(state, me_pos, self.camp_node)
+            if self.s02_opening_active(state):
+                self._ensure_s02_opening_plan(state)
+                opening = self._s02_opening_path or [me_pos]
+                _, tail = self._timed_path(state, "S02", self.camp_node)
+                path = opening + (tail[1:] if tail else [])
+            else:
+                _, path = self._timed_path(state, me_pos, self.camp_node)
         self._clear_plan = [n for n in (path or []) if state.has_obstacle(n)]
         if self.camp_node not in self._clear_plan \
                 and state.has_obstacle(self.camp_node):
@@ -326,6 +337,18 @@ class WardenStrategy(BaselineStrategy):
             node_id = payload.get("nodeId") or payload.get("targetNodeId")
             if node_id:
                 self._last_forced_node = node_id
+        # 共享马资源若三拍打平，双方已同时损失窗口帧。不再
+        # 重复争同一份马，直接走已经是不晚于对手的保底。
+        for event in state.my_events("WINDOW_CONTEST_DRAW"):
+            payload = event.get("payload") or {}
+            if payload.get("contestType") == P.CONTEST_RESOURCE \
+                    and payload.get("targetNodeId") == state.start_node \
+                    and payload.get("resourceType") \
+                    in (P.FAST_HORSE, P.SHORT_HORSE):
+                self._s02_resource_drawn = True
+                self._s02_opening_resource = None
+                self._s02_opening_first_hop = None
+                self._s02_opening_path = []
 
     def _maybe_fallback_gate(self, state):
         """当前墙被买穿后，沿双方后续路线滚动到下一个可抢截击点。"""
@@ -399,6 +422,16 @@ class WardenStrategy(BaselineStrategy):
     def _defense_card(self, state, contest):
         me = state.me
         res = me.get("resources") or {}
+        # 变种图 S01 可能投放马。双方同时领取时，对手尚无马/
+        # 疾行，因而无法合法打出唯一能克献贡的强行；献贡至少不败。
+        if contest.get("contestType") == P.CONTEST_RESOURCE \
+                and contest.get("targetNodeId") == state.start_node \
+                and contest.get("resourceType") \
+                in (P.FAST_HORSE, P.SHORT_HORSE) \
+                and self.s02_opening_active(state) \
+                and not self._opp_can_qiang_xing(state) \
+                and self._xian_gong_available(state):
+            return P.CARD_XIAN_GONG
         # 码头窗（S02 开局争先手）：双方此时都无马 → 强行不存在 →
         # 鲜供不败（对鲜供平、对其余全胜）。1 好果/拍；若演化成镜像
         # 锁死，未交付世界里好果一文不值，烧果免费。鲜供需要鲜度≥80；
@@ -453,6 +486,13 @@ class WardenStrategy(BaselineStrategy):
         cur = me.get("currentNodeId")
         gate, terminal = state.gate_node, state.terminal_node
         remain = state.duration_round - state.round
+
+        # 不论公开图/变种图/后续用哪套墙策略，开局先执行“最早
+        # 到 S02”证明。这层只存活到进站，不污染 S02 之后的策略。
+        if self.s02_opening_active(state):
+            opening = self._s02_opening_action(state, cur)
+            if opening:
+                return opening
 
         # ---- 最高优先级：我方交付已死时，先判断对手是否也死 ----
         # EXIT_PAD 是离墙安全垫，不是放弃交付阈值；否则到 S14 临界帧会
@@ -646,6 +686,157 @@ class WardenStrategy(BaselineStrategy):
             if stock.get(rt, 0) > 0 and res.get(rt, 0) < 1:
                 return P.a_claim_resource(cur, rt)
         return None
+
+    # ---- 变种图 S02 开局竞速证明 ----
+
+    def s02_opening_active(self, state):
+        """开局仅以实际下发地图判断：到 S02 前锁定最快方案。"""
+        me = state.me
+        if not me or state.start_node == "S02" or not state.node("S02"):
+            self._s02_opening = False
+            return False
+        if not me.get("routeEdgeId") and me.get("currentNodeId") == "S02":
+            self._s02_opening = False
+            return False
+        if self._s02_opening is None:
+            self._s02_opening = bool(
+                not me.get("routeEdgeId")
+                and me.get("currentNodeId") == state.start_node)
+        return bool(self._s02_opening)
+
+    @staticmethod
+    def _opening_horse_duration(resource_type):
+        return FAST_HORSE_FRAMES if resource_type == P.FAST_HORSE \
+            else SHORT_HORSE_FRAMES
+
+    @staticmethod
+    def _opp_can_qiang_xing(state):
+        opp = state.opp or {}
+        resources = opp.get("resources") or {}
+        if any(resources.get(h, 0) > 0
+               for h in (P.FAST_HORSE, P.SHORT_HORSE)):
+            return True
+        return any((b.get("type") or b.get("buffType"))
+                   in (P.FAST_HORSE, P.SHORT_HORSE, P.RUSH_SPEED)
+                   for b in (opp.get("buffs") or []))
+
+    def _opening_claim_round(self, state, resource_type):
+        rounds = [r.get("claimRound") for r in state.resource_config
+                  if r.get("nodeId") == state.start_node
+                  and r.get("resourceType") == resource_type
+                  and r.get("claimRound") is not None]
+        return max(0, int(rounds[0])) if rounds else None
+
+    def _opening_horse_route(self, state, resource_type, claim_round):
+        """精确模拟：领取后先上边 1 帧，下一帧才能在移动中用马。"""
+        best = (999, [], None)
+        duration = self._opening_horse_duration(resource_type)
+        entry_penalty = self._route_entry_penalty(state)
+        for neighbor, edge in state.graph.neighbors(state.start_node):
+            # 首帧若必须强通，主车不会进入可用马的 MOVING 态；
+            # 不把这类路线的纸面马速当成真实收益。
+            if state.is_blocked(neighbor):
+                continue
+            elapsed = int(claim_round)
+            remaining = state.graph.edge_total_move(edge)
+            route_type = edge.get("routeType")
+
+            # 服务端只允许移动中使用马：MOVE 起步帧按基础速度。
+            tax = self._weather_tax_at(
+                state, route_type, state.round + elapsed,
+                conservative=True)
+            remaining -= max(1, int(P.BASE_SPEED * 1000 / tax))
+            elapsed += 1
+            boost_rem = duration
+            while remaining > 0 and elapsed < 1000:
+                speed = self._boost_speed(resource_type) \
+                    if boost_rem > 0 else P.BASE_SPEED
+                tax = self._weather_tax_at(
+                    state, route_type, state.round + elapsed,
+                    conservative=True)
+                remaining -= max(1, int(speed * 1000 / tax))
+                elapsed += 1
+                if boost_rem > 0:
+                    boost_rem -= 1
+
+            entry = max(0, int(entry_penalty(neighbor) or 0))
+            elapsed += entry
+            boost_type = resource_type if boost_rem > 0 else None
+            boost_type, boost_rem = self._consume_boost(
+                boost_type, boost_rem, entry)
+            if neighbor == "S02":
+                eta, path = elapsed, [state.start_node, neighbor]
+            else:
+                eta, tail = self._travel_dynamic(
+                    state, neighbor, "S02", boost_type, boost_rem,
+                    start_elapsed=elapsed, include_current_process=True,
+                    include_intermediate_process=True,
+                    conservative_weather=True,
+                    node_entry_penalty=entry_penalty)
+                path = [state.start_node] + tail if tail else []
+            if path and eta < best[0]:
+                best = (eta, path, neighbor)
+        return best
+
+    def _ensure_s02_opening_plan(self, state):
+        if self._s02_opening_first_hop:
+            return
+        boost_type, boost_rem, _ = self._active_speed_buff(state)
+        direct_eta, direct_path = self._travel_dynamic(
+            state, state.start_node, "S02", boost_type, boost_rem,
+            include_intermediate_process=True, conservative_weather=True,
+            node_entry_penalty=self._route_entry_penalty(state))
+        best_eta, best_path = direct_eta, direct_path
+        best_resource = None
+        resources = state.me.get("resources") or {}
+        stock = state.node(state.start_node).get("resourceStock") or {}
+
+        # 已有移动增益时不冒马冲突；只有严格早于直走才领取。
+        if not boost_type and not self._s02_resource_drawn:
+            for horse in (P.FAST_HORSE, P.SHORT_HORSE):
+                owned = resources.get(horse, 0) > 0
+                if not owned and stock.get(horse, 0) <= 0:
+                    continue
+                claim_round = 0 if owned \
+                    else self._opening_claim_round(state, horse)
+                if claim_round is None:
+                    continue
+                eta, path, _ = self._opening_horse_route(
+                    state, horse, claim_round)
+                if eta < best_eta:
+                    best_eta, best_path = eta, path
+                    best_resource = horse
+
+        self._s02_opening_resource = best_resource
+        self._s02_opening_path = best_path or []
+        self._s02_opening_first_hop = best_path[1] \
+            if len(best_path or []) > 1 else None
+        if self.log:
+            self.log.info(
+                "warden: S02 opening eta=%s resource=%s path=%r",
+                best_eta, best_resource, best_path)
+
+    def _s02_opening_action(self, state, cur):
+        self._ensure_s02_opening_plan(state)
+        if not self._s02_opening_path:
+            self._s02_opening = False
+            return None
+        resource = self._s02_opening_resource
+        resources = state.me.get("resources") or {}
+        stock = state.node(cur).get("resourceStock") or {}
+        if cur == state.start_node and resource \
+                and resources.get(resource, 0) <= 0:
+            if stock.get(resource, 0) > 0:
+                return P.a_claim_resource(cur, resource)
+            # 马被对手抢走/对象冷却：不空发，当帧改直冲。
+            self._s02_resource_drawn = True
+            self._s02_opening_resource = None
+            self._s02_opening_first_hop = None
+            self._s02_opening_path = []
+            self._ensure_s02_opening_plan(state)
+        target = self._s02_opening_first_hop \
+            if cur == state.start_node else "S02"
+        return self._advance(state, cur, target or "S02")
 
     def _s02_lock_hold(self, state, cur):
         """S02 镜像码头窗：RUSH 前目标是拖住双方，不是抢先离站。"""
