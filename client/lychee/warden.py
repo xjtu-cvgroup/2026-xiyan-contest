@@ -1,4 +1,4 @@
-"""S10 守望者策略（W1）——走廊封锁流的完整工程实现。
+"""动态守望者策略——关键墙 + 2621 式滚动截击。
 
 对 2026-07-05 三局实战语料（路人女主队 80:677 完美 camp、BasicPy 568:30
 要塞 camp、主办方确认的中边改道机制）的极致复刻与强化，作为独立客户端
@@ -23,9 +23,11 @@
    触及自身交付需求 + 余量。离场时若对手仍在逼近，落一张临别卡
    （2735 的招牌）再走。宫门等 RUSH、验核、交付。
 
-W1 刻意不做的：鲜度管理（无冰走廊，砖比漆重要）、悬赏、任务巡回、
-对镜像守望者的对策（双 camp 局自然互不干扰各自交付）。
+V3.98 保留主墙的验证强度，并把移动截击作为窄动作叠加；隐藏旁路图的
+任务、资源、鲜度和悬赏仍由 Planner 负责，避免把整套得分底盘推倒重来。
 """
+import math
+
 from . import protocol as P
 from .planner import TaskPlanner
 from .strategy import BaselineStrategy
@@ -54,6 +56,9 @@ class WardenStrategy(BaselineStrategy):
 
     GUARD_EXTRA = 2            # 反应卡额外投入（关键关隘 → 防 6）
     GUARD_RETRY_GAP = 25       # 同节点补卡最小间隔（防拒绝风暴）
+    MOBILE_GUARD_RETRY_GAP = 5  # 对手重新踏边后允许快速复卡
+    MOBILE_GUARD_MIN_DELAY = 6  # 至少制造 6 帧确定延误才暴露截击意图
+    MOBILE_GUARD_PAD = 5       # 4 帧读条完成，下一帧开始阻塞
     FRUIT_RESERVE = 5          # 好果底仓：交付要求 >0，窗口牌还要嚼几篓
     EXIT_PAD = 10              # 终点安全余量：覆盖帧序/天气/处理站量化误差
     FARM_DEAD_PAD = 0          # 真到不了终点才转农；安全垫只用于离墙
@@ -100,6 +105,7 @@ class WardenStrategy(BaselineStrategy):
         self._s02_won_window = False   # 我方赢下 S02 窗口：处理完必须抢 S10
         self._rush_tactic_tried = False
         self._delivery_committed = False  # 离墙收官后一律去宫门/终点，禁止回头
+        self._rolling_wall = False     # 破墙后按2621纪律滚动，普通点只下免费卡
 
     # ================= 初始化 =================
 
@@ -118,6 +124,18 @@ class WardenStrategy(BaselineStrategy):
         return state.graph.shortest_path(
             src, dst, speed or P.BASE_SPEED, None,
             self._weather_edge_cost(state))
+
+    def _shortest_avoiding(self, state, src, dst, blocked, speed=None):
+        """不经过 blocked 的最短路；用于给对手的真实改道代价定价。"""
+        if not src or not dst or src == blocked or dst == blocked:
+            return float("inf"), []
+        cost, path = state.graph.shortest_path(
+            src, dst, speed or P.BASE_SPEED,
+            lambda node_id: 100000 if node_id == blocked else 0,
+            self._weather_edge_cost(state))
+        if blocked in path:
+            return float("inf"), []
+        return cost, path
 
     def _next_hop(self, state, src, dst, speed=None):
         return state.graph.next_hop(
@@ -169,6 +187,7 @@ class WardenStrategy(BaselineStrategy):
         self.camp_node = node_id
         self._plans_ready = False
         self._delivery_committed = False
+        self._rolling_wall = False
 
     # ================= 每帧入口 =================
 
@@ -230,12 +249,7 @@ class WardenStrategy(BaselineStrategy):
                 self._s02_won_window = True
 
     def _maybe_fallback_gate(self, state):
-        """当前墙被买穿/正在被攻坚/已失去必经性 → 转场宫门 S14 重筑墙。
-
-        S10 是第一道墙，不是最后一块地。对手一旦把墙转成强通税或攻坚
-        读条，继续守原点的收益会快速归零；原先套路就是果断放弃，到
-        下一个唯一汇合点继续埋伏。
-        """
+        """当前墙被买穿后，沿双方后续路线滚动到下一个可抢截击点。"""
         if self._delivery_committed:
             return
         camp = self.camp_node
@@ -260,11 +274,40 @@ class WardenStrategy(BaselineStrategy):
         if forcing:
             self._last_inbound = state.round   # 转运=正在逼近，别当埋伏流
         if forcing or breaking or breached:
+            next_wall = self._next_intercept_after(state, camp) or gate
             if self.log:
-                self.log.info("warden: fallback to gate wall (%s)",
+                self.log.info("warden: rolling wall %s -> %s (%s)", camp,
+                              next_wall,
                               "forced-pass" if forcing else
                               ("break-guard" if breaking else "breached"))
-            self.camp_node = gate
+            self.camp_node = next_wall
+            self._rolling_wall = True
+
+    def _next_intercept_after(self, state, old_camp):
+        """2621 式转场：优先抢下一汇合点，不机械跳到 S14。"""
+        gate = state.gate_node
+        opp = state.opp
+        opp_pos = opp.get("nextNodeId") or opp.get("currentNodeId")
+        if not opp_pos:
+            return gate
+        _, my_path = self._shortest(state, old_camp, gate, P.SPEED_RUSH)
+        opp_eta, opp_path = self._shortest(
+            state, opp_pos, gate, P.SPEED_RUSH)
+        if not my_path or not opp_path:
+            return gate
+        for node_id in my_path[1:-1]:
+            my_eta, _ = self._shortest(
+                state, old_camp, node_id, state.my_speed())
+            their_eta, their_path = self._shortest(
+                state, opp_pos, node_id, P.SPEED_RUSH)
+            if not their_path or my_eta + self.MOBILE_GUARD_PAD > their_eta:
+                continue
+            bypass_eta, bypass_path = self._shortest_avoiding(
+                state, opp_pos, gate, node_id, P.SPEED_RUSH)
+            detour = (bypass_eta - opp_eta) if bypass_path else 999
+            if node_id in opp_path or detour >= self.MOBILE_GUARD_MIN_DELAY:
+                return node_id
+        return gate
 
     # ================= 窗口防守 =================
 
@@ -346,6 +389,13 @@ class WardenStrategy(BaselineStrategy):
             guard = self._reactive_guard(state, cur)
             if guard:
                 return guard
+
+        # 2621 式滚动截击：对手已经用 routeEdgeId/nextNodeId 公开承诺路线，
+        # 我方恰好占住其目标点时，先落最低成本有效卡，再做处理/任务。
+        # 这层不猜画像，也不预卡；到不了终点或已进入收官时完全关闭。
+        guard = self.mobile_intercept_action(state)
+        if guard:
+            return guard
 
         # ---- 农任务终局（S02 镜像锁死等场景）----
         # 我方交付已不可能：分数只剩未交付任务分可挣。但对手还活着时
@@ -568,18 +618,25 @@ class WardenStrategy(BaselineStrategy):
             return 0
         return g.get("defense", 0) or 0
 
-    def _guardable(self, state, node_id):
-        """该节点当前无任何有效卡且我方成本可负担。"""
+    @staticmethod
+    def _guard_base_cost(state, node_id):
+        return 1 if state.node(node_id).get("nodeType") \
+            in ("KEY_PASS", "GATE") else 0
+
+    def _guardable(self, state, node_id, extra=None, mobile=False):
+        """该节点当前无有效卡，成本、重试间隔均允许。"""
         g = state.node(node_id).get("guard")
-        if g and g.get("ownerTeamId") \
-                and g.get("active", g.get("defense", 0) > 0):
+        if g and g.get("active", g.get("defense", 0) > 0):
             return False
-        extra = 1 if node_id == state.gate_node else self.GUARD_EXTRA
-        cost = 1 + extra                   # 关键关隘/宫门底价 1
-        if state.me.get("goodFruit", 0) - cost < self.FRUIT_RESERVE:
+        if extra is None:
+            extra = 1 if node_id == state.gate_node else self.GUARD_EXTRA
+        cost = self._guard_base_cost(state, node_id) + extra
+        if (state.me.get("goodFruit", 0) or 0) - cost < self.FRUIT_RESERVE:
             return False
+        gap = self.MOBILE_GUARD_RETRY_GAP if mobile \
+            else self.GUARD_RETRY_GAP
         return state.round - self._guard_sent.get(node_id, -999) \
-            >= self.GUARD_RETRY_GAP
+            >= gap
 
     def _opp_inbound(self, state, node_id):
         """对手已踏上通往 node_id 的边（虚卡转实卡的唯一触发）。"""
@@ -602,7 +659,104 @@ class WardenStrategy(BaselineStrategy):
         eta, path = self._shortest(state, pos, node_id)
         return bool(path) and eta <= eta_cap
 
-    GUARD_MIN_LEAD = 5         # 提交T→T+4完成→T+5起拦：剩≥5帧即可拦（实战5000ms被6误放的修正）
+    # 提交 T -> T+4 完成 -> T+5 起拦；剩余 5 帧即可拦。
+    GUARD_MIN_LEAD = 5
+
+    def _opp_edge_remaining(self, state):
+        """对手当前已承诺边的乐观剩余帧，显式计可见马/疾行速度。"""
+        opp = state.opp
+        total = opp.get("edgeTotalMs") or 0
+        done = opp.get("edgeProgressMs") or 0
+        _, _, speed = self._active_speed_buff(state, opp, optimistic=True)
+        if state.phase == P.PHASE_RUSH \
+                and not (opp.get("rushTacticUsedCount") or 0) \
+                and (opp.get("goodFruit", 0) or 0) >= 3:
+            speed = max(speed, P.SPEED_RUSH)
+        return int(math.ceil(max(0, total - done) / max(1, speed)))
+
+    def _mobile_guard_extra(self, state, node_id):
+        """复刻 2621 的资源纪律：普通点免费防2，关键点才花果。"""
+        node_type = state.node(node_id).get("nodeType")
+        if node_id == state.gate_node or node_type == "GATE":
+            return 1                       # 宫门上限防4，extra=1 不溢出
+        if node_type == "KEY_PASS":
+            return 1                       # 防4比防6少一篓，首风化仍是45帧
+        if node_id == "S02" and state.round < 100:
+            return 2                       # 2621 快队局：精确首站窗口值得防6
+        return 0                           # 普通节点免费防2，可反复滚动截击
+
+    def _mobile_guard_delay(self, state, node_id, extra, edge_remain):
+        """对手在“等卡/拆卡”和“中途改道”中选更快者后的保底延误。"""
+        opp = state.opp
+        origin = opp.get("currentNodeId")
+        gate = state.gate_node
+        if not origin or not gate:
+            return 0
+
+        node_type = state.node(node_id).get("nodeType")
+        defense = min(4 if node_type == "GATE" else 7,
+                      2 + 2 * max(0, extra))
+        first_weather = 45 if node_type == "KEY_PASS" and defense >= 4 else 30
+        lifetime = first_weather + max(0, defense - 1) * 30
+        stay_delay = max(0, lifetime - max(0, edge_remain - 4))
+
+        # 非 RUSH 时小分队可每次削 2 防；把公开弹药纳入“留下来拆”的上界。
+        squads = opp.get("squadAvailable")
+        dispatches = int(math.ceil(defense / 2.0))
+        if state.phase != P.PHASE_RUSH and squads is not None \
+                and squads >= dispatches * 2:
+            clear_time = 8 + max(0, dispatches - 1) * self.WEAKEN_RESEND_GAP
+            stay_delay = min(stay_delay, clear_time)
+
+        direct_after, direct_path = self._shortest(
+            state, node_id, gate, P.SPEED_RUSH)
+        alt, alt_path = self._shortest_avoiding(
+            state, origin, gate, node_id, P.SPEED_RUSH)
+        if not direct_path:
+            return 0
+        direct = edge_remain + direct_after
+        reroute_delay = max(0, alt - direct) if alt_path else 999
+        return min(stay_delay, reroute_delay)
+
+    def mobile_intercept_action(self, state, delivery_slack=None):
+        """对手踏向我方所在节点时，按确定性收益落一张滚动截击卡。
+
+        可供 Hybrid 的 SCORE 模式复用；不改变传统规划器的其余动作。
+        """
+        me = state.me
+        if not me or me.get("state") in P.BUSY_STATES \
+                or me.get("routeEdgeId") or self._score_farm_mode \
+                or self._delivery_committed or me.get("verified"):
+            return None
+        if state.my_open_contests():
+            return None
+        cur = me.get("currentNodeId")
+        if not cur or cur in (self.camp_node, state.gate_node,
+                              state.terminal_node):
+            return None
+        if not self._opp_inbound(state, cur):
+            return None
+
+        edge_remain = self._opp_edge_remaining(state)
+        if edge_remain < self.MOBILE_GUARD_PAD:
+            return None
+        slack = self._departure_slack(state, cur) \
+            if delivery_slack is None else delivery_slack
+        if slack < self.MOBILE_GUARD_PAD:
+            return None
+
+        extra = self._mobile_guard_extra(state, cur)
+        if not self._guardable(state, cur, extra=extra, mobile=True):
+            return None
+        delay = self._mobile_guard_delay(state, cur, extra, edge_remain)
+        if delay < self.MOBILE_GUARD_MIN_DELAY:
+            return None
+
+        self._guard_sent[cur] = state.round
+        if self.log:
+            self.log.info("warden: mobile intercept @%s extra=%d delay>=%.0f",
+                          cur, extra, delay)
+        return P.a_set_guard(cur, extra)
 
     def _reactive_guard(self, state, cur):
         """虚卡纪律：对手上边才落卡；卡亡且它仍在边上 → 立即补。
@@ -616,15 +770,15 @@ class WardenStrategy(BaselineStrategy):
         if cur == state.gate_node \
                 and self._departure_slack(state, cur) < self.GUARD_MIN_LEAD:
             return None
-        opp = state.opp
-        total = opp.get("edgeTotalMs") or 0
-        done = opp.get("edgeProgressMs") or 0
-        if total and (total - done) / 1000.0 < self.GUARD_MIN_LEAD:
+        if self._opp_edge_remaining(state) < self.GUARD_MIN_LEAD:
             return None
-        if not self._guardable(state, cur):
+        extra = 1 if cur == state.gate_node else self.GUARD_EXTRA
+        rolling = self._rolling_wall and cur != state.gate_node
+        if rolling:
+            extra = self._mobile_guard_extra(state, cur)
+        if not self._guardable(state, cur, extra=extra, mobile=rolling):
             return None
         self._guard_sent[cur] = state.round
-        extra = 1 if cur == state.gate_node else self.GUARD_EXTRA
         if self.log:
             self.log.info("warden: reactive guard @%s (opp inbound)", cur)
         return P.a_set_guard(cur, extra)
@@ -638,10 +792,13 @@ class WardenStrategy(BaselineStrategy):
         if not (self._opp_inbound(state, cur)
                 or self._opp_near(state, cur, self.THREAT_ETA)):
             return None
-        if not self._guardable(state, cur):
+        extra = 1 if cur == state.gate_node else self.GUARD_EXTRA
+        rolling = self._rolling_wall and cur != state.gate_node
+        if rolling:
+            extra = self._mobile_guard_extra(state, cur)
+        if not self._guardable(state, cur, extra=extra, mobile=rolling):
             return None
         self._guard_sent[cur] = state.round
-        extra = 1 if cur == state.gate_node else self.GUARD_EXTRA
         if self.log:
             self.log.info("warden: parting guard @%s", cur)
         return P.a_set_guard(cur, extra)

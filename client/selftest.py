@@ -4871,6 +4871,76 @@ def test_warden_strategy():
     ok &= check("warden: 转农目标估值计入一跳后继收益",
                 follow > 0, f"follow={follow}")
 
+    # 2621 快队实锤：我方先到 S02、对手尚余足够落卡窗口时，设卡必须
+    # 抢在固定处理前；否则 2 帧处理会把唯一的拦截窗口吃掉。
+    gs = gs_at("S02", opp_cur="S01", opp_next="S02", opp_edge="E01",
+               round_no=43)
+    for p in gs.players.values():
+        if p["playerId"] != 1001:
+            p["edgeTotalMs"] = 42780
+            p["edgeProgressMs"] = 35000
+    st = WardenStrategy()
+    st.camp_node = "S10"
+    st._plans_ready = True
+    a = st.main_action(gs)
+    ok &= check("warden: 2621式S02精确窗口先卡后处理",
+                a and a["action"] == "SET_GUARD"
+                and a["targetNodeId"] == "S02"
+                and a["extraGoodFruit"] == 2, str(a))
+
+    # 普通汇合点默认下免费防2：对手已上边才触发，不读对手画像。
+    gs = gs_at("S09", opp_cur="S07", opp_next="S09", opp_edge="E04",
+               round_no=183, good_fruit=5)
+    st = WardenStrategy()
+    st.camp_node = "S10"
+    st._plans_ready = True
+    a = st.main_action(gs)
+    ok &= check("warden: 2621式普通汇合点免费滚动截击",
+                a and a["action"] == "SET_GUARD"
+                and a["targetNodeId"] == "S09"
+                and a["extraGoodFruit"] == 0, str(a))
+
+    gs = gs_at("S09", opp_cur="S07", round_no=183, good_fruit=5)
+    st = WardenStrategy()
+    st.camp_node = "S10"
+    st._plans_ready = True
+    a = st.main_action(gs)
+    ok &= check("warden: 对手未承诺路线绝不预卡",
+                not (a and a["action"] == "SET_GUARD"), str(a))
+
+    gs = gs_at("S09", opp_cur="S07", opp_next="S09", opp_edge="E04",
+               round_no=183, good_fruit=5)
+    for p in gs.players.values():
+        if p["playerId"] != 1001:
+            p["edgeProgressMs"] = 21000
+    st = WardenStrategy()
+    st.camp_node = "S10"
+    st._plans_ready = True
+    a = st.main_action(gs)
+    ok &= check("warden: 对手不足5帧到站不补迟卡",
+                not (a and a["action"] == "SET_GUARD"), str(a))
+
+    gs = gs_at("S09", opp_cur="S07", opp_next="S09", opp_edge="E04",
+               round_no=183, good_fruit=5)
+    st = WardenStrategy()
+    st.camp_node = "S10"
+    st._plans_ready = True
+    st._score_farm_mode = True
+    a = st.main_action(gs)
+    ok &= check("warden: S02败局转农后不再为截击丢任务帧",
+                not (a and a["action"] == "SET_GUARD"), str(a))
+
+    gs = gs_at("S09", opp_cur="S07", opp_next="S09", opp_edge="E04",
+               round_no=188, good_fruit=5)
+    st = WardenStrategy()
+    st.camp_node = "S10"
+    st._plans_ready = True
+    st._guard_sent["S09"] = 183
+    a = st.main_action(gs)
+    ok &= check("warden: 对手重新踏边5帧后可同点复卡",
+                a and a["action"] == "SET_GUARD"
+                and a["targetNodeId"] == "S09", str(a))
+
     t_s10 = {"taskId": "T_S10", "taskTemplateId": "T01",
              "nodeId": "S10", "processRound": 4, "score": 30,
              "expireRound": 520, "active": True, "completed": False,
@@ -5114,8 +5184,19 @@ def test_warden_strategy():
     ok &= check("warden: S10墙被攻坚时转下一个阻塞点",
                 main and main["action"] == "MOVE"
                 and main["targetNodeId"] != "S10"
-                and st.camp_node == "S14",
-                str(acts))
+                and st.camp_node == "S11",
+                f"camp={st.camp_node} acts={acts}")
+
+    gs = gs_at("S11", opp_cur="S10", opp_next="S11", opp_edge="E06",
+               round_no=294, good_fruit=5)
+    st = WardenStrategy()
+    st.camp_node = "S11"
+    st._plans_ready = True
+    st._rolling_wall = True
+    a = st.main_action(gs)
+    ok &= check("warden: 滚动到普通阻塞点只下免费防2",
+                a and a["action"] == "SET_GUARD"
+                and a["extraGoodFruit"] == 0, str(a))
 
     st = WardenStrategy()
     st.camp_node = "S14"
@@ -5308,6 +5389,25 @@ def test_hybrid_strategy():
                 hybrid.mode == HybridStrategy.MODE_SCORE
                 and acts_h == acts_p,
                 f"hybrid={acts_h} planner={acts_p}")
+
+    gs = make_state(bypass=True, cur="S09", opp_cur="S07",
+                    opp_next="S09", opp_edge="E04", round_no=100)
+    hybrid = HybridStrategy()
+    hybrid.mode = HybridStrategy.MODE_SCORE
+    acts = hybrid.decide(gs)
+    ok &= check("hybrid: 旁路图传统底盘叠加2621路线截击",
+                acts and acts[0]["action"] == "SET_GUARD"
+                and acts[0]["targetNodeId"] == "S09"
+                and acts[0]["extraGoodFruit"] == 0, str(acts))
+
+    gs = make_state(bypass=True, cur="S09", opp_cur="S07",
+                    opp_next="S09", opp_edge="E04", round_no=550,
+                    phase=P.PHASE_RUSH)
+    hybrid = HybridStrategy()
+    hybrid.mode = HybridStrategy.MODE_SCORE
+    acts = hybrid.decide(gs)
+    ok &= check("hybrid: 动态截击不侵占交付死线",
+                not any(a["action"] == "SET_GUARD" for a in acts), str(acts))
 
     gs = make_state(bypass=True, cur="S13", opp_cur="S12",
                     round_no=350, task_score=120)

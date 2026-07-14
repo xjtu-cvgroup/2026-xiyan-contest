@@ -55,6 +55,9 @@ class HybridStrategy(Strategy):
 
         if self.mode in (self.MODE_PRIMARY, self.MODE_GATE):
             return self.warden.decide(state)
+        intercept = self._score_mobile_intercept(state)
+        if intercept:
+            return [intercept]
         return self.planner.decide(state)
 
     # ================= 地图资格审查 =================
@@ -149,6 +152,18 @@ class HybridStrategy(Strategy):
             rush_wait = max(0, RUSH_EARLIEST - (state.round + gate_eta))
         return gate_eta + rush_wait + self.warden._gate_verify_frames(state) \
             + gate_term + DELIVER_FRAMES
+
+    def _score_mobile_intercept(self, state):
+        """旁路图保留 Planner，只叠加 2621 式已承诺路线截击。"""
+        me = state.me
+        if not me or me.get("verified") or me.get("delivered") \
+                or me.get("retired"):
+            return None
+        my_eta = self._gate_eta(state, me, optimistic=False)
+        finish_need = self._my_finish_need(state, my_eta)
+        slack = state.duration_round - state.round \
+            - finish_need - self.warden.EXIT_PAD
+        return self.warden.mobile_intercept_action(state, slack)
 
     def _should_commit_gate(self, state):
         me, opp = state.me, state.opp
