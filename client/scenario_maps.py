@@ -68,6 +68,39 @@ def _sync_map(start):
     return start
 
 
+def _add_edge(start, edge_id, src, dst, route_type, distance):
+    start["edges"] = [e for e in start["edges"] if e["edgeId"] != edge_id]
+    start["edges"].append({
+        "edgeId": edge_id, "fromNodeId": src, "toNodeId": dst,
+        "routeType": route_type, "distance": distance,
+        "bidirectional": True,
+    })
+    return _sync_map(start)
+
+
+def _set_edge_distance(start, edge_id, distance):
+    for edge in start["edges"]:
+        if edge["edgeId"] == edge_id:
+            edge["distance"] = distance
+            break
+    return _sync_map(start)
+
+
+def _add_resource(start, node_id, resource_type, claim_round=2):
+    """向 gameplay 投放资源；顶层 resources 为空时客户端会正确回退。"""
+    gameplay = start["map"]["gameplay"]
+    resources = [r for r in gameplay.get("resources") or []
+                 if not (r.get("nodeId") == node_id
+                         and r.get("resourceType") == resource_type)]
+    resources.insert(0, {
+        "nodeId": node_id, "resourceType": resource_type,
+        "count": 1, "claimRound": claim_round,
+    })
+    gameplay["resources"] = resources
+    start["resources"] = []
+    return start
+
+
 def public_v42_start():
     """用户提供的公开地图：相对旧 start 消息新增 E23/E24。"""
     start = _base_start()
@@ -137,4 +170,59 @@ def gate_bypass_start(distance=20):
         "routeType": "BRANCH", "distance": distance,
         "bidirectional": True,
     })
+    return _sync_map(start)
+
+
+# ================= 八强隐藏图预测矩阵 =================
+
+def predicted_s02_fast_horse_start():
+    """提示2最直接版本：首个窗口 S02 投放快马，其他结构保持母版。"""
+    return _sync_map(_add_resource(
+        variant1_start(), "S02", "FAST_HORSE", claim_round=2))
+
+
+def predicted_single_s10_bypass_start():
+    """提示2+3：S02有快马，S09可直接到S11，S10不再是必经墙。"""
+    start = predicted_s02_fast_horse_start()
+    return _add_edge(start, "E25", "S09", "S11", "BRANCH", 42)
+
+
+def predicted_split_corridors_start():
+    """官/水与山线各有绕S10出口，只在S14确定汇合。"""
+    start = predicted_s02_fast_horse_start()
+    _add_edge(start, "E25", "S09", "S12", "BRANCH", 48)
+    return _add_edge(start, "E26", "S08", "S11", "BRANCH", 44)
+
+
+def predicted_short_gate_start():
+    """S14仍必经，但两条入边短于反应卡生效窗，不能把必经等同必赢。"""
+    start = predicted_split_corridors_start()
+    _set_edge_distance(start, "E09", 3)
+    return _set_edge_distance(start, "E23", 3)
+
+
+def predicted_optional_s02_start():
+    """S02有资源但并非最快入口：测试策略能否识别“可争而非必须争”。"""
+    start = predicted_split_corridors_start()
+    gameplay = start["map"]["gameplay"]
+    gameplay["resources"] = [
+        r for r in gameplay.get("resources") or []
+        if not (r.get("nodeId") == "S02"
+                and r.get("resourceType") == "FAST_HORSE")]
+    _add_resource(start, "S02", "ICE_BOX", claim_round=2)
+    _set_edge_distance(start, "E15", 20)
+    return _set_edge_distance(start, "E16", 28)
+
+
+def predicted_resource_shuffle_start():
+    """多走廊资源重排：速度资源不再固定在旧版S09，考验动态路线估值。"""
+    start = predicted_split_corridors_start()
+    gameplay = start["map"]["gameplay"]
+    resources = [
+        r for r in gameplay.get("resources") or []
+        if r.get("resourceType") not in ("FAST_HORSE", "SHORT_HORSE")]
+    gameplay["resources"] = resources
+    _add_resource(start, "S02", "SHORT_HORSE", claim_round=2)
+    _add_resource(start, "S03", "FAST_HORSE", claim_round=2)
+    _add_resource(start, "S06", "FAST_HORSE", claim_round=2)
     return _sync_map(start)
