@@ -181,16 +181,30 @@ def final_score_parts(t):
 
 class Arena:
     def __init__(self, seed, patches_a=None, patches_b=None, log=None,
-                 strategy_cls=PlannerStrategy, cls_a=None, cls_b=None):
+                 strategy_cls=PlannerStrategy, cls_a=None, cls_b=None,
+                 start_data=None, task_waves=None, weather_plan=None,
+                 obstacle_nodes=None, capture_timeline=False):
         import random as _random
         self.rng = _random.Random(f"arena:{seed}")
         self.seed = seed
         self.match_id = f"arena_{seed}"
         self.log = log
-        with open(os.path.join(DOC_DIR, "start消息.json"), encoding="utf-8") as f:
-            start = json.load(f)["msg_data"]
+        if start_data is None:
+            with open(os.path.join(DOC_DIR, "start消息.json"),
+                      encoding="utf-8") as f:
+                start = json.load(f)["msg_data"]
+        else:
+            start = json.loads(json.dumps(start_data))
+            start = start.get("msg_data", start)
         self.start_msg = start
+        self.task_waves = TASK_WAVES if task_waves is None else task_waves
+        self.capture_timeline = capture_timeline
+        self.timeline = []
+        self.strategy_errors = []
         gp = start["map"]["gameplay"]
+        active_obstacles = set(
+            gp["obstacleCandidateNodeIds"] if obstacle_nodes is None
+            else obstacle_nodes)
         self.roles = gp["roles"]
         self.gate = self.roles["gateNodeId"]
         self.terminal = self.roles["terminalNodeIds"][0]
@@ -200,7 +214,7 @@ class Arena:
             node.setdefault("nodeType", node.get("type"))
             node["resourceStock"] = {}
             node["guard"] = None
-            node["hasObstacle"] = node["nodeId"] in gp["obstacleCandidateNodeIds"]
+            node["hasObstacle"] = node["nodeId"] in active_obstacles
             node["scout_marks"] = []       # [(team, expire)]
             self.nodes[node["nodeId"]] = node
         for pn in gp.get("processNodes") or []:
@@ -236,7 +250,8 @@ class Arena:
         self.claim_interrupted = set()   # (node, rtype) 已用掉一次打断
         self.squads_inflight = []  # {pid, kind, target, land}
         self.events_next = []      # 下一帧下发的事件
-        self.weather_plan = self._gen_weather()
+        self.weather_plan = self._gen_weather() if weather_plan is None \
+            else json.loads(json.dumps(weather_plan))
         self.weather_active = None  # {type, start, end}
         self.residual = {}         # 未实现，占位
 
@@ -284,8 +299,11 @@ class Arena:
         for pool in pools:
             if len(active) >= 10:
                 break
-            cands = [(tpl, nd, bk) for tpl, nd, bk in pool
-                     if tpl != "T04" or self.nodes[nd]["hasObstacle"]]
+            cands = [
+                (tpl, nd, bk) for tpl, nd, bk in pool
+                if nd in self.candidates.get(tpl, ())
+                and (tpl != "T04" or self.nodes[nd]["hasObstacle"])
+            ]
             if not cands:
                 continue
             tpl, nd, bucket = self.rng.choice(cands)
@@ -693,6 +711,10 @@ class Arena:
             try:
                 acts = self.strategies[pid].decide(gs) or []
             except Exception as e:      # 策略崩溃按空动作，别拖死整局
+                self.strategy_errors.append({
+                    "round": self.round, "playerId": pid,
+                    "error": repr(e),
+                })
                 if self.log:
                     self.log(f"strategy {pid} crashed r{self.round}: {e!r}")
                 acts = []
@@ -717,6 +739,41 @@ class Arena:
                         break
             out[pid] = slot
         return out
+
+    def _capture_frame(self, actions):
+        """保存紧凑逐帧轨迹，供连续策略契约检查使用。"""
+        if not self.capture_timeline:
+            return
+        players = {}
+        for pid, team in self.teams.items():
+            players[pid] = {
+                "state": team.state,
+                "node": team.node,
+                "next": team.edge[2] if team.edge else None,
+                "edge": team.edge[0]["edgeId"] if team.edge else None,
+                "good": team.good,
+                "fresh": round(team.fresh, 2),
+                "task": team.task_score,
+                "squad": team.squad,
+                "verified": team.verified,
+                "delivered": team.delivered,
+            }
+        guards = {
+            nid: {"team": node["guard"].get("ownerTeamId"),
+                  "defense": node["guard"].get("defense", 0)}
+            for nid, node in self.nodes.items() if node.get("guard")
+        }
+        self.timeline.append({
+            "round": self.round,
+            "phase": self.phase,
+            "players": players,
+            "actions": {
+                pid: json.loads(json.dumps(slot))
+                for pid, slot in actions.items()
+            },
+            "guards": guards,
+            "events": json.loads(json.dumps(self.events_next)),
+        })
 
     def _apply_mains(self, mains):
         """同帧冲突检测 → 窗口；否则各自执行。"""
@@ -1380,11 +1437,12 @@ class Arena:
         for _ in range(max_round):
             self.round += 1
             # 任务波次（先于本帧决策可见）
-            for wave in TASK_WAVES:
+            for wave in self.task_waves:
                 if wave[0] == self.round:
                     self._spawn_wave(wave)
             self._check_rush()
             actions = self._collect()
+            self._capture_frame(actions)
             self.events_next = []
             self._contest_beats({pid: actions[pid]["card"]
                                  for pid in actions})
@@ -1413,6 +1471,7 @@ class Arena:
                         "good": t.deliver_good if t.delivered else t.good,
                         "fresh": round(t.deliver_fresh if t.delivered
                                        else t.fresh, 1),
+                        "illegal": t.illegal,
                         "metrics": self.metrics[pid],
                         # 该侧策略对对手的画像结论（V3.20，脚本 bot 无此属性）
                         "oppProfile": getattr(self.strategies[pid],
@@ -1420,13 +1479,21 @@ class Arena:
         sa, sb = out[PID_A]["score"], out[PID_B]["score"]
         out["winner"] = PID_A if sa > sb else PID_B if sb > sa else 0
         out["margin"] = sa - sb
+        if self.capture_timeline:
+            out["timeline"] = self.timeline
+        out["strategyErrors"] = list(self.strategy_errors)
         return out
 
 
 def run_match(seed, patches_a=None, patches_b=None, max_round=600,
-              cls_a=None, cls_b=None):
+              cls_a=None, cls_b=None, start_data=None, task_waves=None,
+              weather_plan=None, obstacle_nodes=None,
+              capture_timeline=False):
     return Arena(seed, patches_a, patches_b,
-                 cls_a=cls_a, cls_b=cls_b).run(max_round)
+                 cls_a=cls_a, cls_b=cls_b, start_data=start_data,
+                 task_waves=task_waves, weather_plan=weather_plan,
+                 obstacle_nodes=obstacle_nodes,
+                 capture_timeline=capture_timeline).run(max_round)
 
 
 def main():

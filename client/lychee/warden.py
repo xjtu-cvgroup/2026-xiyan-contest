@@ -64,6 +64,7 @@ class WardenStrategy(BaselineStrategy):
     FARM_DEAD_PAD = 0          # 真到不了终点才转农；安全垫只用于离墙
     HANDOFF_GUARD_DEFENSE = 2  # S10 卡快风化时提前转 S14 接墙
     HANDOFF_EXIT_PAD = 10      # S10->S14 接墙只在最后可行窗口内启动
+    START_ROUTE_TAX_PAD = 4    # 首跳含税 ETA 量化余量；只用于主墙竞速
     GATE_GUARD_DEFENSE = 4     # 宫门 extra=1 拉满防4；只作接墙证明下界
     GUARD_DECAY_FRAMES = 30    # 设卡每 30 帧风化 1 点防守
     OPP_SPEED_MARGIN = 0.8     # 判死时对手 ETA 打折（骑马/疾行令余量）
@@ -153,6 +154,45 @@ class WardenStrategy(BaselineStrategy):
     def _timed_next_hop(self, state, src, dst):
         _, path = self._timed_path(state, src, dst)
         return path[1] if len(path) > 1 else None
+
+    def _strategic_start_hop(self, state, cur, target):
+        """起点冲主墙时把可见障碍税计入路线选择。
+
+        直接最快路无障碍时维持原选择；只有山线等直达路线存在障碍，且
+        经 S02 的完整路线（含固定处理站和自身障碍）含税更快时才改走
+        S02。这样不会把 S02 偏好扩散到隐藏图的中后段决策。
+        """
+        if cur != state.start_node or target != self.camp_node \
+                or cur == "S02" or not state.node("S02"):
+            return None
+        direct_eta, direct_path = self._timed_path(state, cur, target)
+        if not direct_path or "S02" in direct_path:
+            return None
+        direct_obstacles = sum(
+            1 for nid in direct_path[1:] if state.has_obstacle(nid))
+        if not direct_obstacles:
+            return None
+
+        to_s02, first = self._travel_dynamic(
+            state, cur, "S02", conservative_weather=True)
+        if not first:
+            return None
+        via_eta, tail = self._travel_dynamic(
+            state, "S02", target, start_elapsed=to_s02,
+            include_current_process=True,
+            include_intermediate_process=True,
+            conservative_weather=True)
+        if not tail:
+            return None
+        via_path = first[:-1] + tail
+        via_obstacles = sum(
+            1 for nid in via_path[1:] if state.has_obstacle(nid))
+        forced_tax = 8
+        direct_total = direct_eta + direct_obstacles * forced_tax
+        via_total = via_eta + via_obstacles * forced_tax
+        if via_total > direct_total + self.START_ROUTE_TAX_PAD:
+            return None
+        return first[1] if len(first) > 1 else None
 
     def _build_plans(self, state):
         self.camp_node = self._pick_camp(state)
@@ -529,7 +569,8 @@ class WardenStrategy(BaselineStrategy):
     def _advance(self, state, cur, target):
         """朝 target 走一步。竞速/封锁期强通免冻，转农期不为刷分强通。"""
         me = state.me
-        nxt = self._timed_next_hop(state, cur, target)
+        nxt = self._strategic_start_hop(state, cur, target) \
+            or self._timed_next_hop(state, cur, target)
         if nxt is None:
             return P.a_wait()
         g = state.enemy_guard(nxt)
