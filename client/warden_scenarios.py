@@ -21,7 +21,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from arena import PID_A, PID_B, run_match          # noqa: E402
-from lychee.warden import WardenStrategy          # noqa: E402
+from lychee.hybrid import HybridStrategy          # noqa: E402
 from sparring import (CamperBot, RoadFarmerBot, RusherBot, TollerBot)  # noqa: E402
 
 
@@ -87,6 +87,8 @@ BOT_CASES = {
     "roadfarmer_fast": FastRoadFarmerBot,
 }
 
+OURS = HybridStrategy
+
 
 def parse_seeds(expr):
     if "-" in expr:
@@ -141,12 +143,12 @@ def summarize(kind, seed, seat, result):
 def run_case(spec):
     kind, seed, seat = spec
     if kind == "mirror":
-        result = run_match(seed, cls_a=WardenStrategy, cls_b=WardenStrategy)
+        result = run_match(seed, cls_a=OURS, cls_b=OURS)
         seat = "A"
     elif seat == "A":
-        result = run_match(seed, cls_a=WardenStrategy, cls_b=BOT_CASES[kind])
+        result = run_match(seed, cls_a=OURS, cls_b=BOT_CASES[kind])
     else:
-        result = run_match(seed, cls_a=BOT_CASES[kind], cls_b=WardenStrategy)
+        result = run_match(seed, cls_a=BOT_CASES[kind], cls_b=OURS)
     return summarize(kind, seed, seat, result)
 
 

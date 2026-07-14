@@ -16,6 +16,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from lychee import protocol as P
+from lychee.hybrid import HybridStrategy
 from lychee.planner import (TaskPlanner, marginal_task_value,
                             task_component_score, Plan, RUSH_EARLIEST)
 from lychee.state import GameState
@@ -5214,6 +5215,166 @@ def test_warden_strategy():
     return ok
 
 
+def test_hybrid_strategy():
+    """3.97：老图守望者不变，S10 旁路切 Planner，严格先手才接 S14。"""
+    ok = True
+    with open(os.path.join(DOC_DIR, "start消息.json"), encoding="utf-8") as f:
+        start = json.load(f)["msg_data"]
+    with open(os.path.join(DOC_DIR, "inquire消息.json"), encoding="utf-8") as f:
+        inquire = json.load(f)["msg_data"]
+
+    def make_state(bypass=False, short_gate=False, terminal_bypass=False,
+                   cur="S01", opp_cur="S01", round_no=1,
+                   phase=P.PHASE_NORMAL, task_score=0, verified=False,
+                   opp_next=None, opp_edge=None):
+        s = json.loads(json.dumps(start))
+        if bypass:
+            s["edges"].append({
+                "edgeId": "E_BYPASS_S10", "fromNodeId": "S09",
+                "toNodeId": "S11", "routeType": P.BRANCH,
+                "distance": 24, "bidirectional": True})
+        if short_gate:
+            for edge in s["edges"]:
+                if {edge.get("fromNodeId"), edge.get("toNodeId")} \
+                        == {"S13", "S14"}:
+                    edge["distance"] = 3
+        if terminal_bypass:
+            s["edges"].append({
+                "edgeId": "E_BYPASS_GATE", "fromNodeId": "S12",
+                "toNodeId": "S15", "routeType": P.BRANCH,
+                "distance": 18, "bidirectional": True})
+        gs = GameState(1001)
+        gs.on_start(s)
+        d = json.loads(json.dumps(inquire))
+        d["round"], d["phase"] = round_no, phase
+        d["edges"] = s["edges"]
+        d["contests"], d["tasks"], d["events"] = [], [], []
+        d["weather"] = {"active": [], "forecast": []}
+        for p in d["players"]:
+            if p["playerId"] == 1001:
+                p.update(state=P.ST_IDLE, currentNodeId=cur,
+                         nextNodeId=None, routeEdgeId=None,
+                         currentProcess=None, buffs=[], resources={},
+                         freshness=90.0, goodFruit=70, badFruit=1,
+                         taskScore=task_score, squadAvailable=8,
+                         guardActionPoint=4, rushTacticUsedCount=0,
+                         verified=verified, delivered=False, retired=False)
+            else:
+                p.update(state=P.ST_MOVING if opp_edge else P.ST_IDLE,
+                         currentNodeId=opp_cur, nextNodeId=opp_next,
+                         routeEdgeId=opp_edge, edgeTotalMs=18000,
+                         edgeProgressMs=0, currentProcess=None, buffs=[],
+                         goodFruit=70, badFruit=1, taskScore=120,
+                         squadAvailable=8, verified=False,
+                         delivered=False, retired=False)
+        for n in d["nodes"]:
+            n["hasObstacle"] = False
+            n["guard"] = None
+            n["resourceStock"] = {}
+            n["scouted"] = []
+        gs.on_inquire(d)
+        return gs
+
+    gs = make_state()
+    hybrid = HybridStrategy()
+    ok &= check("hybrid: 公开图拓扑证明S10必经",
+                hybrid._mandatory_primary_choke(gs) == "S10",
+                str(hybrid._mandatory_primary_choke(gs)))
+
+    # 当前公开图必须逐动作保持 3.96.34，不让融合层负优化冠军底盘。
+    gs_h, gs_w = make_state(), make_state()
+    hybrid = HybridStrategy()
+    hybrid.on_start(gs_h)
+    old = WardenStrategy(forced_camp="S10")
+    old.on_start(gs_w)
+    acts_h, acts_w = hybrid.decide(gs_h), old.decide(gs_w)
+    ok &= check("hybrid: 公开图首帧与3.96.34动作一致",
+                hybrid.mode == HybridStrategy.MODE_PRIMARY
+                and acts_h == acts_w,
+                f"hybrid={acts_h} warden={acts_w}")
+
+    gs = make_state(bypass=True)
+    hybrid = HybridStrategy()
+    ok &= check("hybrid: S09-S11旁路使S10失去堵点资格",
+                hybrid._mandatory_primary_choke(gs) is None,
+                str(hybrid._mandatory_primary_choke(gs)))
+
+    gs_h, gs_p = make_state(bypass=True), make_state(bypass=True)
+    hybrid = HybridStrategy()
+    hybrid.on_start(gs_h)
+    planner = PlannerStrategy()
+    acts_h, acts_p = hybrid.decide(gs_h), planner.decide(gs_p)
+    ok &= check("hybrid: 旁路图首帧完整回退传统策略",
+                hybrid.mode == HybridStrategy.MODE_SCORE
+                and acts_h == acts_p,
+                f"hybrid={acts_h} planner={acts_p}")
+
+    gs = make_state(bypass=True, cur="S13", opp_cur="S12",
+                    round_no=350, task_score=120)
+    hybrid = HybridStrategy()
+    hybrid.mode = HybridStrategy.MODE_SCORE
+    hybrid.planner._processed_here = True
+    ok &= check("hybrid: 任务基本盘且明确领先时接管S14",
+                hybrid._should_commit_gate(gs),
+                f"my={hybrid._gate_eta(gs, gs.me)} "
+                f"opp={hybrid._gate_eta(gs, gs.opp, True)}")
+    hybrid._activate_gate_control(gs)
+    ok &= check("hybrid: S14接管为粘性Warden模式",
+                hybrid.mode == HybridStrategy.MODE_GATE
+                and hybrid.warden._forced_camp == "S14",
+                f"mode={hybrid.mode} camp={hybrid.warden._forced_camp}")
+
+    gs = make_state(bypass=True, cur="S13", opp_cur="S13",
+                    round_no=350, task_score=120)
+    hybrid = HybridStrategy()
+    hybrid.mode = HybridStrategy.MODE_SCORE
+    hybrid.planner._processed_here = True
+    ok &= check("hybrid: S14无明确先手不放弃传统策略",
+                not hybrid._should_commit_gate(gs))
+
+    gs = make_state(bypass=True, short_gate=True, cur="S13",
+                    opp_cur="S12", round_no=350, task_score=120)
+    hybrid = HybridStrategy()
+    hybrid.mode = HybridStrategy.MODE_SCORE
+    hybrid.planner._processed_here = True
+    ok &= check("hybrid: S14入边不足5帧则不误判可堵",
+                not hybrid._should_commit_gate(gs))
+
+    gs = make_state(bypass=True, terminal_bypass=True, cur="S13",
+                    opp_cur="S12", round_no=350, task_score=120)
+    hybrid = HybridStrategy()
+    hybrid.mode = HybridStrategy.MODE_SCORE
+    hybrid.planner._processed_here = True
+    ok &= check("hybrid: 可绕到S15反穿宫门时禁用S14堵人",
+                not hybrid._should_commit_gate(gs))
+
+    gs = make_state(bypass=True, cur="S13", opp_cur="S12",
+                    round_no=330, task_score=60)
+    hybrid = HybridStrategy()
+    hybrid.mode = HybridStrategy.MODE_SCORE
+    hybrid.planner._processed_here = True
+    ok &= check("hybrid: 低分但对手进入宫门威胁圈时及时抢门",
+                hybrid._should_commit_gate(gs))
+
+    probe = make_state(bypass=True, cur="S14", opp_cur="S13",
+                       round_no=500, phase=P.PHASE_RUSH, task_score=120,
+                       opp_next="S14", opp_edge="E09")
+    st = WardenStrategy(forced_camp="S14")
+    st.camp_node, st._plans_ready = "S14", True
+    need = st._my_need(probe, "S14")
+    gs = make_state(bypass=True, cur="S14", opp_cur="S13",
+                    round_no=int(600 - need - st.EXIT_PAD),
+                    phase=P.PHASE_RUSH, task_score=120,
+                    opp_next="S14", opp_edge="E09")
+    st = WardenStrategy(forced_camp="S14")
+    st.camp_node, st._plans_ready = "S14", True
+    action = st.main_action(gs)
+    ok &= check("hybrid: S14设卡不得吃掉我方交付余量",
+                action and action["action"] != "SET_GUARD",
+                str(action))
+    return ok
+
+
 def main():
     ok = test_codec()
     ok &= test_state_and_strategy()
@@ -5253,6 +5414,7 @@ def main():
     ok &= test_farmer_walkin()
     ok &= test_front_tempo_tail_follow()
     ok &= test_warden_strategy()
+    ok &= test_hybrid_strategy()
     print()
     print("ALL PASS" if ok else "SOME FAILED")
     sys.exit(0 if ok else 1)

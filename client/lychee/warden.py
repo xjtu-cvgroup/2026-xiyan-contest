@@ -79,9 +79,10 @@ class WardenStrategy(BaselineStrategy):
     SQUAD_SCOUT_COST = 1
     SQUAD_NONURGENT_RESERVE = 4  # 非转农期至少留两次削弱/续防弹药
 
-    def __init__(self, logger=None):
+    def __init__(self, logger=None, forced_camp=None):
         super().__init__(logger)
         self.planner = TaskPlanner(logger)
+        self._forced_camp = forced_camp
         self.camp_node = None
         self._plans_ready = False
         self._clear_plan = []      # 待派小分队清障的节点（按途经顺序）
@@ -125,7 +126,8 @@ class WardenStrategy(BaselineStrategy):
 
     def _build_plans(self, state):
         self.camp_node = self._pick_camp(state)
-        me_pos = state.me.get("currentNodeId")
+        me_pos = state.me.get("nextNodeId") \
+            if state.me.get("routeEdgeId") else state.me.get("currentNodeId")
         path = []
         if me_pos:
             _, path = self._shortest(state, me_pos, self.camp_node)
@@ -146,6 +148,8 @@ class WardenStrategy(BaselineStrategy):
 
     def _pick_camp(self, state):
         """关键关隘里挑在我方去宫门最短路上的那个；缺失回退 S10。"""
+        if self._forced_camp:
+            return self._forced_camp
         me_pos = state.me.get("currentNodeId")
         path = []
         if me_pos:
@@ -158,6 +162,13 @@ class WardenStrategy(BaselineStrategy):
             if node.get("nodeType") == "KEY_PASS":
                 return nid
         return "S10"
+
+    def force_camp(self, node_id):
+        """由混合策略指定已通过拓扑证明的墙点，并重建路线侧计划。"""
+        self._forced_camp = node_id
+        self.camp_node = node_id
+        self._plans_ready = False
+        self._delivery_committed = False
 
     # ================= 每帧入口 =================
 
@@ -599,6 +610,11 @@ class WardenStrategy(BaselineStrategy):
         来得及才立（实战 r256 教训：对手 2 帧后进站，读条 4 帧的卡
         r260 才成型，白烧 3 好果拦了个寂寞）。"""
         if not self._opp_inbound(state, cur):
+            return None
+        # 宫门卡只是最后保险，不能反过来吃掉我方交付安全垫。第一墙仍按
+        # 原守望者纪律焊死；只有 S14 在设卡处理来不及装进余量时放弃卡。
+        if cur == state.gate_node \
+                and self._departure_slack(state, cur) < self.GUARD_MIN_LEAD:
             return None
         opp = state.opp
         total = opp.get("edgeTotalMs") or 0

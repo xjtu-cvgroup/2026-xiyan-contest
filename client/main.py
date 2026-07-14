@@ -5,11 +5,10 @@
   平台位置参数（任务书 10.2）: python3 main.py <playerId> <host> <port> [playerName]
   官方命名参数（py-cli-26）  : python3 main.py --host H --port P --player-id ID
                                [--player-name NAME] [--version V]
-                               [--strategy planner|warden]
+                               [--strategy planner|warden|hybrid]
 
-策略选择：本分支默认 warden（见 DEFAULT_STRATEGY）——切到本分支
-package.bat/package.py 打包上传即守望者，零参数。临时切回主线用
---strategy planner 或 LYCHEE_STRATEGY=planner。
+策略选择：本分支默认 hybrid（见 DEFAULT_STRATEGY）。公开老图经拓扑证明
+后完整沿用守望者；隐藏旁路图自动回退 Planner，并保留 S14 控制机会。
 """
 import argparse
 import os
@@ -24,10 +23,8 @@ from lychee.session import StrategySession
 from lychee.version import BUILD_VERSION
 
 VERSION = BUILD_VERSION
-STRATEGIES = ("planner", "warden")
-# 本分支（exp/v3.96-s10-warden）身份=守望者：切到本分支打包即守望者包，
-# 无需任何参数。feat 主线此值恒为 "planner"。
-DEFAULT_STRATEGY = "warden"
+STRATEGIES = ("planner", "warden", "hybrid")
+DEFAULT_STRATEGY = "hybrid"
 
 
 def build_strategy(name, log):
@@ -35,6 +32,9 @@ def build_strategy(name, log):
     if name == "warden":
         from lychee.warden import WardenStrategy
         return WardenStrategy(log)
+    if name == "hybrid":
+        from lychee.hybrid import HybridStrategy
+        return HybridStrategy(log)
     if name != "planner" and log:
         log.warning("unknown strategy %r, falling back to planner", name)
     from lychee.strategy import PlannerStrategy
