@@ -4578,6 +4578,83 @@ def test_front_tempo_tail_follow():
     return ok
 
 
+
+def test_rush_edge_weaken():
+    """V3.60 回归（replay(4): RUSH 阶段被冻在唯一边 E09
+    S13->S14, 无三角改道、无法攻坚，小分队削弱
+    是唯一出路。旧代码 phase!=RUSH 一刀切禁掉所有 RUSH
+    削弱 + squad_action RUSH 阶段 return None，导致 demo 29 帧零动作
+    未交付到终场。"""
+    ok = True
+    with open(os.path.join(DOC_DIR, "start消息.json"), encoding="utf-8") as f:
+        start = json.load(f)["msg_data"]
+    with open(os.path.join(DOC_DIR, "inquire消息.json"), encoding="utf-8") as f:
+        inquire = json.load(f)["msg_data"]
+
+    def rush_frozen(guard_def=4, squad=6, opp_at_guard=False):
+        """RUSH 阶段、我方在 E09(S13->S14) 边上被冻。"""
+        gs = GameState(1001)
+        gs.on_start(start)
+        d = json.loads(json.dumps(inquire))
+        d["round"] = 575
+        d["phase"] = "RUSH"
+        d["contests"], d["tasks"] = [], []
+        d["weather"] = {"active": [], "forecast": []}
+        for p in d["players"]:
+            if p["playerId"] == 1001:
+                p.update(state="MOVING", currentNodeId="S13", nextNodeId="S14",
+                         routeEdgeId="E09", currentProcess=None, buffs=[],
+                         squadAvailable=squad, resources={}, freshness=75.0,
+                         goodFruit=93, badFruit=2, taskScore=120, verified=True)
+            elif opp_at_guard:
+                p.update(state="IDLE", currentNodeId="S14", nextNodeId=None,
+                         routeEdgeId=None, currentProcess=None,
+                         delivered=False, retired=False)
+            else:
+                p.update(state="MOVING", currentNodeId="S10", nextNodeId="S09",
+                         routeEdgeId="E05", currentProcess=None,
+                         delivered=False, retired=False)
+        for n in d["nodes"]:
+            n["hasObstacle"] = False
+            n["resourceStock"] = {}
+            if n["nodeId"] == "S14":
+                n["guard"] = {"ownerTeamId": "BLUE", "defense": guard_def,
+                              "maxDefense": 4, "active": True}
+            else:
+                n["guard"] = None
+        gs.on_inquire(d)
+        return gs
+
+    def weakens(actions):
+        return [x for x in actions if x["action"] == "SQUAD_WEAKEN"]
+
+    # 1) RUSH + 边上被冻 + 防4 卡 + slack 紧迫 -> 应发削弱（核心修复）
+    a = PlannerStrategy().decide(rush_frozen(guard_def=4))
+    wk = weakens(a)
+    ok &= check("RUSH边削: 防4卡被冻应削弱",
+                bool(wk) and wk[0]["targetNodeId"] == "S14",
+                json.dumps(a, ensure_ascii=False))
+
+    # 2) 防6 满防新卡 -> 不削（门槛太高，乱花人手）
+    a = PlannerStrategy().decide(rush_frozen(guard_def=6))
+    ok &= check("RUSH边削: 满防6不削",
+                not weakens(a),
+                json.dumps(a, ensure_ascii=False))
+
+    # 3) 卡主本人在场 -> 不削（它能原地补卡，削弱=喂饵）
+    a = PlannerStrategy().decide(rush_frozen(guard_def=4, opp_at_guard=True))
+    ok &= check("RUSH边削: 卡主在场不削",
+                not weakens(a),
+                json.dumps(a, ensure_ascii=False))
+
+    # 4) 人手不足(< 2) -> 不削
+    a = PlannerStrategy().decide(rush_frozen(guard_def=4, squad=1))
+    ok &= check("RUSH边削: 人手不足不削",
+                not weakens(a),
+                json.dumps(a, ensure_ascii=False))
+    return ok
+
+
 def main():
     ok = test_codec()
     ok &= test_state_and_strategy()
@@ -4616,6 +4693,7 @@ def main():
     ok &= test_rule_fixes()
     ok &= test_farmer_walkin()
     ok &= test_front_tempo_tail_follow()
+    ok &= test_rush_edge_weaken()
     print()
     print("ALL PASS" if ok else "SOME FAILED")
     sys.exit(0 if ok else 1)

@@ -284,7 +284,10 @@ class PlannerStrategy(BaselineStrategy):
     # 的复刻，multimap_selftest XFAIL 实证地图无关）。中段咽喉蹲守十掐九中仍
     # 无界（V3.15 教义不动），仅【RUSH + nxt==gate】给有界预算，超限抢先过边
     # ——接受边中被冻的小风险换验核先手（终段节奏紧，无界等=确定丢先手）。
-    TRAP_RUSH_GATE_WAIT = 25
+    # V3.60：25→35，replay(4) client 验核后在 S14 蹲 66 帧，25 帧预算太短
+    # 提前放行踏边正好撞上设卡；35 帧覆盖更多 camper 形态，配合 RUSH 阶段
+    # 削弱兜底，边中被冻也能自救（不再像 replay4 那样零动作到终场）。
+    TRAP_RUSH_GATE_WAIT = 35
     TRAP_CONVERGE_ORDINARY = False  # 实验开关：收敛分支是否也防普通节点
                                 # （无界版被电池证伪 camper 34/48；有界
                                 # 变体的配对对照见 trap-gate 实验脚本）
@@ -780,8 +783,25 @@ class PlannerStrategy(BaselineStrategy):
                     and avail >= self.EDGE_WEAKEN_RESCUE_AVAIL
                     and (not plan or plan.slack <= self.GUARD_SLACK_MIN)
                 )
-                if (state.phase != P.PHASE_RUSH
-                        and (avail >= self.EDGE_WEAKEN_RESERVE or rescue_weaken)
+                # RUSH 阶段边上削弱（V3.60，replay(4) 根因）：
+                # 旧逻辑 state.phase != P.PHASE_RUSH 一刀切禁掉 RUSH 阶段所有削弱，
+                # 导致终局被冻在唯一边上、无法攻坚、无三角改道时只能干等到未交付
+                # （replay4: S13->S14 E09 被 client r571 设卡防守值4，demo r572-600
+                #  连续 29 帧 MOVE_BLOCKED_BY_GUARD 零削弱，未交付到终场）。
+                # 规则上小分队动作不受主车队状态限制（任务书 3.4），边上行进中
+                # 完全可发 SQUAD_WEAKEN。RUSH 阶段恰恰是最该削弱的时刻——交付窗口
+                # 收窄、每帧都值钱。修法：RUSH 阶段也发削弱，但门槛收紧——只在
+                # slack 真正紧迫且防守值削得动时发，避免乱花人手在满防新卡上。
+                rush_weaken = (
+                    state.phase == P.PHASE_RUSH
+                    and (guard.get('defense', 0) or 0) <= self.EDGE_WEAKEN_RESCUE_DEFENSE
+                    and (not plan or plan.slack <= self.GUARD_SLACK_MIN)
+                )
+                # RUSH 阶段只走 rush_weaken 门禁（满防新卡不削）；
+                # 非 RUSH 保留原逻辑（常规弹药 + rescue）。
+                should_weaken = rush_weaken if state.phase == P.PHASE_RUSH else (
+                    avail >= self.EDGE_WEAKEN_RESERVE or rescue_weaken)
+                if (should_weaken
                         and not self._opp_at_node(state, nxt)
                         and state.round - last_weaken >= self.WEAKEN_RESEND_GAP):
                     self._weaken_target = nxt  # squad_action 本帧发 SQUAD_WEAKEN
@@ -2362,8 +2382,17 @@ class PlannerStrategy(BaselineStrategy):
         return max(0, 8 - self._squad_spent)
 
     def squad_action(self, state, plan):
+        # V3.60（replay(4) 根因）：RUSH 阶段允许削弱救命（边上被冻死时唯一出路），
+        # 但禁止其它新派动作（探路/清障）。上游 main_action 在 RUSH 阶段
+        # 被冻在边上时会设 _weaken_target，这里放行它；其它新派动作仍禁。
         if state.phase == P.PHASE_RUSH:
-            return None  # 冲刺阶段禁止新派小分队
+            if self._weaken_target and self._squad_avail(state) >= 2:
+                t = self._weaken_target
+                self._weaken_sent[t] = state.round
+                self._weaken_target = None
+                self._squad_spent += 2
+                return P.a_squad_weaken(t)
+            return None  # 冲刺阶段禁止其它新派小分队
         me = state.me
         avail = self._squad_avail(state)
         if avail <= 0:

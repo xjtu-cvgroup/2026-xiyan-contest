@@ -174,4 +174,9 @@
 #        时，照等 45 帧是白送时间（replay(3) S04+S07 两段共 ~87 帧拖死交付）。
 #        能秒破则设卡即破（节点攻坚1帧/边削几帧）<< 等45帧。弹药不足破不了时仍等
 #        （V3.22 防掐边保留）。selftest 补"能秒破→放行"反例 + "不能秒破→仍等"。
-BUILD_VERSION = "3.59-breakable-ordinary-exemption"
+# 3.60 = RUSH 阶段边上削弱解禁（replay(4) 根因）：旧逻辑 phase!=RUSH
+#        一刀切禁掉 RUSH 阶段所有削弱，终局被冻在唯一边、无法攻坚、无
+#        三角改道时只能干等到未交付（replay4: S13->S14 E09 被设卡防守值4，
+#        29帧零削弱冻死）。RUSH 阶段也发 SQUAD_WEAKEN，但门槛收紧
+#        （slack 紧迫 + 防守值削得动）。TRAP_RUSH_GATE_WAIT 25->35。
+BUILD_VERSION = "3.60-rush-edge-weaken"
