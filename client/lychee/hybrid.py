@@ -219,7 +219,9 @@ class HybridStrategy(Strategy):
         origin = opp.get("currentNodeId")
         anchor = opp.get("nextNodeId")
         gate = state.gate_node
-        if not cur or not origin or not gate or cur in ("S01", "S02"):
+        if not cur or not origin or not gate \
+                or cur in (state.start_node, "S02", gate,
+                           state.terminal_node):
             return None
         if not opp.get("routeEdgeId") or not opp.get("nextNodeId"):
             return self._held_mobile_plan(state)
@@ -239,7 +241,9 @@ class HybridStrategy(Strategy):
         candidates = []
         for node_id in opp_path[:-1]:
             node_type = state.node(node_id).get("nodeType")
-            if node_type in ("GATE", "TERMINAL", "START"):
+            if node_id in (state.start_node, "S02", gate,
+                           state.terminal_node) \
+                    or node_type in ("GATE", "TERMINAL", "START"):
                 continue
             guard = state.node(node_id).get("guard")
             if guard and guard.get("active", guard.get("defense", 0) > 0):
@@ -314,7 +318,8 @@ class HybridStrategy(Strategy):
                 "stayDelay": stay_delay, "rerouteDelay": reroute_delay,
                 "globallyMandatory": globally_mandatory,
                 "detour": detour, "denial": denial,
-                "myFinish": finish_need, "oppFinish": delayed_finish,
+                "myFinish": finish_need, "oppBaseFinish": opp_finish,
+                "oppFinish": delayed_finish, "guardCost": cost,
             }))
 
         if not candidates:

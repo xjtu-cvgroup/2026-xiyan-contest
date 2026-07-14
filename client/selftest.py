@@ -5596,6 +5596,16 @@ def test_hybrid_strategy():
     ok &= check("hybrid: 可绕到S15反穿宫门时禁用S14堵人",
                 not hybrid._should_commit_gate(gs))
 
+    # 特殊旁路可让未验核队伍先到 S15，再返回 S14。终点/宫门属于独立
+    # 收官语义，不能被通用动态墙算法当作普通追墙起点或目标。
+    gs = make_state(bypass=True, terminal_bypass=True, cur="S15",
+                    opp_cur="S11", opp_next="S12", opp_edge="E07",
+                    opp_edge_ms=30000, round_no=350, task_score=120)
+    hybrid = HybridStrategy()
+    hybrid.mode = HybridStrategy.MODE_MOBILE
+    ok &= check("hybrid: 终点特殊旁路不生成普通动态墙",
+                hybrid._mobile_control_plan(gs) is None)
+
     gs = make_state(bypass=True, cur="S13", opp_cur="S12",
                     round_no=330, task_score=60)
     hybrid = HybridStrategy()
