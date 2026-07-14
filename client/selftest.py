@@ -4623,6 +4623,20 @@ def test_warden_strategy():
         gs.nodes[node_id]["processType"] = proc_type
         gs.nodes[node_id]["processRound"] = frames
 
+    def add_s02_resource(gs, resource_type=P.FAST_HORSE, claim_round=2):
+        gs.resource_config = list(gs.resource_config) + [{
+            "nodeId": "S02", "resourceType": resource_type,
+            "count": 1, "claimRound": claim_round}]
+        gs.nodes["S02"]["resourceStock"] = {resource_type: 1}
+        return gs
+
+    def ready_warden():
+        st = WardenStrategy()
+        st.camp_node = "S10"
+        st._plans_ready = True
+        st._processed_here = False
+        return st
+
     st = WardenStrategy()
     st.camp_node = "S10"
     st._plans_ready = True
@@ -4630,6 +4644,81 @@ def test_warden_strategy():
     a = st.main_action(gs_at("S02", opp_cur="S02", round_no=220))
     ok &= check("warden: S02未完成时继续争换乘",
                 a and a["action"] == "PROCESS", str(a))
+
+    # 组委会 Tips：首个窗口站新增资源。固定处理只有同帧才争夺，
+    # 所以同点时必须先 PROCESS；只有领取完仍能先启动处理才拿马。
+    gs = add_s02_resource(gs_at("S02", opp_cur="S02", round_no=220))
+    a = ready_warden().main_action(gs)
+    ok &= check("warden: S02同点有马仍先PROCESS保底",
+                a and a["action"] == "PROCESS", str(a))
+
+    gs = add_s02_resource(gs_at(
+        "S02", opp_cur="S01", opp_next="S02", opp_edge="E01",
+        round_no=220))
+    a = ready_warden().main_action(gs)
+    ok &= check("warden: S02领先足够时用余量领快马",
+                a and a["action"] == "CLAIM_RESOURCE"
+                and a["resourceType"] == P.FAST_HORSE, str(a))
+
+    gs = add_s02_resource(gs_at(
+        "S02", opp_cur="S01", opp_next="S02", opp_edge="E01",
+        round_no=220))
+    gs.opp["edgeProgressMs"] = 23000  # 对手最乐观只剩1帧到站
+    a = ready_warden().main_action(gs)
+    ok &= check("warden: S02领马会丢处理先手时立即PROCESS",
+                a and a["action"] == "PROCESS", str(a))
+
+    gs = add_s02_resource(gs_at(
+        "S02", opp_cur="S01", opp_next="S02", opp_edge="E01",
+        round_no=220))
+    gs.opp.update(edgeTotalMs=3000, edgeProgressMs=1000,
+                  resources={}, buffs=[])
+    a = ready_warden().main_action(gs)
+    ok &= check("warden: S02领取2帧与对手到站2帧持平时不抢",
+                a and a["action"] == "PROCESS", str(a))
+
+    gs = add_s02_resource(gs_at(
+        "S02", opp_cur="S01", opp_next="S02", opp_edge="E01",
+        round_no=220))
+    gs.opp.update(edgeTotalMs=4000, edgeProgressMs=1000,
+                  resources={}, buffs=[])
+    a = ready_warden().main_action(gs)
+    ok &= check("warden: S02领取2帧且对手到站至少3帧才抢",
+                a and a["action"] == "CLAIM_RESOURCE", str(a))
+
+    fixed_proc = {"action": "PROCESS", "type": "PROCESS",
+                  "targetNodeId": "S02", "remainRound": 3}
+    gs = add_s02_resource(gs_at(
+        "S02", opp_cur="S02", opp_process=fixed_proc, round_no=220))
+    a = ready_warden().main_action(gs)
+    ok &= check("warden: 对手S02处理剩余帧足够则排队期领马",
+                a and a["action"] == "CLAIM_RESOURCE"
+                and a["resourceType"] == P.FAST_HORSE, str(a))
+
+    short_proc = {"action": "PROCESS", "type": "PROCESS",
+                  "targetNodeId": "S02", "remainRound": 1}
+    gs = add_s02_resource(gs_at(
+        "S02", opp_cur="S02", opp_process=short_proc, round_no=220))
+    a = ready_warden().main_action(gs)
+    ok &= check("warden: 排队剩余不够领马时不额外延误",
+                a and a["action"] == "WAIT", str(a))
+
+    resource_proc = {"action": "CLAIM_RESOURCE", "type": "CLAIM_RESOURCE",
+                     "targetNodeId": "S02", "resourceType": P.FAST_HORSE,
+                     "remainRound": 2}
+    gs = add_s02_resource(gs_at(
+        "S02", opp_cur="S02", opp_process=resource_proc, round_no=220))
+    a = ready_warden().main_action(gs)
+    ok &= check("warden: 对手S02领资源不占固定处理对象",
+                a and a["action"] == "PROCESS", str(a))
+
+    gs.opp["resources"] = {}
+    gs.opp["buffs"] = []
+    card = ready_warden()._defense_card(gs, {
+        "contestType": P.CONTEST_RESOURCE, "targetNodeId": "S02",
+        "resourceType": P.FAST_HORSE})
+    ok &= check("warden: S02马窗对手无强行时献贡不败",
+                card == P.CARD_XIAN_GONG, card)
 
     st = WardenStrategy()
     st.camp_node = "S10"

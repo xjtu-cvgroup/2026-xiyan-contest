@@ -86,6 +86,11 @@ class WardenStrategy(BaselineStrategy):
     SQUAD_REINFORCE_COST = 2
     SQUAD_SCOUT_COST = 1
     SQUAD_NONURGENT_RESERVE = 4  # 非转农期至少留两次削弱/续防弹药
+    # S02 新图资源只能消费已有领先，不能拿出站先手换情报。
+    S02_TEMPO_RESOURCES = (
+        P.FAST_HORSE, P.SHORT_HORSE, P.ICE_BOX,
+        P.PASS_TOKEN, P.OFFICIAL_PERMIT, P.BOAT_RIGHT,
+    )
 
     def __init__(self, logger=None, forced_camp=None):
         super().__init__(logger)
@@ -116,6 +121,7 @@ class WardenStrategy(BaselineStrategy):
         self._s02_opening_first_hop = None
         self._s02_opening_path = []
         self._s02_resource_drawn = False
+        self._s02_tempo_claim_started = False
 
     # ================= 初始化 =================
 
@@ -425,10 +431,12 @@ class WardenStrategy(BaselineStrategy):
         # 变种图 S01 可能投放马。双方同时领取时，对手尚无马/
         # 疾行，因而无法合法打出唯一能克献贡的强行；献贡至少不败。
         if contest.get("contestType") == P.CONTEST_RESOURCE \
-                and contest.get("targetNodeId") == state.start_node \
+                and contest.get("targetNodeId") \
+                in (state.start_node, "S02") \
                 and contest.get("resourceType") \
                 in (P.FAST_HORSE, P.SHORT_HORSE) \
-                and self.s02_opening_active(state) \
+                and (contest.get("targetNodeId") == "S02"
+                     or self.s02_opening_active(state)) \
                 and not self._opp_can_qiang_xing(state) \
                 and self._xian_gong_available(state):
             return P.CARD_XIAN_GONG
@@ -543,6 +551,9 @@ class WardenStrategy(BaselineStrategy):
             return self._farm_endgame(state, cur)
         if self._score_farm_mode and not me.get("verified"):
             return self._farm_endgame(state, cur)
+        s02_resource = self._s02_tempo_resource_action(state, cur)
+        if s02_resource:
+            return s02_resource
         if self._s02_lock_hold(state, cur):
             node = state.node(cur)
             needs = (node.get("processType")
@@ -591,7 +602,8 @@ class WardenStrategy(BaselineStrategy):
                  and node.get("processRound", 0) > 0)
         if needs and not self._node_processed(state, cur):
             proc = (state.opp.get("currentProcess") or {})
-            if proc.get("targetNodeId") == cur:
+            proc_type = proc.get("action") or proc.get("type")
+            if proc.get("targetNodeId") == cur and proc_type == "PROCESS":
                 return P.a_wait()            # 排队，别开无谓的码头窗口
             return P.a_process()
 
@@ -725,7 +737,8 @@ class WardenStrategy(BaselineStrategy):
                   if r.get("nodeId") == state.start_node
                   and r.get("resourceType") == resource_type
                   and r.get("claimRound") is not None]
-        return max(0, int(rounds[0])) if rounds else None
+        # 即使配置读条为0，CLAIM_RESOURCE 也会占用当帧主动作。
+        return max(1, int(rounds[0])) if rounds else None
 
     def _opening_horse_route(self, state, resource_type, claim_round):
         """精确模拟：领取后先上边 1 帧，下一帧才能在移动中用马。"""
@@ -838,6 +851,110 @@ class WardenStrategy(BaselineStrategy):
             if cur == state.start_node else "S02"
         return self._advance(state, cur, target or "S02")
 
+    # ---- S02 资源时机：只花可证明的领先/排队帧 ----
+
+    def _s02_resource_claim_frames(self, state, resource_type):
+        for item in state.resource_config:
+            if item.get("nodeId") != "S02" \
+                    or item.get("resourceType") != resource_type:
+                continue
+            try:
+                frames = max(1, int(item.get("claimRound")))
+            except (TypeError, ValueError):
+                return None
+            if frames >= 3 and self._has_our_mark(state, "S02"):
+                frames = max(2, frames - 3)
+            return frames
+        return None
+
+    @staticmethod
+    def _process_remain(player):
+        proc = (player or {}).get("currentProcess") or {}
+        for key in ("remainRound", "remainingRound", "remain"):
+            if proc.get(key) is not None:
+                try:
+                    return max(0, int(proc[key]))
+                except (TypeError, ValueError):
+                    return 0
+        return 0
+
+    def _opp_s02_arrival_lower_bound(self, state):
+        """对手到 S02 的乐观下界：晴天、手里最快马立即生效。"""
+        opp = state.opp or {}
+        if not opp or opp.get("delivered") or opp.get("retired"):
+            return float("inf")
+        if not opp.get("routeEdgeId") and opp.get("currentNodeId") == "S02":
+            return 0
+        _, _, speed = self._active_speed_buff(state, opp, optimistic=True)
+        resources = opp.get("resources") or {}
+        if resources.get(P.FAST_HORSE, 0) > 0:
+            speed = max(speed, P.SPEED_FAST_HORSE)
+        elif resources.get(P.SHORT_HORSE, 0) > 0:
+            speed = max(speed, P.SPEED_SHORT_HORSE)
+        if state.phase == P.PHASE_RUSH \
+                and not (opp.get("rushTacticUsedCount") or 0) \
+                and (opp.get("goodFruit", 0) or 0) >= 3:
+            speed = max(speed, P.SPEED_RUSH)
+
+        edge_remain = 0
+        if opp.get("routeEdgeId") and opp.get("nextNodeId"):
+            total = opp.get("edgeTotalMs") or 0
+            done = opp.get("edgeProgressMs") or 0
+            edge_remain = int(math.ceil(
+                max(0, total - done) / max(1, speed)))
+            pos = opp.get("nextNodeId")
+        else:
+            pos = opp.get("currentNodeId")
+        if not pos:
+            return float("inf")
+        tail, path = state.graph.shortest_path(pos, "S02", speed)
+        return edge_remain + tail if path else float("inf")
+
+    def _s02_tempo_resource_action(self, state, cur):
+        """领资源后仍能先启动 PROCESS，或领取完全塞进排队时才放行。"""
+        if cur != "S02" or self._node_processed(state, cur) \
+                or self._s02_tempo_claim_started \
+                or self._score_farm_mode or self._deny_only_mode:
+            return None
+        stock = state.node(cur).get("resourceStock") or {}
+        resources = state.me.get("resources") or {}
+        candidate = None
+        for resource_type in self.S02_TEMPO_RESOURCES:
+            if stock.get(resource_type, 0) <= 0 \
+                    or resources.get(resource_type, 0) > 0:
+                continue
+            frames = self._s02_resource_claim_frames(state, resource_type)
+            if frames is not None:
+                candidate = (resource_type, frames)
+                break
+        if not candidate:
+            return None
+
+        resource_type, claim_frames = candidate
+        opp = state.opp or {}
+        proc = opp.get("currentProcess") or {}
+        proc_type = proc.get("action") or proc.get("type")
+        opp_processing_station = bool(
+            not opp.get("routeEdgeId")
+            and opp.get("currentNodeId") == cur
+            and proc.get("targetNodeId") == cur
+            and proc_type == "PROCESS")
+        if opp_processing_station:
+            safe = claim_frames <= self._process_remain(opp)
+        else:
+            # 必须在对手能到站的帧之前完成领取并提交 PROCESS。
+            safe = claim_frames < self._opp_s02_arrival_lower_bound(state)
+        if not safe:
+            return None
+        self._s02_tempo_claim_started = True
+        if self.log:
+            self.log.info(
+                "warden: S02 tempo claim=%s frames=%d oppEta=%s oppProc=%s",
+                resource_type, claim_frames,
+                self._opp_s02_arrival_lower_bound(state),
+                self._process_remain(opp) if opp_processing_station else None)
+        return P.a_claim_resource(cur, resource_type)
+
     def _s02_lock_hold(self, state, cur):
         """S02 镜像码头窗：RUSH 前目标是拖住双方，不是抢先离站。"""
         if cur != "S02" or state.phase == P.PHASE_RUSH:
@@ -847,9 +964,14 @@ class WardenStrategy(BaselineStrategy):
         if self._s02_lock_spent(state):
             return False
         opp = state.opp
+        proc = (opp or {}).get("currentProcess") or {}
+        proc_type = proc.get("action") or proc.get("type")
+        station_busy = bool(proc.get("targetNodeId") == cur
+                            and proc_type == "PROCESS")
         return bool(opp and not opp.get("delivered") and not opp.get("retired")
                     and not opp.get("routeEdgeId")
-                    and opp.get("currentNodeId") == cur)
+                    and opp.get("currentNodeId") == cur
+                    and not station_busy)
 
     @staticmethod
     def _xian_gong_available(state):
