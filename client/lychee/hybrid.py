@@ -31,6 +31,7 @@ class HybridStrategy(Strategy):
     GATE_GOOD_FRUIT_FLOOR = 7  # 防4宫门卡 2 篓 + Warden 5 篓底仓
     MOBILE_APPROACH_MAX_DETOUR = 12
     MOBILE_ROUTE_TOLERANCE = 12
+    MOVING_PIVOT_MIN_GAIN = 6
     S02_REENTRY_TOLERANCE = 8
 
     def __init__(self, logger=None):
@@ -42,6 +43,7 @@ class HybridStrategy(Strategy):
         self.mobile_target = None
         self.mobile_plan = None
         self._mobile_hold_node = None
+        self._moving_pivot_lock = None
         self._gate_pace_active = False
         self._s02_farm_only = False
         self._s02_deny_only = False
@@ -131,6 +133,9 @@ class HybridStrategy(Strategy):
         main = self._main_action(actions)
         if main and main.get("action") == "PROCESS":
             return actions
+        pivot = self._moving_pivot_action(state)
+        if pivot:
+            return self._replace_main_action(actions, pivot)
         score_plan = self.planner.last_plan
         plan = self._mobile_control_plan(state)
         force_guard = bool(
@@ -933,19 +938,177 @@ class HybridStrategy(Strategy):
                      if a.get("action") not in P.MAIN_ACTION_TYPES]
         return [replacement] + auxiliary
 
-    def _mobile_control_plan(self, state, require_delivery=True):
+    @staticmethod
+    def _moving_edge_context(state):
+        """返回在途边的真实起点/终点；服务端允许从起点改走相邻边。"""
+        me = state.me
+        edge = state.graph.edges.get(me.get("routeEdgeId")) if me else None
+        target = me.get("nextNodeId") if me else None
+        if not edge or not target:
+            return None, None, None
+        origin = me.get("currentNodeId")
+        if origin and state.graph.edge_between(origin, target) is edge:
+            return origin, target, edge
+        src = edge.get("fromNodeId") or edge.get("fromNode")
+        dst = edge.get("toNodeId") or edge.get("toNode")
+        if target == dst:
+            origin = src
+        elif target == src and edge.get("bidirectional", True):
+            origin = dst
+        else:
+            return None, None, None
+        return origin, target, edge
+
+    def _moving_continue_eta(self, state, target, destination):
+        """继续当前边后抵达 destination 的保证型 ETA。"""
+        boost_type, boost_rem, _ = self.warden._active_speed_buff(
+            state, state.me)
+        edge_eta, boost_type, boost_rem = self._conservative_edge_remaining(
+            state, state.me, boost_type, boost_rem)
+        if edge_eta >= 999 or state.enemy_guard(target):
+            return 999
+        travel_kwargs = self._gate_travel_kwargs(state)
+        eta, path = self.warden._travel_dynamic(
+            state, target, destination, boost_type, boost_rem,
+            start_elapsed=edge_eta,
+            include_current_process=target != destination,
+            include_intermediate_process=True,
+            conservative_weather=True, **travel_kwargs)
+        return eta if path else 999
+
+    def _moving_route_via(self, state, origin, first_hop, destination,
+                          blocked_nodes=()):
+        """按当前天气和有限增益计算改边后的完整保证路线。"""
+        edge = state.graph.edge_between(origin, first_hop)
+        if not edge or state.has_obstacle(first_hop) \
+                or state.enemy_guard(first_hop):
+            return 999, []
+        boost_type, boost_rem, _ = self.warden._active_speed_buff(
+            state, state.me)
+        edge_eta, boost_type, boost_rem = self.warden._edge_dynamic_frames(
+            state, edge, 0, boost_type, boost_rem,
+            conservative_weather=True, worst_unknown_weather=True)
+        travel_kwargs = self._gate_travel_kwargs(state)
+        blocked = set(travel_kwargs.get("blocked_nodes") or ())
+        blocked.update(blocked_nodes or ())
+        if first_hop in blocked:
+            return 999, []
+        travel_kwargs["blocked_nodes"] = blocked
+        eta, path = self.warden._travel_dynamic(
+            state, first_hop, destination, boost_type, boost_rem,
+            start_elapsed=edge_eta,
+            include_current_process=first_hop != destination,
+            include_intermediate_process=True,
+            conservative_weather=True, **travel_kwargs)
+        return (eta, [origin] + path) if path else (999, [])
+
+    def _moving_target_guard_threat(self, state, target):
+        """公开几何能证明对手可在我方到站前完成设卡。"""
+        if not target or target in (state.start_node, state.terminal_node):
+            return False
+        if state.enemy_guard(target):
+            return True
+        opp = state.opp
+        if not opp or not opp.get("routeEdgeId") \
+                or opp.get("nextNodeId") != target:
+            return False
+        boost_type, boost_rem, _ = self.warden._active_speed_buff(
+            state, state.me)
+        my_eta, _, _ = self._conservative_edge_remaining(
+            state, state.me, boost_type, boost_rem)
+        opp_eta = self._edge_remaining_frames(opp, optimistic=True)
+        return opp_eta + self.warden.MOBILE_GUARD_PAD <= my_eta
+
+    def _moving_guard_escape(self, state, origin, target):
+        """目标将被设卡时，从边起点选择仍能按时交付的最快安全首跳。"""
+        remain = state.duration_round - state.round
+        candidates = []
+        for first_hop, _ in state.graph.neighbors(origin):
+            if first_hop == target:
+                continue
+            gate_eta, path = self._moving_route_via(
+                state, origin, first_hop, state.gate_node, (target,))
+            if not path or gate_eta >= 999:
+                continue
+            if origin in path[2:]:
+                continue
+            if "S02" in self.warden._processed_nodes \
+                    and origin != "S02" and "S02" in path[1:]:
+                continue
+            if not self._gate_route_executable(
+                    state, origin, path, moving=True):
+                continue
+            finish_need = self._my_finish_need(state, gate_eta)
+            if finish_need + self.warden.EXIT_PAD > remain:
+                continue
+            candidates.append(((gate_eta, first_hop), first_hop))
+        return min(candidates, default=(None, None))[1]
+
+    def _moving_pivot_action(self, state):
+        """在途吸收新路线证据，提前改边避卡或抢占动态汇合点。"""
+        me, opp = state.me, state.opp
+        if not me or not me.get("routeEdgeId"):
+            self._moving_pivot_lock = None
+            return None
+        if me.get("state") != P.ST_MOVING or not opp \
+                or state.my_open_contests() or me.get("verified") \
+                or me.get("delivered") or me.get("retired"):
+            return None
+        origin, target, _ = self._moving_edge_context(state)
+        if not origin or not target:
+            return None
+
+        threatened = self._moving_target_guard_threat(state, target)
+        if threatened:
+            first_hop = self._moving_guard_escape(state, origin, target)
+            if first_hop:
+                self._moving_pivot_lock = (origin, first_hop)
+                if self.log:
+                    self.log.info(
+                        "hybrid: edge pivot avoids guard %s->%s (was %s)",
+                        origin, first_hop, target)
+                return P.a_move(first_hop)
+
+        # 一次改边后锁住新的首跳，除非它本身又出现确定设卡威胁；避免
+        # 对手反复换线或同价路径导致我方在同一起点来回清空边进度。
+        if self._moving_pivot_lock == (origin, target):
+            return None
+        if not opp.get("routeEdgeId") or not opp.get("nextNodeId"):
+            return None
+        plan = self._mobile_control_plan(
+            state, require_delivery=True, my_origin=origin)
+        first_hop = plan.get("firstHop") if plan else None
+        if not first_hop or first_hop == target:
+            return None
+        continue_eta = self._moving_continue_eta(
+            state, target, plan["target"])
+        gain = continue_eta - plan["myEta"]
+        if gain < self.MOVING_PIVOT_MIN_GAIN:
+            return None
+        self._moving_pivot_lock = (origin, first_hop)
+        self.mobile_target = plan["target"]
+        self.mobile_plan = dict(plan)
+        if self.log:
+            self.log.info(
+                "hybrid: edge pivot control %s->%s target=%s gain=%s",
+                origin, first_hop, plan["target"], gain)
+        return P.a_move(first_hop)
+
+    def _mobile_control_plan(self, state, require_delivery=True,
+                             my_origin=None):
         """选择我方能先到、对手绕开也会付税的最近汇合点。"""
         me, opp = state.me, state.opp
         if not me or not opp or state.my_open_contests():
             return None
-        if me.get("state") in P.BUSY_STATES or me.get("routeEdgeId") \
+        if me.get("state") in P.BUSY_STATES \
+                or (me.get("routeEdgeId") and not my_origin) \
                 or me.get("verified") or me.get("delivered") \
                 or me.get("retired"):
             return None
         if opp.get("delivered") or opp.get("retired"):
             return None
 
-        cur = me.get("currentNodeId")
+        cur = my_origin or me.get("currentNodeId")
         origin = opp.get("currentNodeId")
         anchor = opp.get("nextNodeId")
         gate = state.gate_node
@@ -1023,8 +1186,6 @@ class HybridStrategy(Strategy):
             stay_delay = self.warden._mobile_stay_delay(
                 state, node_id, extra, guard_exposure)
             delay = min(stay_delay, reroute_delay)
-            if delay < self.warden.MOBILE_GUARD_MIN_DELAY:
-                continue
 
             target_needs_process = bool(
                 state.node(node_id).get("processType")) \
@@ -1036,6 +1197,21 @@ class HybridStrategy(Strategy):
                 include_intermediate_process=True,
                 conservative_weather=True, **travel_kwargs)
             if not after_path:
+                continue
+            # 宫门入边不足5帧时，普通“卡点至少赚6帧”不再是完整价值。
+            # 若抢到上游点后，对手继续走会被本点卡；改线则我方仍能先到
+            # 宫门并完成预埋，这个二选一控制合同可以放行短税汇合点。
+            if node_id == anchor:
+                opp_alt_gate_eta = alt
+            else:
+                opp_alt_gate_eta = edge_remain + alt
+            upstream_contract = bool(
+                not self._gate_has_reaction_window(state)
+                and stay_delay >= self.warden.MOBILE_GUARD_MIN_DELAY
+                and via_gate + self.warden.MOBILE_GUARD_PAD
+                <= opp_alt_gate_eta)
+            if delay < self.warden.MOBILE_GUARD_MIN_DELAY \
+                    and not upstream_contract:
                 continue
             detour = max(0, via_gate - my_gate)
             finish_need = self._my_finish_need(state, via_gate)
@@ -1065,9 +1241,11 @@ class HybridStrategy(Strategy):
                 "delay": delay, "finishTax": finish_tax,
                 "stayDelay": stay_delay, "rerouteDelay": reroute_delay,
                 "globallyMandatory": globally_mandatory,
+                "upstreamContract": upstream_contract,
                 "detour": detour, "denial": denial,
                 "myFinish": finish_need, "oppBaseFinish": opp_finish,
                 "oppFinish": delayed_finish, "guardCost": cost,
+                "firstHop": my_route[1] if len(my_route) > 1 else None,
             }))
 
         if not candidates:

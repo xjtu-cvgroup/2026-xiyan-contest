@@ -17,7 +17,9 @@ from lychee.hybrid import HybridStrategy
 from lychee.planner import Plan
 from lychee.state import GameState
 from lychee.warden import WardenStrategy
-from scenario_maps import (e25_bypass_start, gate_bypass_start, public_v42_start,
+from scenario_maps import (e25_bypass_start, gate_bypass_start,
+                           predicted_optional_s02_start,
+                           predicted_short_gate_start, public_v42_start,
                            variant1_e25_start, variant1_start)
 
 
@@ -30,7 +32,8 @@ def check(name, condition, detail=""):
 def make_state(start=None, round_no=1, phase=P.PHASE_NORMAL,
                my_node="S09", opp_node="S02", weather=None,
                my_buffs=None, obstacle_nodes=(), enemy_guards=(),
-               my_edge=None, my_edge_progress=0):
+               my_edge=None, my_edge_progress=0,
+               opp_edge=None, opp_edge_progress=0):
     """从平台 start 结构构造最小但完整的公开状态。"""
     start = json.loads(json.dumps(start or public_v42_start()))
     state = GameState(PID_A)
@@ -63,18 +66,21 @@ def make_state(start=None, round_no=1, phase=P.PHASE_NORMAL,
     me = player(PID_A, "RED", my_node)
     opp = player(PID_B, "BLUE", opp_node)
     me["buffs"] = list(my_buffs or [])
-    if my_edge:
-        edge_id, edge_from, edge_to = my_edge
+    def put_on_edge(player_data, edge_spec, progress):
+        edge_id, edge_from, edge_to = edge_spec
         edge = state.graph.edges[edge_id]
-        me.update(
-            state=P.ST_MOVING, currentNodeId=None, nextNodeId=edge_to,
+        player_data.update(
+            state=P.ST_MOVING, currentNodeId=edge_from, nextNodeId=edge_to,
             routeEdgeId=edge_id,
             edgeTotalMs=state.graph.edge_total_move(edge),
-            edgeProgressMs=my_edge_progress,
+            edgeProgressMs=progress,
         )
-        # The service exposes the route start only indirectly. The tuple keeps
-        # the fixture readable and validates that the chosen edge is legal.
         assert state.graph.edge_between(edge_from, edge_to) is edge
+
+    if my_edge:
+        put_on_edge(me, my_edge, my_edge_progress)
+    if opp_edge:
+        put_on_edge(opp, opp_edge, opp_edge_progress)
 
     state.on_inquire({
         "matchId": start["matchId"], "round": round_no, "phase": phase,
@@ -314,12 +320,61 @@ def test_mobile_intercept_uses_conservative_eta():
           f"expected={expected} old={full_horse} path={path}")
 
 
+def test_moving_pivot_replay_contracts():
+    """04/05复盘：在途必须吸收下一帧才公开的对手路线证据。"""
+    short = make_state(
+        predicted_short_gate_start(), round_no=327,
+        my_node="S10", opp_node="S09",
+        my_edge=("E17", "S10", "S08"), my_edge_progress=P.BASE_SPEED,
+        opp_edge=("E25", "S09", "S12"), opp_edge_progress=0)
+    hybrid = HybridStrategy()
+    hybrid.mode = hybrid.MODE_MOBILE
+    hybrid.on_start(short)
+    action = hybrid._main_action(hybrid.decide(short))
+    check("04短边图在途转抢S11汇合点",
+          action == P.a_move("S11"), str(action))
+
+    # 服务端执行改边后，起点仍是 S10、目标变为 S11。同一条公开证据
+    # 不得让策略下一帧再次清空进度换回其它边。
+    edge = short.graph.edges["E06"]
+    short.me.update(
+        currentNodeId="S10", nextNodeId="S11", routeEdgeId="E06",
+        edgeTotalMs=short.graph.edge_total_move(edge),
+        edgeProgressMs=P.BASE_SPEED, state=P.ST_MOVING)
+    check("在途改边锁防止同一起点来回横跳",
+          hybrid._moving_pivot_action(short) is None)
+
+    optional = make_state(
+        predicted_optional_s02_start(), round_no=199,
+        my_node="S08", opp_node="S11",
+        enemy_guards=("S11",),
+        my_edge=("E17", "S08", "S10"),
+        my_edge_progress=18 * P.BASE_SPEED,
+        opp_edge=("E06", "S11", "S10"), opp_edge_progress=0)
+    hybrid2 = HybridStrategy()
+    hybrid2.mode = hybrid2.MODE_MOBILE
+    hybrid2.on_start(optional)
+    check("05可选S02图在S10成卡前改走S09",
+          hybrid2._main_action(hybrid2.decide(optional)) == P.a_move("S09"))
+
+    near = make_state(
+        predicted_optional_s02_start(), round_no=199,
+        my_node="S08", opp_node="S11",
+        my_edge=("E17", "S08", "S10"),
+        my_edge_progress=optional.me["edgeTotalMs"] - 3 * P.BASE_SPEED,
+        opp_edge=("E06", "S11", "S10"), opp_edge_progress=0)
+    hybrid3 = HybridStrategy()
+    check("我方将在设卡生效前到站时不误判冻结威胁",
+          not hybrid3._moving_target_guard_threat(near, "S10"))
+
+
 def test_replay_gate_lead_survives_obstacle_combo():
     """replay.report (1)：S02 的处理先手不能再被 S03 回头卖掉。"""
     state = make_state(
         variant1_e25_start(), round_no=54, my_node="S02", opp_node="S02",
         obstacle_nodes=("S06", "S07", "S10", "S11"))
     hybrid = HybridStrategy()
+    hybrid.mode = hybrid.MODE_MOBILE
     hybrid.warden._processed_nodes.add("S02")
     hybrid.warden._processed_here = True
     hybrid.planner._processed_here = True
@@ -327,7 +382,7 @@ def test_replay_gate_lead_survives_obstacle_combo():
     eta = hybrid._gate_eta(state, state.me, optimistic=False)
     check("组合图公开障碍不再把宫门ETA打成999", eta < 999, f"eta={eta}")
     check("S02处理先手能启动宫门领先保护",
-          hybrid._should_preserve_s02_gate_lead(state), f"eta={eta}")
+          hybrid._should_preserve_gate_lead(state), f"eta={eta}")
 
     task = {
         "taskId": "T_S03", "nodeId": "S03", "processRound": 3,
@@ -389,6 +444,7 @@ def main():
     test_current_edge_and_public_blocks()
     test_task_budget_and_gate_topology()
     test_mobile_intercept_uses_conservative_eta()
+    test_moving_pivot_replay_contracts()
     test_replay_gate_lead_survives_obstacle_combo()
     test_finish_buffer_boundary()
     print("ALL GATE PROOF SCENARIOS PASS")

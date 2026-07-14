@@ -238,7 +238,9 @@ def _check_plan(state, strategy, plan):
     assert plan["myEta"] + strategy.warden.MOBILE_GUARD_PAD \
         <= plan["oppEta"]
     assert plan["delay"] == min(plan["stayDelay"], plan["rerouteDelay"])
-    assert plan["delay"] >= strategy.warden.MOBILE_GUARD_MIN_DELAY
+    assert plan["delay"] >= strategy.warden.MOBILE_GUARD_MIN_DELAY \
+        or (plan.get("upstreamContract")
+            and plan["stayDelay"] >= strategy.warden.MOBILE_GUARD_MIN_DELAY)
     assert plan["myFinish"] + strategy.warden.EXIT_PAD <= remain
     assert plan["finishTax"] == max(
         0, plan["oppFinish"] - plan["oppBaseFinish"])
