@@ -129,6 +129,9 @@ class WardenStrategy(BaselineStrategy):
         self._s02_resource_drawn = False
         self._s02_tempo_claim_started = False
         self._s02_tempo_resource_type = None
+        # Hybrid 会在无可靠封锁点的地图关闭“用 S02 马换到门先手”。
+        # 独立 Warden/公开图默认保持 3.96.34 行为。
+        self._s02_gate_race_relevant = True
 
     # ================= 初始化 =================
 
@@ -1052,6 +1055,7 @@ class WardenStrategy(BaselineStrategy):
             and opp.get("currentNodeId") == cur
             and not proc_type
             and not opp_processing_station
+            and self._s02_gate_race_relevant
             and self._s02_horse_changes_gate_race(state, resource_type))
         if opp_processing_station:
             safe = claim_frames <= self._process_remain(opp)

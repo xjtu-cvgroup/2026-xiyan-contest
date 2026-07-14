@@ -6473,19 +6473,49 @@ def test_hybrid_strategy():
     ok &= check("hybrid: S14短入边未占门时仍不误判可反应",
                 not hybrid._should_commit_gate(gs))
 
-    # 04 实战核心帧：我方已到 S14，对手停在短入边相邻的
-    # S13。此时 Planner 即使看到后方任务，也必须当帧粘性接管、
-    # 提前设卡，不得再从 S14 回头。
+    # 04 实战核心帧：短边 + 富资源对手能一拍拆防4，裸到门领先不等于
+    # 墙先手，不得为了预埋切进 Warden。只有对手连果/小队都不足时，
+    # 预埋才具有真实控制价值。
     gs = make_state(bypass=True, short_gate=True, cur="S14",
                     opp_cur="S13", round_no=329, task_score=75)
     hybrid = HybridStrategy()
     hybrid.mode = HybridStrategy.MODE_SCORE
     acts = hybrid.decide(gs)
-    ok &= check("hybrid: S14短边相邻威胁当帧预埋且粘性接管",
+    ok &= check("hybrid: S14短边富资源对手可瞬拆时不接管",
+                hybrid.mode == HybridStrategy.MODE_MOBILE
+                and not any(a.get("action") == "SET_GUARD" for a in acts),
+                f"mode={hybrid.mode} acts={acts}")
+
+    gs = make_state(bypass=True, short_gate=True, cur="S14",
+                    opp_cur="S13", round_no=329, task_score=75,
+                    opp_squads=0)
+    gs.players[2002]["goodFruit"] = 1
+    gs.players[2002]["badFruit"] = 0
+    hybrid = HybridStrategy()
+    hybrid.mode = HybridStrategy.MODE_SCORE
+    acts = hybrid.decide(gs)
+    ok &= check("hybrid: S14短边对手无破防能力才预埋",
                 hybrid.mode == HybridStrategy.MODE_GATE
                 and any(a.get("action") == "SET_GUARD"
-                        and a.get("targetNodeId") == "S14" for a in acts)
-                and not any(a.get("action") == "MOVE" for a in acts),
+                        and a.get("targetNodeId") == "S14" for a in acts),
+                f"mode={hybrid.mode} acts={acts}")
+
+    gs = make_state(bypass=True, short_gate=True, cur="S02",
+                    opp_cur="S02", round_no=43)
+    gs.nodes["S02"]["resourceStock"] = {P.FAST_HORSE: 1}
+    gs.resource_config = list(gs.resource_config) + [{
+        "nodeId": "S02", "resourceType": P.FAST_HORSE,
+        "count": 1, "claimRound": 2,
+    }]
+    hybrid = HybridStrategy()
+    acts = hybrid.decide(gs)
+    ok &= check("hybrid: 无可靠墙地图S02同站不为到门竞速马让PROCESS",
+                hybrid.mode == HybridStrategy.MODE_MOBILE
+                and hybrid._uncontrollable_gate_map
+                and hybrid.warden._s02_gate_race_relevant is False
+                and any(a.get("action") == "PROCESS" for a in acts)
+                and not any(a.get("action") == "CLAIM_RESOURCE"
+                            for a in acts),
                 f"mode={hybrid.mode} acts={acts}")
 
     # 长入边仍坚持“对手上边再设卡”，短边例外不得扩散。

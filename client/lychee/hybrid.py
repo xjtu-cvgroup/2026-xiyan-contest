@@ -47,6 +47,7 @@ class HybridStrategy(Strategy):
         self._gate_pace_active = False
         self._s02_farm_only = False
         self._s02_deny_only = False
+        self._uncontrollable_gate_map = False
 
     def on_start(self, state):
         self.planner.on_start(state)
@@ -60,6 +61,15 @@ class HybridStrategy(Strategy):
                 self.mode = self.MODE_PRIMARY
             else:
                 self.mode = self.MODE_MOBILE
+            # “必经”不等于“可控”。04 型宫门入边太短，富资源对手又能
+            # 一拍破卡，因而不再为 S14 墙购买速度。对手资源不足
+            # 时短门仍可控，不能只看边长一刀切。
+            self._uncontrollable_gate_map = bool(
+                not self.primary_choke
+                and not self._gate_has_reaction_window(state)
+                and self.warden._gate_wall_hold_lower_bound(state) <= 0)
+            self.warden._s02_gate_race_relevant = bool(
+                not self._uncontrollable_gate_map)
             if self.log:
                 self.log.info("hybrid: initial mode=%s primary=%s",
                               self.mode, self.primary_choke)
@@ -113,9 +123,15 @@ class HybridStrategy(Strategy):
                 return self.warden.decide(state)
             return self._denial_only_actions(state)
 
-        # 短宫门边无法等对手踏边后再反应：我方已占门、对手
-        # 到达相邻起步点时，必须当帧粘性接管并预埋。这一层
-        # 放在 Planner 之前，任务估值不得再把已拿到的必经点先手花掉。
+        # 没有任何可靠墙时，不再让动态截击/中边 pivot 覆盖得分路线。
+        # 04 图的实锤是 r52 已上 S03，r53 却为一个可绕截击点改走
+        # S04；这一帧改边直接送掉官道任务与冰鉴。
+        if self._uncontrollable_gate_map:
+            actions = self._score_actions(state)
+            return self._avoid_processed_s02_reentry(state, actions)
+
+        # 短宫门边只在对手公开资源证明无法快速拆门时才有控制价值。
+        # 常规富资源对手可一拍破防，不能把“裸到门领先”误记成墙先手。
         if self._short_gate_takeover_required(state):
             self._activate_gate_control(state)
             return self.warden.decide(state)
@@ -1671,10 +1687,9 @@ class HybridStrategy(Strategy):
         return bool(inbound) and min(inbound) >= self.warden.GUARD_MIN_LEAD
 
     def _gate_control_available(self, state):
-        """宫门是必经点且存在正常入边，即具备控制价值。
+        """宫门是必经点且存在正常入边，即具备潜在控制价值。
 
-        入边长度只决定“踏边后反应”还是“相邻点起步前预埋”，
-        不能再把短边误解为宫门没有战略价值。
+        短边还必须通过对手破防能力检查；拓扑必经本身不等于可控。
         """
         if self._reachable_without(
                 state, state.start_node, state.terminal_node,
@@ -1686,7 +1701,7 @@ class HybridStrategy(Strategy):
             for dst, _ in state.graph.neighbors(src))
 
     def _short_gate_takeover_required(self, state):
-        """我方已占宫门时，短入边威胁必须立即进入预埋状态。"""
+        """短边门仅在对手不能快速拆防时进入预埋状态。"""
         me, opp = state.me, state.opp
         if not me or not opp or self.mode != self.MODE_MOBILE \
                 or me.get("routeEdgeId") \
@@ -1695,7 +1710,8 @@ class HybridStrategy(Strategy):
                 or opp.get("verified") or opp.get("delivered") \
                 or opp.get("retired") \
                 or not self._gate_control_available(state) \
-                or self._gate_has_reaction_window(state):
+                or self._gate_has_reaction_window(state) \
+                or self.warden._gate_wall_hold_lower_bound(state) <= 0:
             return False
         if opp.get("routeEdgeId"):
             return opp.get("nextNodeId") == state.gate_node

@@ -10,6 +10,7 @@ from arena import Arena, PID_A, PID_B
 from lychee import protocol as P
 from lychee.hybrid import HybridStrategy
 from lychee.state import GameState
+from lychee.strategy import PlannerStrategy
 from scenario_maps import (
     predicted_optional_s02_start,
     predicted_resource_shuffle_start,
@@ -287,7 +288,8 @@ def main():
         return 0 if structure_ok else 1
 
     matches = []
-    opponents = ((RusherBot, S02ResourceRusher, RoadFarmerBot)
+    opponents = ((RusherBot, S02ResourceRusher, RoadFarmerBot,
+                  PlannerStrategy)
                  if args.opponent == "all"
                  else (RusherBot,) if args.opponent == "rusher"
                  else (S02ResourceRusher,) if args.opponent == "tip-rusher"
