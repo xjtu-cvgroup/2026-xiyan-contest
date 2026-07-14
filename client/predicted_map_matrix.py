@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """组委会 Tips 驱动的隐藏地图预测与快速对局矩阵。"""
 import argparse
+import copy
 import json
 import os
 import sys
@@ -179,10 +180,82 @@ def export_maps(directory):
             f.write("\n")
 
 
+def _raw_edge(edge, source_edges):
+    edge_id = edge["edgeId"]
+    result = copy.deepcopy(source_edges.get(edge_id, {}))
+    result.update({
+        "edgeId": edge_id,
+        "fromNodeId": edge.get("fromNodeId", edge.get("fromNode")),
+        "toNodeId": edge.get("toNodeId", edge.get("toNode")),
+        "routeType": edge["routeType"],
+        "distance": edge["distance"],
+        "bidirectional": edge.get("bidirectional", True),
+        "pathId": edge.get("pathId", f"P_{edge_id}"),
+    })
+    result.pop("fromNode", None)
+    result.pop("toNode", None)
+    return result
+
+
+def _straight_route_path(edge, nodes):
+    source = nodes[edge["fromNodeId"]]
+    target = nodes[edge["toNodeId"]]
+    sx, sy = source["x"], source["y"]
+    tx, ty = target["x"], target["y"]
+    return {
+        "pathId": edge["pathId"],
+        "edgeId": edge["edgeId"],
+        "points": [
+            {"x": sx, "y": sy},
+            {"x": round((sx + tx) / 2, 1),
+             "y": round((sy + ty) / 2, 1)},
+            {"x": tx, "y": ty},
+        ],
+    }
+
+
+def export_raw_maps(source_path, directory):
+    """导出保留 Unity 渲染字段的组委会原始 map_config 格式。"""
+    with open(source_path, encoding="utf-8") as f:
+        source = json.load(f)
+    source_edges = {edge["edgeId"]: edge for edge in source["edges"]}
+    source_paths = {
+        path["edgeId"]: path for path in source.get("routePaths", [])
+    }
+    nodes = {node["nodeId"]: node for node in source["nodes"]}
+
+    os.makedirs(directory, exist_ok=True)
+    for index, spec in enumerate(VARIANTS, 1):
+        start = spec["factory"]()
+        result = copy.deepcopy(source)
+        result["mapId"] = f"predicted_{spec['id'].replace('-', '_')}"
+        result["mapName"] = f"预测测试：{spec['summary']}"
+        result["designVersion"] = f"V4.2-PREDICT-{index:02d}"
+        result["edges"] = [
+            _raw_edge(edge, source_edges) for edge in start["edges"]
+        ]
+        result["gameplay"] = copy.deepcopy(start["map"]["gameplay"])
+        result["routePaths"] = []
+        for edge in result["edges"]:
+            path = copy.deepcopy(source_paths.get(edge["edgeId"]))
+            if path is None:
+                path = _straight_route_path(edge, nodes)
+            path["pathId"] = edge["pathId"]
+            path["edgeId"] = edge["edgeId"]
+            result["routePaths"].append(path)
+
+        path = os.path.join(directory, spec["id"] + ".map_config.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(result, f, ensure_ascii=False, indent=2)
+            f.write("\n")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--seed", type=int, default=20260714)
     parser.add_argument("--export-dir")
+    parser.add_argument("--raw-map-source")
+    parser.add_argument("--raw-export-dir")
     parser.add_argument("--variant", action="append",
                         choices=[spec["id"] for spec in VARIANTS])
     parser.add_argument("--opponent",
@@ -191,8 +264,12 @@ def main():
     parser.add_argument("--seat", choices=("all", "A", "B"), default="all")
     parser.add_argument("--topology-only", action="store_true")
     args = parser.parse_args()
+    if bool(args.raw_map_source) != bool(args.raw_export_dir):
+        parser.error("--raw-map-source 与 --raw-export-dir 必须同时提供")
     if args.export_dir:
         export_maps(args.export_dir)
+    if args.raw_map_source:
+        export_raw_maps(args.raw_map_source, args.raw_export_dir)
 
     selected = [spec for spec in VARIANTS
                 if not args.variant or spec["id"] in args.variant]

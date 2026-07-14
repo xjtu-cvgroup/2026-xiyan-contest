@@ -16,11 +16,34 @@
 | `06-resource-shuffle.start.json` | 马匹重排，S02 为短马 | 不依赖旧资源点硬编码 |
 
 每个文件都是本地 `Arena(start_data=...)` 可直接读取的完整 start 消息。
+
+`raw/` 目录另有一套可直接交给地图工具的原始 `map_config` JSON。它们保留
+母版的 Unity 地形、图层、节点坐标和渲染字段，仅替换对应测试场景的道路、
+资源与处理配置：
+
+| 文件 | 实战测试重点 |
+|---|---|
+| `raw/01-s02-fast-horse.map_config.json` | 首窗站快马资源争夺 |
+| `raw/02-single-s10-bypass.map_config.json` | 单旁路绕过 S10 |
+| `raw/03-split-corridors.map_config.json` | 两条走廊均绕过 S10 |
+| `raw/04-short-gate-edges.map_config.json` | S14 短入边，无法临边反应设卡 |
+| `raw/05-optional-s02.map_config.json` | S02 可选，抢资源与绕行竞速 |
+| `raw/06-resource-shuffle.map_config.json` | 资源点重排与双旁路组合 |
+
 重新生成并运行全部探索矩阵：
 
 ```bash
 python3 client/predicted_map_matrix.py \
   --export-dir client/test_maps/predicted
+```
+
+重新生成原始地图格式：
+
+```bash
+python3 client/predicted_map_matrix.py \
+  --raw-map-source /path/to/map_config_variant_a.json \
+  --raw-export-dir client/test_maps/predicted/raw \
+  --topology-only
 ```
 
 按地图或对手快速复现：
