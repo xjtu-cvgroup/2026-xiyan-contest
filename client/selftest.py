@@ -6282,6 +6282,28 @@ def test_hybrid_strategy():
                 hybrid._mobile_hold_node == "S09",
                 f"hold={hybrid._mobile_hold_node} acts={acts}")
 
+    # 04 短宫门的预埋墙可被富资源对手一拍拆掉，但这不能关闭 2621
+    # 动态堵：对手已经踏上普通节点入边后，主车无法攻坚，只能派小队
+    # 或改道。只要两种逃法的最小延迟仍达标，就应落免费卡并锁存复卡。
+    gs = make_state(bypass=True, short_gate=True, cur="S09",
+                    opp_cur="S07", opp_next="S09", opp_edge="E04",
+                    opp_edge_ms=66240, opp_edge_progress=9000,
+                    round_no=363, task_score=30, opp_squads=2)
+    hybrid = HybridStrategy()
+    acts = hybrid.decide(gs)
+    plan = hybrid._mobile_control_plan(gs)
+    ok &= check("hybrid: 最终短门不可控仍保留2621动态截击",
+                hybrid._final_gate_uncontrollable
+                and plan and plan["target"] == "S09"
+                and plan["delay"] >= hybrid.warden.MOBILE_GUARD_MIN_DELAY
+                and not plan["upstreamContract"]
+                and any(a["action"] == "SET_GUARD"
+                        and a["targetNodeId"] == "S09"
+                        and a["extraGoodFruit"] == 0 for a in acts)
+                and hybrid._mobile_hold_node == "S09",
+                f"final={hybrid._final_gate_uncontrollable} "
+                f"plan={plan} hold={hybrid._mobile_hold_node} acts={acts}")
+
     # replay.report (2)：S09 免费卡完成后，对手仍明确在 S07->S09 边上。
     # 模拟进程标记缺失：现场有效免费卡必须恢复留守，不能落卡即走。
     gs_hold = make_state(
@@ -6511,7 +6533,7 @@ def test_hybrid_strategy():
     acts = hybrid.decide(gs)
     ok &= check("hybrid: 无可靠墙地图S02同站不为到门竞速马让PROCESS",
                 hybrid.mode == HybridStrategy.MODE_MOBILE
-                and hybrid._uncontrollable_gate_map
+                and hybrid._final_gate_uncontrollable
                 and hybrid.warden._s02_gate_race_relevant is False
                 and any(a.get("action") == "PROCESS" for a in acts)
                 and not any(a.get("action") == "CLAIM_RESOURCE"

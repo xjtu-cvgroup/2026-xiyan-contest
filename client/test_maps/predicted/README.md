@@ -11,7 +11,7 @@
 | `01-s02-fast-horse.start.json` | S02 投放快马 | 先处理还是先抢资源 |
 | `02-single-s10-bypass.start.json` | S09-S11 旁路 | S10 失效后动态墙/S14 接管 |
 | `03-split-corridors.start.json` | 官水、山线各有旁路 | 只有 S14 汇合时的资源竞速 |
-| `04-short-gate-edges.start.json` | S14 入边缩短至 4 帧内 | 富资源对手可瞬拆时回落得分；仅无破防能力时预埋 |
+| `04-short-gate-edges.start.json` | S14 入边缩短至 4 帧内 | 富资源对手可瞬拆时禁S14预埋，但保留对手上边后的动态截击 |
 | `05-optional-s02.start.json` | S02 有冰，山线明显更快 | 首窗可争但不一定值得争 |
 | `06-resource-shuffle.start.json` | 马匹重排，S02 为短马 | 不依赖旧资源点硬编码 |
 

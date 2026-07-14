@@ -47,7 +47,7 @@ class HybridStrategy(Strategy):
         self._gate_pace_active = False
         self._s02_farm_only = False
         self._s02_deny_only = False
-        self._uncontrollable_gate_map = False
+        self._final_gate_uncontrollable = False
 
     def on_start(self, state):
         self.planner.on_start(state)
@@ -64,12 +64,12 @@ class HybridStrategy(Strategy):
             # “必经”不等于“可控”。04 型宫门入边太短，富资源对手又能
             # 一拍破卡，因而不再为 S14 墙购买速度。对手资源不足
             # 时短门仍可控，不能只看边长一刀切。
-            self._uncontrollable_gate_map = bool(
+            self._final_gate_uncontrollable = bool(
                 not self.primary_choke
                 and not self._gate_has_reaction_window(state)
                 and self.warden._gate_wall_hold_lower_bound(state) <= 0)
             self.warden._s02_gate_race_relevant = bool(
-                not self._uncontrollable_gate_map)
+                not self._final_gate_uncontrollable)
             if self.log:
                 self.log.info("hybrid: initial mode=%s primary=%s",
                               self.mode, self.primary_choke)
@@ -122,13 +122,6 @@ class HybridStrategy(Strategy):
                 self.warden._score_farm_mode = True
                 return self.warden.decide(state)
             return self._denial_only_actions(state)
-
-        # 没有任何可靠墙时，不再让动态截击/中边 pivot 覆盖得分路线。
-        # 04 图的实锤是 r52 已上 S03，r53 却为一个可绕截击点改走
-        # S04；这一帧改边直接送掉官道任务与冰鉴。
-        if self._uncontrollable_gate_map:
-            actions = self._score_actions(state)
-            return self._avoid_processed_s02_reentry(state, actions)
 
         # 短宫门边只在对手公开资源证明无法快速拆门时才有控制价值。
         # 常规富资源对手可一拍破防，不能把“裸到门领先”误记成墙先手。
@@ -854,7 +847,7 @@ class HybridStrategy(Strategy):
         self._mobile_hold_node = node_id
 
     def _mobile_reguard_safe(self, state, node_id):
-        """免费移动卡可续守一帧，且仍保住交付与最终墙先手。"""
+        """免费移动卡可续守一帧，且保住交付与后续控制合同。"""
         if not node_id or not self.warden._opp_inbound(state, node_id):
             return False
         extra = self.warden._mobile_guard_extra(state, node_id)
@@ -870,8 +863,6 @@ class HybridStrategy(Strategy):
 
         if self._s02_deny_only or self.warden._deny_only_mode:
             return True
-        if not self._gate_has_reaction_window(state):
-            return False
         my_eta = self._gate_eta(state, state.me, optimistic=False)
         if my_eta >= 999:
             return False
@@ -880,6 +871,11 @@ class HybridStrategy(Strategy):
         # WAIT 本身也占一帧，不能把 EXIT_PAD 的最后一帧拿去陪卡。
         if finish_need + self.warden.EXIT_PAD + 1 > remain:
             return False
+        # 最终宫门不可控不代表局部动态墙不可控。对手已上边后
+        # 无法用主车攻坚，只能用小分队拆或改道；上面已按这两种
+        # 最快应对证明 delay>=6，因此允许 2612 式留守/复卡。
+        if not self._gate_has_reaction_window(state):
+            return self._final_gate_uncontrollable
         return self._gate_lead_budget(state) >= 1
 
     def _mobile_hold_score_action(self, state, node_id):
@@ -1222,14 +1218,16 @@ class HybridStrategy(Strategy):
             if not after_path:
                 continue
             # 宫门入边不足5帧时，普通“卡点至少赚6帧”不再是完整价值。
-            # 若抢到上游点后，对手继续走会被本点卡；改线则我方仍能先到
-            # 宫门并完成预埋，这个二选一控制合同可以放行短税汇合点。
+            # 只有最终门本身可控，才能用“继续走吃上游卡、改线则我方
+            # 先到宫门预埋”的二选一合同放行短税汇合点。最终门可被
+            # 一拍拆穿时，不能借这个伪合同制造无收益改线。
             if node_id == anchor:
                 opp_alt_gate_eta = alt
             else:
                 opp_alt_gate_eta = edge_remain + alt
             upstream_contract = bool(
                 not self._gate_has_reaction_window(state)
+                and not self._final_gate_uncontrollable
                 and stay_delay >= self.warden.MOBILE_GUARD_MIN_DELAY
                 and via_gate + self.warden.MOBILE_GUARD_PAD
                 <= opp_alt_gate_eta)
