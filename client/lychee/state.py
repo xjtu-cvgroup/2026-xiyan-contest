@@ -61,7 +61,7 @@ class GameState:
         normalized = []
         for n in nodes:
             node = dict(n)
-            if "nodeType" not in node and node.get("type"):
+            if not node.get("nodeType") and node.get("type"):
                 node["nodeType"] = node["type"]
             proc = process_nodes.get(node.get("nodeId")) or {}
             for k in ("processType", "processRound", "canWindow"):
@@ -93,7 +93,7 @@ class GameState:
             base = self.static_nodes.get(node_id) or {}
             node = dict(base)
             node.update(n)
-            if "nodeType" not in node and node.get("type"):
+            if not node.get("nodeType") and node.get("type"):
                 node["nodeType"] = node["type"]
             if "processRound" not in n and "processType" not in n:
                 for k in ("processType", "processRound", "canWindow"):

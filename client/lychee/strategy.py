@@ -321,6 +321,7 @@ class PlannerStrategy(BaselineStrategy):
 
     # ---- 小分队远程清障（V3.12）----
     SQUAD_CLEAR_RESEND_GAP = 18   # 落地延迟上限 15 帧 + 余量，防重复派人
+    SQUAD_CLEAR_MAX_ETA = 100     # 路线未稳定时不预清远端分支，避免白送任务
 
     # ---- 小分队增援（V3.12 / V3.41）----
     REINFORCE_DEFENSE_FLOOR = 4    # 自家设卡防守值跌破该值才续
@@ -2391,6 +2392,16 @@ class PlannerStrategy(BaselineStrategy):
                                             self.planner._penalty_fn(state))
         for nid in path[1:]:
             if state.has_obstacle(nid):
+                # 任意可领 T04 都依赖该障碍存活；远程清除会让任务直接失败。
+                if any(t.get("nodeId") == nid
+                       and t.get("taskTemplateId") == "T04"
+                       for t in state.claimable_tasks()):
+                    return None
+                eta, obstacle_path = state.graph.shortest_path(
+                    cur, nid, state.my_speed(), None,
+                    self.planner._time_edge_cost_fn(state))
+                if not obstacle_path or eta > self.SQUAD_CLEAR_MAX_ETA:
+                    return None
                 return nid
         return None
 

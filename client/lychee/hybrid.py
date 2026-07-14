@@ -26,6 +26,7 @@ class HybridStrategy(Strategy):
     GATE_COMMIT_ROUND = RUSH_EARLIEST - 40
     GATE_MAX_ETA = 150
     GATE_THREAT_ETA = 120
+    GATE_SHADOW_TRAIL_MAX = 40
     GATE_GOOD_FRUIT_FLOOR = 7  # 防4宫门卡 2 篓 + Warden 5 篓底仓
     MOBILE_APPROACH_MAX_DETOUR = 12
     MOBILE_ROUTE_TOLERANCE = 12
@@ -65,6 +66,12 @@ class HybridStrategy(Strategy):
         if s02_handled:
             return s02_actions
 
+        # S02 已拿到明确处理先手时，旁路图不再把这份先手交回得分器消耗。
+        # S14 若是不可绕且有设卡反应窗，立即把先手转换成最终墙权。
+        if self._should_preserve_s02_gate_lead(state):
+            self._activate_gate_control(state)
+            return self.warden.decide(state)
+
         actions = self._score_actions(state)
         plan = self._mobile_control_plan(state)
         force_guard = bool(
@@ -81,6 +88,9 @@ class HybridStrategy(Strategy):
         if self._should_commit_gate(state):
             self._activate_gate_control(state)
             return self.warden.decide(state)
+        shadow = self._gate_shadow_race_action(state)
+        if shadow:
+            return self._replace_main_action(actions, shadow)
         return actions
 
     def _s02_legacy_actions(self, state):
@@ -481,6 +491,74 @@ class HybridStrategy(Strategy):
         actions = [a for a in actions if a.get("action") != "WINDOW_CARD"]
         return [card_action] + actions
 
+    def _opponent_gate_committed(self, state):
+        opp = state.opp
+        if not opp or not opp.get("routeEdgeId") or not opp.get("nextNodeId"):
+            return False
+        cur, nxt = opp.get("currentNodeId"), opp.get("nextNodeId")
+        edge = state.graph.edges.get(opp.get("routeEdgeId"))
+        if not cur or not edge:
+            return False
+        cur_eta, cur_path = self.warden._travel_dynamic(
+            state, cur, state.gate_node,
+            P.RUSH_SPEED, RUSH_SPEED_FRAMES,
+            include_intermediate_process=False,
+            conservative_weather=False)
+        next_eta, next_path = self.warden._travel_dynamic(
+            state, nxt, state.gate_node,
+            P.RUSH_SPEED, RUSH_SPEED_FRAMES,
+            include_intermediate_process=False,
+            conservative_weather=False)
+        edge_eta = state.graph.edge_frames(edge, P.SPEED_RUSH)
+        return bool(cur_path and next_path) \
+            and edge_eta + next_eta <= cur_eta + self.MOBILE_ROUTE_TOLERANCE
+
+    def _should_preserve_s02_gate_lead(self, state):
+        """换乘完成领先时抢最终墙；只在对手仍被留在 S02 时触发。"""
+        me, opp = state.me, state.opp
+        if not me or not opp or me.get("routeEdgeId") \
+                or me.get("currentNodeId") != "S02":
+            return False
+        if not self.warden._node_processed(state, "S02"):
+            return False
+        if opp.get("routeEdgeId") or opp.get("currentNodeId") != "S02":
+            return False
+        if opp.get("verified") or opp.get("delivered") or opp.get("retired"):
+            return False
+        if (me.get("goodFruit", 0) or 0) < self.GATE_GOOD_FRUIT_FLOOR:
+            return False
+        if not self._gate_has_reaction_window(state):
+            return False
+        my_eta = self._gate_eta(state, me, optimistic=False)
+        remain = state.duration_round - state.round
+        return my_eta < 999 and self._my_finish_need(state, my_eta) \
+            + self.warden.EXIT_PAD <= remain
+
+    def _gate_shadow_race_action(self, state):
+        """对手已冲向终局时跟住 S14 竞速，禁止陷阱层在旁路口罚站。"""
+        me, opp = state.me, state.opp
+        if not me or not opp or me.get("routeEdgeId") \
+                or me.get("state") in P.BUSY_STATES:
+            return None
+        if me.get("verified") or me.get("delivered") or me.get("retired"):
+            return None
+        if not self._gate_has_reaction_window(state) \
+                or not self._opponent_gate_committed(state):
+            return None
+        my_eta = self._gate_eta(state, me, optimistic=False)
+        opp_eta = self._gate_eta(state, opp, optimistic=True)
+        if opp_eta > self.GATE_THREAT_ETA \
+                or my_eta > opp_eta + self.GATE_SHADOW_TRAIL_MAX:
+            return None
+        remain = state.duration_round - state.round
+        if self._my_finish_need(state, my_eta) + self.warden.EXIT_PAD > remain:
+            return None
+        cur = me.get("currentNodeId")
+        if not cur or cur == state.gate_node:
+            return None
+        action = self.warden._advance(state, cur, state.gate_node)
+        return action if action.get("action") != "WAIT" else None
+
     def _should_commit_gate(self, state):
         me, opp = state.me, state.opp
         if not me or not opp or me.get("verified"):
@@ -500,7 +578,9 @@ class HybridStrategy(Strategy):
         opp_eta = self._gate_eta(state, opp, optimistic=True)
         if my_eta >= 999 or my_eta > self.GATE_MAX_ETA:
             return False
-        if my_eta + self.GATE_LEAD_MARGIN > opp_eta:
+        lead_margin = self.warden.MOBILE_GUARD_PAD \
+            if self._opponent_gate_committed(state) else self.GATE_LEAD_MARGIN
+        if my_eta + lead_margin > opp_eta:
             return False
         strategic_ready = ((me.get("taskScore", 0) or 0)
                            >= self.GATE_TASK_FLOOR

@@ -110,6 +110,18 @@ def test_state_and_strategy():
                 and gs_raw.node("S14").get("nodeType") == "GATE",
                 str(gs_raw.node("S14")))
 
+    null_type_start = json.loads(json.dumps(start))
+    for n in (null_type_start.get("nodes")
+              or null_type_start.get("map", {}).get("nodes") or []):
+        if n.get("nodeId") == "S14":
+            n["nodeType"] = None
+            n["type"] = "GATE"
+    gs_null_type = GameState(1001)
+    gs_null_type.on_start(null_type_start)
+    ok &= check("start: nodeType为null时仍回退type语义",
+                gs_null_type.node("S14").get("nodeType") == "GATE",
+                str(gs_null_type.node("S14")))
+
     # 寻路：S01 -> S14 存在路径且帧数合理
     frames, path = gs.graph.shortest_path("S01", "S14")
     ok &= check("寻路 S01->S14", 0 < frames < 600, f"{frames} 帧, path={'>'.join(path)}")
@@ -2333,22 +2345,22 @@ def test_latent_mechanics():
                 a and a["action"] == "CLAIM_RESOURCE"
                 and a["resourceType"] == "INTEL", str(a))
 
-    # ---- 远程清障 1: 路上非 T04 障碍派小分队清，不用主车队绕路/自己 CLEAR ----
+    # ---- 远程清障 1: 只清即将到达的非 T04 障碍，不预投远端未稳定分支 ----
     # 处理站帧数已计入寻路惩罚（V3.1），S01->S14 的惩罚后最短路实际走
     # S01-S06-S08-S10-S11-S12-S13-S14（绕开 S02/S04/S05/S09 的固定处理），
     # 障碍要挂在这条真实路径上才会被撞见，S08 正好在路上
     gs = base_state(cur="S01")
     gs.nodes["S08"]["hasObstacle"] = True
     a = PlannerStrategy().squad_action(gs, Plan("deliver", slack=200))
-    ok &= check("远程清障: 路上非T04障碍派小分队",
-                a == {"action": "SQUAD_CLEAR", "targetNodeId": "S08"}, str(a))
+    ok &= check("远程清障: 100帧外障碍不提前预清",
+                a is None or a.get("action") != "SQUAD_CLEAR", str(a))
 
     gs = base_state(cur="S06")
     gs.nodes["S08"]["hasObstacle"] = True
     st_clear = PlannerStrategy()
     a_main = st_clear.main_action(gs, Plan("deliver", slack=200))
     a_squad = st_clear.squad_action(gs, Plan("deliver", slack=200))
-    ok &= check("远程清障: 小分队可清时主车队不烧好果 CLEAR",
+    ok &= check("远程清障: 100帧内可清时主车队不烧好果 CLEAR",
                 a_main == {"action": "WAIT"}
                 and a_squad == {"action": "SQUAD_CLEAR", "targetNodeId": "S08"},
                 f"main={a_main} squad={a_squad}")
@@ -2359,6 +2371,17 @@ def test_latent_mechanics():
     t04_plan = Plan("task", task={"taskTemplateId": "T04"}, position="S01", slack=200)
     a = PlannerStrategy().squad_action(gs, t04_plan)
     ok &= check("远程清障: 自己的T04目标绝不代劳清障",
+                a is None or a.get("action") != "SQUAD_CLEAR", str(a))
+
+    gs = base_state(cur="S06")
+    gs.nodes["S08"]["hasObstacle"] = True
+    gs.tasks = [{"taskId": "T_CLEAR_KEEP", "taskTemplateId": "T04",
+                 "nodeId": "S08", "processRound": 4, "score": 30,
+                 "expireRound": 500, "active": True, "completed": False,
+                 "failed": False, "ownerPlayerId": 0,
+                 "protectionPlayerId": 0}]
+    a = PlannerStrategy().squad_action(gs, Plan("deliver", slack=200))
+    ok &= check("远程清障: 其他计划也不能清掉可领取T04",
                 a is None or a.get("action") != "SQUAD_CLEAR", str(a))
 
     gs = base_state(cur="S01")
@@ -4706,7 +4729,7 @@ def test_warden_strategy():
     st._processed_here = True
     st._s02_won_window = True
     gs = gs_at("S02", opp_cur="S02", round_no=220, weather=rain_now)
-    expected = st._next_hop(gs, "S02", "S10", gs.my_speed())
+    expected = st._timed_next_hop(gs, "S02", "S10")
     a = st.main_action(gs)
     ok &= check("warden: 暴雨下抢S10按天气最快路出站",
                 a and a["action"] == "MOVE"
@@ -5302,18 +5325,29 @@ def test_hybrid_strategy():
     with open(os.path.join(DOC_DIR, "inquire消息.json"), encoding="utf-8") as f:
         inquire = json.load(f)["msg_data"]
 
-    def make_state(bypass=False, short_gate=False, terminal_bypass=False,
+    def make_state(bypass=False, bypass_distance=24, race_variant=False,
+                   short_gate=False, terminal_bypass=False,
                    direct_gate=False,
                    cur="S01", opp_cur="S01", round_no=1,
                    phase=P.PHASE_NORMAL, task_score=0, verified=False,
                    opp_next=None, opp_edge=None, opp_edge_ms=18000,
+                   opp_edge_progress=0,
                    good_fruit=70, opp_squads=8):
         s = json.loads(json.dumps(start))
         if bypass:
             s["edges"].append({
                 "edgeId": "E_BYPASS_S10", "fromNodeId": "S09",
                 "toNodeId": "S11", "routeType": P.BRANCH,
-                "distance": 24, "bidirectional": True})
+                "distance": bypass_distance, "bidirectional": True})
+        if race_variant:
+            s["edges"].extend([
+                {"edgeId": "E23", "fromNodeId": "S11",
+                 "toNodeId": "S14", "routeType": P.BRANCH,
+                 "distance": 15, "bidirectional": True},
+                {"edgeId": "E24", "fromNodeId": "S10",
+                 "toNodeId": "S13", "routeType": P.BRANCH,
+                 "distance": 27, "bidirectional": True},
+            ])
         if short_gate:
             for edge in s["edges"]:
                 if {edge.get("fromNodeId"), edge.get("toNodeId")} \
@@ -5349,7 +5383,8 @@ def test_hybrid_strategy():
                 p.update(state=P.ST_MOVING if opp_edge else P.ST_IDLE,
                          currentNodeId=opp_cur, nextNodeId=opp_next,
                          routeEdgeId=opp_edge, edgeTotalMs=opp_edge_ms,
-                         edgeProgressMs=0, currentProcess=None, buffs=[],
+                         edgeProgressMs=opp_edge_progress,
+                         currentProcess=None, buffs=[],
                          goodFruit=70, badFruit=1, taskScore=120,
                          squadAvailable=opp_squads, verified=False,
                          delivered=False, retired=False)
@@ -5499,6 +5534,52 @@ def test_hybrid_strategy():
                 and not hybrid.warden._clear_sent,
                 f"spent={hybrid.warden._squad_spent} "
                 f"sent={hybrid.warden._clear_sent} acts={acts}")
+
+    # 本次长旁路变种：我方 r54 先完成 S02、对手仍困在 S02。S10 已可绕，
+    # 但 S14 仍是不可绕最终墙；这份先手必须直接转换为 S14 控制权。
+    gs = make_state(bypass=True, bypass_distance=85, race_variant=True,
+                    cur="S02",
+                    opp_cur="S02", round_no=54)
+    gs.opp["state"] = P.ST_PROCESSING
+    gs.opp["currentProcess"] = {
+        "action": "PROCESS", "type": "PROCESS",
+        "targetNodeId": "S02", "remainRound": 3}
+    gs.events = [{"type": "PROCESS_COMPLETE",
+                  "payload": {"playerId": 1001,
+                              "targetNodeId": "S02"}}]
+    hybrid = HybridStrategy()
+    hybrid.mode = HybridStrategy.MODE_MOBILE
+    acts = hybrid.decide(gs)
+    ok &= check("hybrid: 长旁路S02先手直接转换为S14墙权",
+                hybrid.mode == HybridStrategy.MODE_GATE
+                and hybrid.warden._forced_camp == "S14"
+                and any(a.get("action") == "MOVE" for a in acts),
+                f"mode={hybrid.mode} acts={acts}")
+
+    # replay r319：对手已经 S09->S10，我方在 S09。E25 长旁路虽能绕开
+    # S10，却比 S10-S13-S14 慢；必须跟住最终墙竞速，不能等 43 帧。
+    gs = make_state(bypass=True, bypass_distance=85, race_variant=True,
+                    cur="S09",
+                    opp_cur="S09", opp_next="S10", opp_edge="E05",
+                    opp_edge_ms=55200, opp_edge_progress=4000,
+                    round_no=319, task_score=90)
+    hybrid = HybridStrategy()
+    hybrid.mode = HybridStrategy.MODE_MOBILE
+    acts = hybrid.decide(gs)
+    ok &= check("hybrid: 长旁路S09影子竞速立即走S10",
+                any(a.get("action") == "MOVE"
+                    and a.get("targetNodeId") == "S10" for a in acts),
+                str(acts))
+
+    gs = make_state(bypass=True, bypass_distance=85, race_variant=True,
+                    cur="S09", opp_cur="S09", opp_next="S07",
+                    opp_edge="E04", opp_edge_ms=63480,
+                    round_no=319, task_score=90)
+    hybrid = HybridStrategy()
+    hybrid.mode = HybridStrategy.MODE_MOBILE
+    ok &= check("hybrid: 对手回头不误触发S14影子竞速",
+                not hybrid._opponent_gate_committed(gs)
+                and hybrid._gate_shadow_race_action(gs) is None)
 
     # S10 可绕时不奔固定 S10 墙。对手已经承诺 S05->S09，我方从 S10
     # 可以赶在它前面到 S11；S11 又是后续不可绕汇合点，应主动去占位。

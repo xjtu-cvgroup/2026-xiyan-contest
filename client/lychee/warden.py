@@ -142,13 +142,25 @@ class WardenStrategy(BaselineStrategy):
             src, dst, speed or state.my_speed(), None,
             self._weather_edge_cost(state))
 
+    def _timed_path(self, state, src, dst):
+        """按真实到达时间选路，固定处理站也属于路线成本。"""
+        boost_type, boost_rem, _ = self._active_speed_buff(state)
+        return self._travel_dynamic(
+            state, src, dst, boost_type, boost_rem,
+            include_intermediate_process=True,
+            conservative_weather=True)
+
+    def _timed_next_hop(self, state, src, dst):
+        _, path = self._timed_path(state, src, dst)
+        return path[1] if len(path) > 1 else None
+
     def _build_plans(self, state):
         self.camp_node = self._pick_camp(state)
         me_pos = state.me.get("nextNodeId") \
             if state.me.get("routeEdgeId") else state.me.get("currentNodeId")
         path = []
         if me_pos:
-            _, path = self._shortest(state, me_pos, self.camp_node)
+            _, path = self._timed_path(state, me_pos, self.camp_node)
         self._clear_plan = [n for n in (path or []) if state.has_obstacle(n)]
         if self.camp_node not in self._clear_plan \
                 and state.has_obstacle(self.camp_node):
@@ -517,7 +529,7 @@ class WardenStrategy(BaselineStrategy):
     def _advance(self, state, cur, target):
         """朝 target 走一步。竞速/封锁期强通免冻，转农期不为刷分强通。"""
         me = state.me
-        nxt = self._next_hop(state, cur, target, state.my_speed())
+        nxt = self._timed_next_hop(state, cur, target)
         if nxt is None:
             return P.a_wait()
         g = state.enemy_guard(nxt)
