@@ -564,7 +564,23 @@ class HybridStrategy(Strategy):
         """对手仍在入边时守住免费卡；拆掉后仍在边上则立即复卡。"""
         node_id = self._mobile_hold_node
         if not node_id:
-            return None
+            # 不把复卡链只绑在上一帧的 Python 内存标记上。首次卡可能由
+            # 其它合法入口提交，或完成事件与动作状态跨帧交错；现场已有
+            # 我方免费卡且对手仍在入边，就是更可靠的恢复证据。
+            me = state.me
+            cur = me.get("currentNodeId") if me else None
+            guard = state.node(cur).get("guard") if cur else None
+            initial_defense = (guard or {}).get(
+                "initialDefense", (guard or {}).get("defense", 0)) or 0
+            if not me or me.get("routeEdgeId") or not cur \
+                    or me.get("state") in P.BUSY_STATES \
+                    or initial_defense != 2 \
+                    or not self.warden._my_active_guard(state, cur) \
+                    or not self._mobile_reguard_safe(state, cur):
+                return None
+            self._mobile_hold_node = node_id = cur
+            if self.log:
+                self.log.info("hybrid: recovered mobile guard hold @%s", cur)
         me = state.me
         if not me or me.get("routeEdgeId") \
                 or me.get("currentNodeId") != node_id \

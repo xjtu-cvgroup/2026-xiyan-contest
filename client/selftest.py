@@ -5792,9 +5792,12 @@ def test_hybrid_strategy():
                 and acts[0]["targetNodeId"] == "S09"
                 and acts[0]["extraGoodFruit"] == 0,
                 f"plan={plan} acts={acts}")
+    ok &= check("hybrid: 首次免费移动卡同步锁存复卡节点",
+                hybrid._mobile_hold_node == "S09",
+                f"hold={hybrid._mobile_hold_node} acts={acts}")
 
     # replay.report (2)：S09 免费卡完成后，对手仍明确在 S07->S09 边上。
-    # 我方交付和 S14 先手都有余量时应留到卡亡并复卡，而不是落卡即走。
+    # 模拟进程标记缺失：现场有效免费卡必须恢复留守，不能落卡即走。
     gs_hold = make_state(
         bypass=True, bypass_distance=85, race_variant=True,
         cur="S09", opp_cur="S07", opp_next="S09", opp_edge="E04",
@@ -5803,12 +5806,33 @@ def test_hybrid_strategy():
     gs_hold.nodes["S09"]["guard"] = {
         "ownerTeamId": gs_hold.my_team, "defense": 2,
         "maxDefense": 6, "active": True, "completeRound": 367}
-    hybrid._mobile_hold_node = "S09"
-    acts = hybrid.decide(gs_hold)
-    ok &= check("hybrid: S09免费卡生效且敌仍在入边时有界留守",
+    recovered_hybrid = HybridStrategy()
+    recovered_hybrid.mode = HybridStrategy.MODE_MOBILE
+    recovered_hybrid.warden._guard_sent["S09"] = 363
+    acts = recovered_hybrid.decide(gs_hold)
+    ok &= check("hybrid: 现场免费卡恢复状态并有界留守",
                 any(a["action"] == "WAIT" for a in acts)
                 and not any(a["action"] == "SET_GUARD" for a in acts),
-                f"budget={hybrid._gate_lead_budget(gs_hold)} acts={acts}")
+                f"hold={recovered_hybrid._mobile_hold_node} "
+                f"budget={recovered_hybrid._gate_lead_budget(gs_hold)} acts={acts}")
+
+    # 普通节点也可能由 Planner 花果堆成防6；它不是免费滚动卡，不能被
+    # 现场恢复扩大成长期驻守。
+    gs_paid = make_state(
+        bypass=True, bypass_distance=85, race_variant=True,
+        cur="S09", opp_cur="S07", opp_next="S09", opp_edge="E04",
+        opp_edge_ms=66240, opp_edge_progress=13000,
+        round_no=367, task_score=30)
+    gs_paid.nodes["S09"]["guard"] = {
+        "ownerTeamId": gs_paid.my_team, "defense": 6,
+        "initialDefense": 6, "maxDefense": 6, "active": True,
+        "completeRound": 367}
+    paid_hybrid = HybridStrategy()
+    paid_hybrid.mode = HybridStrategy.MODE_MOBILE
+    paid_hybrid.decide(gs_paid)
+    ok &= check("hybrid: 普通节点付费防6卡不误恢复为滚动墙",
+                paid_hybrid._mobile_hold_node is None,
+                f"hold={paid_hybrid._mobile_hold_node}")
 
     gs_contest = make_state(
         bypass=True, bypass_distance=85, race_variant=True,
@@ -5836,7 +5860,7 @@ def test_hybrid_strategy():
         cur="S09", opp_cur="S07", opp_next="S09", opp_edge="E04",
         opp_edge_ms=66240, opp_edge_progress=14000,
         round_no=375, task_score=30)
-    acts = hybrid.decide(gs_reguard)
+    acts = recovered_hybrid.decide(gs_reguard)
     ok &= check("hybrid: S09免费卡被拆后敌仍在入边则立即复卡",
                 any(a["action"] == "SET_GUARD"
                     and a["targetNodeId"] == "S09"
