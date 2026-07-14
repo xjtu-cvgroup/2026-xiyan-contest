@@ -92,6 +92,11 @@ class WardenStrategy(BaselineStrategy):
         P.FAST_HORSE, P.SHORT_HORSE, P.ICE_BOX,
         P.PASS_TOKEN, P.OFFICIAL_PERMIT, P.BOAT_RIGHT,
     )
+    # S02 不是必经点时，普通资源只允许很小溢价；快/短马还能打开后续
+    # 冰鉴与任务走廊，按资源边际允许约 8% 总局时长。03/04 的快马
+    # 溢价 44 帧仍保留，05 的纯冰鉴溢价 88 帧必须跳过。
+    S02_OPTIONAL_DETOUR_MAX = 12
+    S02_SPEED_DETOUR_MAX = 48
 
     def __init__(self, logger=None, forced_camp=None):
         super().__init__(logger)
@@ -516,6 +521,17 @@ class WardenStrategy(BaselineStrategy):
             if opening:
                 return opening
 
+        # 固定处理是服务端离站前置条件，优先级高于动态设卡、转农和
+        # 影子竞速。否则上层替换成 MOVE/SET_GUARD 会逐帧吃
+        # PROCESS_REQUIRED，03-split-corridors 曾在 S05 空转 352 帧。
+        if cur != "S02":
+            node = state.node(cur)
+            needs = (node.get("processType")
+                     and node.get("processType") != "VERIFY"
+                     and node.get("processRound", 0) > 0)
+            if needs and not self._node_processed(state, cur):
+                return P.a_process()
+
         # ---- 最高优先级：我方交付已死时，先判断对手是否也死 ----
         # EXIT_PAD 是离墙安全垫，不是放弃交付阈值；否则到 S14 临界帧会
         # 误判成转农 WAIT，白白错过验核/交付。
@@ -716,7 +732,7 @@ class WardenStrategy(BaselineStrategy):
     # ---- 变种图 S02 开局竞速证明 ----
 
     def s02_opening_active(self, state):
-        """开局仅以实际下发地图判断：到 S02 前锁定最快方案。"""
+        """按实际地图判断 S02 是否值得进入，再锁定最快到站方案。"""
         me = state.me
         if not me or state.start_node == "S02" or not state.node("S02"):
             self._s02_opening = False
@@ -727,8 +743,67 @@ class WardenStrategy(BaselineStrategy):
         if self._s02_opening is None:
             self._s02_opening = bool(
                 not me.get("routeEdgeId")
-                and me.get("currentNodeId") == state.start_node)
+                and me.get("currentNodeId") == state.start_node
+                and self._s02_opening_worthwhile(state))
         return bool(self._s02_opening)
+
+    def _s02_opening_worthwhile(self, state):
+        """S02 可绕时，用完整到门 ETA 决定是否为首窗资源绕行。
+
+        经 S02 的账包含到站、固定处理和资源领取。马按最乐观的“领取后
+        一帧激活”计；即便这条乐观路线仍慢很多，也就没有必要去赌窗口。
+        """
+        start, gate = state.start_node, state.gate_node
+        if not start or not gate:
+            return True
+        entry_penalty = self._route_entry_penalty(state)
+        direct, direct_path = self._travel_dynamic(
+            state, start, gate, include_intermediate_process=True,
+            conservative_weather=True, node_entry_penalty=entry_penalty)
+        to_s02, to_path = self._travel_dynamic(
+            state, start, "S02", include_intermediate_process=True,
+            conservative_weather=True, node_entry_penalty=entry_penalty)
+        if not to_path:
+            return False
+        if not direct_path:
+            return True
+
+        process = self._node_process_frames_at(
+            state, "S02", state.round + to_s02)
+        via, via_path = self._travel_dynamic(
+            state, "S02", gate, start_elapsed=to_s02 + process,
+            include_intermediate_process=True, conservative_weather=True,
+            node_entry_penalty=entry_penalty)
+        best_via = via if via_path else 999
+
+        stock = state.node("S02").get("resourceStock") or {}
+        for horse in (P.FAST_HORSE, P.SHORT_HORSE):
+            if stock.get(horse, 0) <= 0:
+                continue
+            claim = self._s02_resource_claim_frames(state, horse)
+            if claim is None:
+                continue
+            boosted, boosted_path = self._travel_dynamic(
+                state, "S02", gate, horse,
+                self._opening_horse_duration(horse),
+                start_elapsed=to_s02 + process + claim + 1,
+                include_intermediate_process=True,
+                conservative_weather=True,
+                node_entry_penalty=entry_penalty)
+            if boosted_path:
+                best_via = min(best_via, boosted)
+
+        speed_stock = any(stock.get(horse, 0) > 0
+                          for horse in (P.FAST_HORSE, P.SHORT_HORSE))
+        detour_limit = self.S02_SPEED_DETOUR_MAX if speed_stock \
+            else self.S02_OPTIONAL_DETOUR_MAX
+        worthwhile = best_via <= direct + detour_limit
+        if self.log:
+            self.log.info(
+                "warden: S02 opening worth=%s direct=%s via=%s delta=%s cap=%s",
+                worthwhile, direct, best_via, best_via - direct,
+                detour_limit)
+        return worthwhile
 
     @staticmethod
     def _opening_horse_duration(resource_type):

@@ -30,6 +30,7 @@ class HybridStrategy(Strategy):
     GATE_GOOD_FRUIT_FLOOR = 7  # 防4宫门卡 2 篓 + Warden 5 篓底仓
     MOBILE_APPROACH_MAX_DETOUR = 12
     MOBILE_ROUTE_TOLERANCE = 12
+    S02_REENTRY_TOLERANCE = 8
 
     def __init__(self, logger=None):
         self.log = logger
@@ -60,10 +61,17 @@ class HybridStrategy(Strategy):
                 self.log.info("hybrid: initial mode=%s primary=%s",
                               self.mode, self.primary_choke)
 
-        # 变种图不能让 Planner 在 S01 自由农资源：先统一执行根据
-        # 本局 JSON/天气/马持续时长证明的最早 S02 方案。
+        recovery = self._process_required_recovery(state)
+        if recovery:
+            return recovery
+
+        # S02 确实在竞争路线内时，开局由 Warden 锁定最快方案；若地图
+        # 证明 S02 是高代价支线，则直接交给融合层走更快走廊。
         if self.warden.s02_opening_active(state):
             return self.warden.decide(state)
+        optional_bypass = self._optional_s02_bypass_actions(state)
+        if optional_bypass:
+            return optional_bypass
 
         if self.mode == self.MODE_PRIMARY:
             # 公开图/必经主墙仍由 Warden 决策，但它也会在途中发出普通点
@@ -115,6 +123,12 @@ class HybridStrategy(Strategy):
             self._gate_pace_active = True
 
         actions = self._score_actions(state)
+        actions = self._avoid_processed_s02_reentry(state, actions)
+        # 固定处理是协议硬前置，不能再被动态截击、移动控路、S14
+        # 领先账本或影子追赶替换。03 变种的 S05 死循环就发生在这里。
+        main = self._main_action(actions)
+        if main and main.get("action") == "PROCESS":
+            return actions
         score_plan = self.planner.last_plan
         plan = self._mobile_control_plan(state)
         force_guard = bool(
@@ -150,9 +164,25 @@ class HybridStrategy(Strategy):
                 self._gate_pace_active = False
             elif state.me.get("currentNodeId") == state.gate_node \
                     and not state.me.get("routeEdgeId"):
+                paced = self._gate_pace_actions(
+                    state, actions, score_plan)
+                if state.phase != P.PHASE_RUSH \
+                        and not self.warden._opp_inbound(
+                            state, state.gate_node) \
+                        and self._gate_pace_keeps_score_plan(
+                            actions, paced, score_plan):
+                    return paced
                 self._activate_gate_control(state)
                 return self.warden.decide(state)
             elif self._should_commit_gate(state):
+                # 可选 S02 图从最快走廊建立了逐帧领先账本。即使对手已进
+                # 威胁圈，只要当前脚下收益完整塞得进先手，先兑现这一项；
+                # 一旦 Planner 无收益或动作被账本替换，立即粘性接管。
+                paced = self._gate_pace_actions(
+                    state, actions, score_plan)
+                if self._gate_pace_keeps_score_plan(
+                        actions, paced, score_plan):
+                    return paced
                 self._activate_gate_control(state)
                 return self.warden.decide(state)
             else:
@@ -167,6 +197,132 @@ class HybridStrategy(Strategy):
         if shadow:
             return self._replace_main_action(actions, shadow)
         return actions
+
+    def _gate_pace_keeps_score_plan(self, actions, paced, plan):
+        """完整得分往返未被账本改写，说明仍保有宫门设卡先手。"""
+        if not plan or plan.kind not in ("task", "resource", "bounty"):
+            return False
+        original = self._main_action(actions)
+        kept = self._main_action(paced)
+        return bool(original and kept == original
+                    and original.get("action") in (
+                        "MOVE", "CLAIM_TASK", "CLAIM_RESOURCE",
+                        "USE_RESOURCE", "BREAK_GUARD"))
+
+    def _process_required_recovery(self, state):
+        """上一帧若暴露处理前置遗漏，本帧无条件恢复到 PROCESS。"""
+        me = state.me
+        if not me or me.get("routeEdgeId") \
+                or me.get("state") in P.BUSY_STATES:
+            return None
+        if not any(code == P.E_PROCESS_REQUIRED
+                   for _, code in state.my_rejections()):
+            return None
+        actions = []
+        contests = state.my_open_contests()
+        if contests:
+            contest = contests[0]
+            actions.append(P.a_window_card(
+                contest["contestId"],
+                self.warden._defense_card(state, contest)))
+        actions.append(P.a_process())
+        if self.log:
+            self.log.warning(
+                "hybrid: recover PROCESS_REQUIRED @%s",
+                me.get("currentNodeId"))
+        return actions
+
+    def _optional_s02_bypass_actions(self, state):
+        """S02 已判定不值得时，禁止 Planner 又被站内资源拉回去。"""
+        me = state.me
+        if self.warden._s02_opening is not False or not me \
+                or me.get("routeEdgeId") \
+                or me.get("currentNodeId") != state.start_node:
+            return None
+        actions = self.warden.decide(state) \
+            if self.mode == self.MODE_PRIMARY else self.planner.decide(state)
+        main = self._main_action(actions)
+        if not main or main.get("action") != "MOVE" \
+                or main.get("targetNodeId") != "S02":
+            return actions
+
+        boost_type, boost_rem, _ = self.warden._active_speed_buff(state, me)
+        _, path = self.warden._travel_dynamic(
+            state, state.start_node, state.gate_node,
+            boost_type, boost_rem, include_intermediate_process=True,
+            conservative_weather=True,
+            node_entry_penalty=self.warden._route_entry_penalty(state))
+        if len(path) < 2 or path[1] == "S02":
+            return actions
+        advance = self.warden._advance(state, state.start_node, path[1])
+        # 跳过 S02 不是放弃控门，而是从更快走廊开始建立 S14 领先账本：
+        # 对手快就同步提速；对手停下来时才把真实余量兑换成任务/资源。
+        if self._gate_has_reaction_window(state):
+            self._gate_pace_active = True
+        if self.log:
+            self.log.info(
+                "hybrid: optional S02 bypass next=%s planner=%s",
+                path[1], main.get("targetNodeId"))
+        return self._replace_main_action(actions, advance)
+
+    def _fixed_process_pending(self, state):
+        """融合层两套策略任一已确认完成，才允许覆盖固定处理动作。"""
+        me = state.me
+        if not me or me.get("routeEdgeId"):
+            return False
+        cur = me.get("currentNodeId")
+        node = state.node(cur)
+        needs = bool(node.get("processType")
+                     and node.get("processType") != "VERIFY"
+                     and node.get("processRound", 0) > 0)
+        if not needs:
+            return False
+        planner_done = self.planner._last_stationary_node == cur \
+            and self.planner._processed_here
+        return not planner_done and not self.warden._node_processed(state, cur)
+
+    def _avoid_processed_s02_reentry(self, state, actions):
+        """已完成 S02 后，不为支线目标走回头路并重复换乘。"""
+        me = state.me
+        main = self._main_action(actions)
+        if not me or not main or main.get("action") != "MOVE" \
+                or main.get("targetNodeId") != "S02" \
+                or me.get("routeEdgeId") or me.get("verified") \
+                or me.get("currentNodeId") in (None, "S02") \
+                or "S02" not in self.warden._processed_nodes \
+                or self._s02_farm_only or self._s02_deny_only:
+            return actions
+        plan = self.planner.last_plan
+        if plan and plan.position == "S02":
+            return actions
+
+        cur, gate = me.get("currentNodeId"), state.gate_node
+        boost_type, boost_rem, _ = self.warden._active_speed_buff(state, me)
+        kwargs = self._gate_travel_kwargs(state)
+        direct, direct_path = self.warden._travel_dynamic(
+            state, cur, gate, boost_type, boost_rem,
+            include_intermediate_process=True,
+            conservative_weather=True, **kwargs)
+        avoid_kwargs = dict(kwargs)
+        blocked = set(avoid_kwargs.get("blocked_nodes") or ())
+        blocked.add("S02")
+        avoid_kwargs["blocked_nodes"] = blocked
+        forward, forward_path = self.warden._travel_dynamic(
+            state, cur, gate, boost_type, boost_rem,
+            include_intermediate_process=True,
+            conservative_weather=True, **avoid_kwargs)
+        if not direct_path or len(forward_path) < 2 \
+                or forward > direct + self.S02_REENTRY_TOLERANCE:
+            return actions
+
+        advance = self.warden._advance(state, cur, forward_path[1])
+        if advance.get("action") == "WAIT":
+            return actions
+        if self.log:
+            self.log.info(
+                "hybrid: suppress S02 reentry @%s direct=%s forward=%s next=%s",
+                cur, direct, forward, forward_path[1])
+        return self._replace_main_action(actions, advance)
 
     def _s02_legacy_actions(self, state):
         me = state.me
@@ -276,6 +432,8 @@ class HybridStrategy(Strategy):
             return [hold]
         actions = self.warden.decide(state)
         main = self._main_action(actions)
+        if main and main.get("action") == "PROCESS":
+            return actions
         if main and main.get("action") == "SET_GUARD":
             return actions
 
@@ -298,8 +456,10 @@ class HybridStrategy(Strategy):
                 or me.get("state") in P.BUSY_STATES:
             return actions
         cur = me.get("currentNodeId")
-        if not cur or cur == state.gate_node:
+        if not cur:
             return actions
+        if cur == state.gate_node:
+            return self._replace_main_action(actions, P.a_wait())
         advance = self.warden._advance(state, cur, state.gate_node)
         return self._replace_main_action(actions, advance)
 
@@ -533,6 +693,8 @@ class HybridStrategy(Strategy):
         if not me or me.get("verified") or me.get("delivered") \
                 or me.get("retired"):
             return None
+        if self._fixed_process_pending(state):
+            return None
         my_eta = self._gate_eta(state, me, optimistic=False)
         finish_need = self._my_finish_need(state, my_eta)
         slack = 999 if deny_only else state.duration_round - state.round \
@@ -591,6 +753,8 @@ class HybridStrategy(Strategy):
 
     def _mobile_reguard_action(self, state):
         """对手仍在入边时守住免费卡；拆掉后仍在边上则立即复卡。"""
+        if self._fixed_process_pending(state):
+            return None
         node_id = self._mobile_hold_node
         if not node_id:
             # 不把复卡链只绑在上一帧的 Python 内存标记上。首次卡可能由

@@ -472,14 +472,16 @@ def test_contention():
     ok &= check("抢先手: S02 重复平局抑制期不空发 PROCESS",
                 a["action"] == "WAIT", str(a))
 
-    # ---- 对手读条中：排队等待，不重复提交 ----
+    # ---- 对手读条中：仍提交 PROCESS；WAIT 会被真实服务端拒绝为
+    # PROCESS_REQUIRED，PROCESS 只会得到无害 OBJECT_BUSY ----
     gs = mirror_state(1001, 44)
     opp = gs.players[2002]
     opp.update(state="PROCESSING",
                currentProcess={"action": "PROCESS", "type": "PROCESS",
                                "targetNodeId": "S02", "remainRound": 3})
     a = PlannerStrategy().main_action(gs)
-    ok &= check("错峰: 对手读条中我方排队", a["action"] == "WAIT", str(a))
+    ok &= check("错峰: 对手读条中用PROCESS排队",
+                a["action"] == "PROCESS", str(a))
 
     # ---- best-response 出牌（V3.16）：镜像局面主打期望最优牌；严格劣势不混 ----
     random.seed(42)
@@ -2259,25 +2261,26 @@ def test_latent_mechanics():
                 a and a["action"] == "BREAK_GUARD" and a["targetNodeId"] == "S08",
                 str(a))
 
-    # ---- 情报 1: 排队等对手处理本站时，顺手用情报标自己这站(距离0) ----
+    # ---- 情报 1: 固定处理前置高于情报；USE_RESOURCE 同样会被服务端
+    # 判 PROCESS_REQUIRED，不能拿“排队空转”当可消费帧 ----
     gs = base_state(cur="S02", resources={"INTEL": 1})
     for p in gs.players.values():
         if p["playerId"] != 1001:
             p["currentProcess"] = {"targetNodeId": "S02", "action": "PROCESS"}
     plan = st.planner.plan(gs)
     a = PlannerStrategy().main_action(gs, plan)
-    ok &= check("情报: 排队空转帧顺手标记本站",
-                a and a["action"] == "USE_RESOURCE" and a["resourceType"] == "INTEL"
-                and a.get("targetNodeId") == "S02", str(a))
+    ok &= check("情报: 排队时不以情报覆盖固定处理",
+                a and a["action"] == "PROCESS", str(a))
 
-    # ---- 情报 2: 手里没有情报时，同样的局面老实 WAIT（不假装有资源） ----
+    # ---- 情报 2: 没有情报时同样持续提交 PROCESS 排队 ----
     gs = base_state(cur="S02", resources={})
     for p in gs.players.values():
         if p["playerId"] != 1001:
             p["currentProcess"] = {"targetNodeId": "S02", "action": "PROCESS"}
     plan = st.planner.plan(gs)
     a = PlannerStrategy().main_action(gs, plan)
-    ok &= check("情报: 没情报就老实 WAIT", a == {"action": "WAIT"}, str(a))
+    ok &= check("情报: 没情报也用PROCESS排队",
+                a == {"action": "PROCESS"}, str(a))
 
     # ---- 文书 1: 不再默认顺路领取文书（2 帧读条收益不稳定，小分差局反噬） ----
     gs = base_state(cur="S03", resources={})
@@ -5519,6 +5522,7 @@ def test_hybrid_strategy():
         inquire = json.load(f)["msg_data"]
 
     def make_state(bypass=False, bypass_distance=24, race_variant=False,
+                   split_corridors=False, optional_s02=False,
                    short_gate=False, terminal_bypass=False,
                    direct_gate=False,
                    cur="S01", opp_cur="S01", round_no=1,
@@ -5541,6 +5545,21 @@ def test_hybrid_strategy():
                  "toNodeId": "S13", "routeType": P.BRANCH,
                  "distance": 27, "bidirectional": True},
             ])
+        if split_corridors or optional_s02:
+            s["edges"].extend([
+                {"edgeId": "E25", "fromNodeId": "S09",
+                 "toNodeId": "S12", "routeType": P.BRANCH,
+                 "distance": 48, "bidirectional": True},
+                {"edgeId": "E26", "fromNodeId": "S08",
+                 "toNodeId": "S11", "routeType": P.BRANCH,
+                 "distance": 44, "bidirectional": True},
+            ])
+        if optional_s02:
+            for edge in s["edges"]:
+                if edge.get("edgeId") == "E15":
+                    edge["distance"] = 20
+                elif edge.get("edgeId") == "E16":
+                    edge["distance"] = 28
         if short_gate:
             for edge in s["edges"]:
                 if {edge.get("fromNodeId"), edge.get("toNodeId")} \
@@ -5617,6 +5636,39 @@ def test_hybrid_strategy():
                 hybrid.mode == HybridStrategy.MODE_MOBILE
                 and any(a["action"] == "MOVE"
                         and a["targetNodeId"] == "S02" for a in acts),
+                str(acts))
+
+    # 03/04/05 隐藏图：S02 分别比直接走廊慢约 44/44/88 帧。快马站
+    # 允许支付 48 帧以打开后续资源/任务链；只有冰鉴的 88 帧往返不值。
+    from arena import Arena, PID_A
+    from scenario_maps import (predicted_optional_s02_start,
+                               predicted_split_corridors_start)
+    arena = Arena(
+        39820, cls_a=HybridStrategy, cls_b=PlannerStrategy,
+        start_data=predicted_split_corridors_start(),
+        obstacle_nodes=(), weather_plan=[])
+    slot = arena._collect()[PID_A]
+    hybrid = arena.strategies[PID_A]
+    acts = [a for a in (slot["main"], slot["squad"])
+            if a is not None]
+    ok &= check("hybrid: split-corridors快马走廊保留S02战略入口",
+                hybrid.warden._s02_opening
+                and any(a["action"] == "MOVE"
+                        and a["targetNodeId"] == "S02" for a in acts),
+                str(acts))
+
+    arena = Arena(
+        39821, cls_a=HybridStrategy, cls_b=PlannerStrategy,
+        start_data=predicted_optional_s02_start(),
+        obstacle_nodes=(), weather_plan=[])
+    slot = arena._collect()[PID_A]
+    hybrid = arena.strategies[PID_A]
+    acts = [a for a in (slot["main"], slot["squad"])
+            if a is not None]
+    ok &= check("hybrid: optional-S02不为冰鉴往返84帧",
+                not hybrid.warden._s02_opening
+                and any(a["action"] == "MOVE"
+                        and a["targetNodeId"] == "S06" for a in acts),
                 str(acts))
 
     gs = make_state(bypass=True)
@@ -5762,6 +5814,53 @@ def test_hybrid_strategy():
     ok &= check("hybrid: S09-S11旁路使S10失去堵点资格",
                 hybrid._mandatory_primary_choke(gs) is None,
                 str(hybrid._mandatory_primary_choke(gs)))
+
+    # 03 回放确认级故障：Planner 在 S05 正确返回 PROCESS，却被影子竞速
+    # 替换成 MOVE，随后 352 帧 PROCESS_REQUIRED。融合层必须原样保留。
+    gs = make_state(
+        split_corridors=True, cur="S05", opp_cur="S09",
+        opp_next="S12", opp_edge="E25", opp_edge_ms=48000,
+        opp_edge_progress=18000, round_no=243)
+    gs.nodes["S05"]["processType"] = "登船"
+    gs.nodes["S05"]["processRound"] = 10
+    hybrid = HybridStrategy()
+    hybrid.mode = HybridStrategy.MODE_MOBILE
+    hybrid.warden._processed_nodes.add("S02")
+    acts = hybrid.decide(gs)
+    ok &= check("hybrid: 固定处理不可被影子追门覆盖",
+                any(a["action"] == "PROCESS" for a in acts)
+                and not any(a["action"] in ("MOVE", "SET_GUARD")
+                            for a in acts), str(acts))
+
+    # 已经完成的换乘站不是普通回头点。若前进路线到 S14 不更慢，支线
+    # 目标不得把主车再次拉回 S02 并重新读条。
+    gs = make_state(split_corridors=True, cur="S03", round_no=97)
+    hybrid = HybridStrategy()
+    hybrid.mode = HybridStrategy.MODE_MOBILE
+    hybrid.warden._processed_nodes.add("S02")
+    hybrid.planner.last_plan = Plan(
+        "task", position="S04", task={"taskId": "T_WATER"})
+    acts = hybrid._avoid_processed_s02_reentry(
+        gs, [P.a_move("S02")])
+    ok &= check("hybrid: 已处理S02不再发生走廊反切",
+                any(a["action"] == "MOVE"
+                    and a["targetNodeId"] != "S02" for a in acts),
+                str(acts))
+
+    # 即使未来又有新覆盖入口漏过第一层，上一帧服务端的明确拒绝也必须
+    # 在下一帧无条件拉回 PROCESS，不能继续拒绝风暴。
+    gs = make_state(split_corridors=True, cur="S05", round_no=244)
+    gs.nodes["S05"]["processType"] = "登船"
+    gs.nodes["S05"]["processRound"] = 10
+    gs.events = [{"type": "ACTION_REJECTED", "payload": {
+        "playerId": 1001, "errorCode": P.E_PROCESS_REQUIRED,
+        "action": {"action": "MOVE", "targetNodeId": "S09"}}}]
+    hybrid = HybridStrategy()
+    hybrid.mode = HybridStrategy.MODE_MOBILE
+    acts = hybrid.decide(gs)
+    ok &= check("hybrid: PROCESS_REQUIRED下一帧强制恢复",
+                len([a for a in acts if a["action"] in P.MAIN_ACTION_TYPES]) == 1
+                and any(a["action"] == "PROCESS" for a in acts), str(acts))
 
     gs_h, gs_p = make_state(bypass=True), make_state(bypass=True)
     hybrid = HybridStrategy()
@@ -6259,6 +6358,8 @@ def test_hybrid_strategy():
     hybrid = HybridStrategy()
     hybrid.mode = HybridStrategy.MODE_SCORE
     hybrid.planner._processed_here = True
+    hybrid.planner._last_stationary_node = "S13"
+    hybrid.warden._processed_nodes.add("S13")
     ok &= check("hybrid: 任务基本盘且明确领先时接管S14",
                 hybrid._should_commit_gate(gs),
                 f"my={hybrid._gate_eta(gs, gs.me)} "

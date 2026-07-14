@@ -849,7 +849,10 @@ class PlannerStrategy(BaselineStrategy):
                          and node.get("processRound", 0) > 0)
         if needs_process and not self._processed_here:
             if self._opp_processing_here(state, cur):
-                return self._idle_upgrade(state, plan)  # 排队等对手处理完，顺手用情报
+                # 未处理站提交 WAIT/用情报会被服务端判 PROCESS_REQUIRED。
+                # 继续提交 PROCESS 只会得到无害的 OBJECT_BUSY，锁释放后
+                # 当帧即可起读条，不给上层留下可覆盖的等待动作。
+                return P.a_process()
             if self._yield_process_after_draw(state, cur):
                 return self._idle_upgrade(state, plan)
             # 情报预热（V3.16）：读条 ≥4 帧的站先花 1 帧上情报（-3 净省 2）
