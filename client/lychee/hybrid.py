@@ -19,8 +19,8 @@ class HybridStrategy(Strategy):
     MODE_SCORE = MODE_MOBILE       # 兼容既有测试/外部观测字段
     MODE_GATE = "GATE_WARDEN"
 
-    # S14 设卡 T->T+4 完成、T+5 才拦。再留 3 帧 ETA 误差，只有明确先手
-    # 才放弃传统策略的后续任务机会。
+    # S14 设卡 T->T+4 完成、T+5 才拦。再留 3 帧 ETA 误差；后续任务
+    # 只能消费这条余量之外的领先预算。
     GATE_LEAD_MARGIN = 8
     GATE_TASK_FLOOR = 120
     GATE_COMMIT_ROUND = RUSH_EARLIEST - 40
@@ -39,6 +39,7 @@ class HybridStrategy(Strategy):
         self.primary_choke = None
         self.mobile_target = None
         self.mobile_plan = None
+        self._gate_pace_active = False
 
     def on_start(self, state):
         self.planner.on_start(state)
@@ -66,13 +67,13 @@ class HybridStrategy(Strategy):
         if s02_handled:
             return s02_actions
 
-        # S02 已拿到明确处理先手时，旁路图不再把这份先手交回得分器消耗。
-        # S14 若是不可绕且有设卡反应窗，立即把先手转换成最终墙权。
+        # S02 已拿到明确处理先手时，开始保护最终墙的领先预算。此处不再
+        # 直接粘性切到 S14：只要任务的完整机会成本吃不掉先手，就继续得分。
         if self._should_preserve_s02_gate_lead(state):
-            self._activate_gate_control(state)
-            return self.warden.decide(state)
+            self._gate_pace_active = True
 
         actions = self._score_actions(state)
+        score_plan = self.planner.last_plan
         plan = self._mobile_control_plan(state)
         force_guard = bool(
             plan and plan["denial"]
@@ -82,7 +83,39 @@ class HybridStrategy(Strategy):
         if intercept:
             return self._replace_main_action(actions, intercept)
         if plan:
-            return self._mobile_control_actions(state, actions, plan)
+            mobile_actions = self._mobile_control_actions(state, actions, plan)
+            if self._gate_pace_active and not plan.get("denial"):
+                main = self._main_action(mobile_actions)
+                typ = main.get("action") if main else None
+                # 真落卡会给对手增加延误，不作为纯支出拦截；普通抢位的
+                # 绕路和驻守则逐帧从最终墙领先里付款。
+                if typ != "SET_GUARD":
+                    if typ == "MOVE":
+                        pace_cost = plan.get("detour", 999)
+                    elif typ == "WAIT":
+                        pace_cost = 1
+                    else:
+                        pace_cost = None
+                    mobile_actions = self._gate_pace_actions(
+                        state, mobile_actions, score_plan,
+                        opportunity_cost=pace_cost)
+            return mobile_actions
+
+        # 没有更早的 2621 式动态墙时，按 S14 领先预算决定这帧还能不能
+        # 得分。威胁进入接管圈或我方已到宫门，才进入不可逆 Warden。
+        if self._gate_pace_active:
+            if self._gate_pace_expired(state):
+                self._gate_pace_active = False
+            elif state.me.get("currentNodeId") == state.gate_node \
+                    and not state.me.get("routeEdgeId"):
+                self._activate_gate_control(state)
+                return self.warden.decide(state)
+            elif self._should_commit_gate(state):
+                self._activate_gate_control(state)
+                return self.warden.decide(state)
+            else:
+                actions = self._gate_pace_actions(
+                    state, actions, score_plan)
 
         # 固定宫门接管是移动控路找不到更早可靠截击点后的收官方案。
         if self._should_commit_gate(state):
@@ -514,7 +547,7 @@ class HybridStrategy(Strategy):
             and edge_eta + next_eta <= cur_eta + self.MOBILE_ROUTE_TOLERANCE
 
     def _should_preserve_s02_gate_lead(self, state):
-        """换乘完成领先时抢最终墙；只在对手仍被留在 S02 时触发。"""
+        """换乘完成领先时启动最终墙节奏账本，不在这里直接锁死路线。"""
         me, opp = state.me, state.opp
         if not me or not opp or me.get("routeEdgeId") \
                 or me.get("currentNodeId") != "S02":
@@ -533,6 +566,126 @@ class HybridStrategy(Strategy):
         remain = state.duration_round - state.round
         return my_eta < 999 and self._my_finish_need(state, my_eta) \
             + self.warden.EXIT_PAD <= remain
+
+    def _gate_pace_expired(self, state):
+        me, opp = state.me, state.opp
+        return (not me or not opp or me.get("verified")
+                or me.get("delivered") or me.get("retired")
+                or opp.get("verified") or opp.get("delivered")
+                or opp.get("retired")
+                or not self._gate_has_reaction_window(state))
+
+    @staticmethod
+    def _visible_process_remain(player):
+        """只计公开且已经开始、无法拿回的处理帧。"""
+        if not player or player.get("routeEdgeId"):
+            return 0
+        process = player.get("currentProcess") or {}
+        for key in ("remainRound", "remainingRound", "remain"):
+            if process.get(key) is not None:
+                try:
+                    return max(0, int(process[key]))
+                except (TypeError, ValueError):
+                    return 0
+        return 0
+
+    def _gate_lead_budget(self, state):
+        """仍能保证先完成设卡的可消费帧数；负数表示必须立即追门。"""
+        my_eta = self._gate_eta(state, state.me, optimistic=False)
+        opp_eta = self._gate_eta(state, state.opp, optimistic=True)
+        # 对手 ETA 仍按疾行、晴天、零中转处理的极限下界；唯一加回的是
+        # 当前公开读条剩余帧，因为这部分时间已经发生且不能撤销。
+        opp_eta += self._visible_process_remain(state.opp)
+        margin = self.warden.MOBILE_GUARD_PAD \
+            if self._opponent_gate_committed(state) else self.GATE_LEAD_MARGIN
+        return opp_eta - my_eta - margin
+
+    def _gate_plan_opportunity_cost(self, state, plan):
+        """候选相对直接去 S14 多花的完整帧数（路程、读条、天气、马）。"""
+        if not plan:
+            return 999
+        if plan.kind == "deliver":
+            return 0
+        if plan.kind == "hold" or not plan.position:
+            return 999
+
+        me = state.me
+        cur, target, gate = (me.get("currentNodeId"), plan.position,
+                             state.gate_node)
+        if not cur or me.get("routeEdgeId"):
+            return 999
+        direct = self._gate_eta(state, me, optimistic=False)
+        boost_type, boost_rem, _ = self.warden._active_speed_buff(state, me)
+        to_target, path, after_type, after_rem = self.warden._travel_dynamic(
+            state, cur, target, boost_type, boost_rem,
+            include_intermediate_process=True,
+            conservative_weather=True, return_boost=True)
+        if not path:
+            return 999
+
+        if plan.kind == "task" and plan.task:
+            process = (plan.task.get("processRound", 4) or 4) + 1
+        elif plan.kind == "resource":
+            process = 2
+        elif plan.kind == "bounty":
+            process = 1
+        else:
+            return 999
+        after_type, after_rem = self.warden._consume_boost(
+            after_type, after_rem, process)
+        via, path = self.warden._travel_dynamic(
+            state, target, gate, after_type, after_rem,
+            start_elapsed=to_target + process,
+            include_intermediate_process=True,
+            conservative_weather=True)
+        return max(0, via - direct) if path and direct < 999 else 999
+
+    def _gate_pace_actions(self, state, actions, plan, opportunity_cost=None):
+        """任务吃得下领先就做；吃不下时只替换主动作，保留合法辅动作。"""
+        me = state.me
+        if me.get("routeEdgeId") or me.get("state") in P.BUSY_STATES:
+            return actions
+        main = self._main_action(actions)
+        if main and main.get("action") == "PROCESS":
+            return actions                 # 固定处理未完成时本来也无法离站
+        if main and main.get("action") in ("RUSH_SPEED",):
+            return actions
+        if main and main.get("action") == "USE_RESOURCE" \
+                and main.get("resourceType") in (
+                    P.FAST_HORSE, P.SHORT_HORSE, P.RUSH_SPEED):
+            return actions
+
+        budget = self._gate_lead_budget(state)
+        cost = self._gate_plan_opportunity_cost(state, plan) \
+            if opportunity_cost is None else opportunity_cost
+        if main:
+            typ = main.get("action")
+            if typ == "WAIT":
+                cost = max(cost, 1)
+            elif typ == "CLAIM_RESOURCE":
+                cost = max(cost, 2)
+            elif typ == "CLAIM_TASK":
+                task = next((t for t in state.claimable_tasks()
+                             if t.get("taskId") == main.get("taskId")), None)
+                if task:
+                    cost = max(cost,
+                               (task.get("processRound", 4) or 4) + 1)
+            elif typ == "USE_RESOURCE":
+                cost = max(cost, 1)
+        if cost <= budget:
+            return actions
+
+        cur = me.get("currentNodeId")
+        if not cur or cur == state.gate_node:
+            return actions
+        advance = self.warden._advance(state, cur, state.gate_node)
+        if advance.get("action") == "WAIT":
+            return actions
+        if self.log:
+            self.log.info(
+                "hybrid: preserve gate lead budget=%s task_cost=%s @%s",
+                budget, cost, cur)
+        return self._replace_main_action(actions, advance)
 
     def _gate_shadow_race_action(self, state):
         """对手已冲向终局时跟住 S14 竞速，禁止陷阱层在旁路口罚站。"""

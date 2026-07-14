@@ -146,6 +146,8 @@ def run_case(spec, seed=0):
                 or strategy.warden._forced_camp != "S14":
             failures.append(
                 f"gate mode={strategy.mode} camp={strategy.warden._forced_camp}")
+        if "roadfarmer" in name and ours["taskBase"] <= 0:
+            failures.append("adaptive gate pace earned no task score")
         waits = _post_s02_waits(result["timeline"], us)
         if waits:
             failures.append(f"wait after S02 process={waits}")

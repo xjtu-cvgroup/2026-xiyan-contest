@@ -366,6 +366,7 @@ class PlannerStrategy(BaselineStrategy):
         self._opp_profile = "unknown"    # 对手画像（V3.20）：unknown/camper，粘性
         self._prof_idle_choke = 0        # 对手在 KEY_PASS 闲置驻扎的累计帧数
         self._opp_ordinary_guard_seen = False
+        self.last_plan = None            # 融合层只读：避免为节奏预算重复规划
 
     # ---------- 每帧入口 ----------
 
@@ -379,6 +380,7 @@ class PlannerStrategy(BaselineStrategy):
 
         actions = []
         plan = self.planner.plan(state)
+        self.last_plan = plan
         if self.log and state.round % 20 == 0:
             self.log.debug("plan: %r", plan)
 

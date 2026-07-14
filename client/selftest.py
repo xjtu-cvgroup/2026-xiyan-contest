@@ -5536,7 +5536,7 @@ def test_hybrid_strategy():
                 f"sent={hybrid.warden._clear_sent} acts={acts}")
 
     # 本次长旁路变种：我方 r54 先完成 S02、对手仍困在 S02。S10 已可绕，
-    # 但 S14 仍是不可绕最终墙；这份先手必须直接转换为 S14 控制权。
+    # 但 S14 仍是不可绕最终墙；从此启用领先预算，而不是立刻锁死零分路线。
     gs = make_state(bypass=True, bypass_distance=85, race_variant=True,
                     cur="S02",
                     opp_cur="S02", round_no=54)
@@ -5550,11 +5550,47 @@ def test_hybrid_strategy():
     hybrid = HybridStrategy()
     hybrid.mode = HybridStrategy.MODE_MOBILE
     acts = hybrid.decide(gs)
-    ok &= check("hybrid: 长旁路S02先手直接转换为S14墙权",
-                hybrid.mode == HybridStrategy.MODE_GATE
-                and hybrid.warden._forced_camp == "S14"
+    ok &= check("hybrid: 长旁路S02先手启动S14领先预算",
+                hybrid.mode == HybridStrategy.MODE_MOBILE
+                and hybrid._gate_pace_active
+                and hybrid.warden._forced_camp is None
                 and any(a.get("action") == "MOVE" for a in acts),
                 f"mode={hybrid.mode} acts={acts}")
+
+    # 同一个脚下短任务：对手与我方同位时会吃掉设卡先手，必须赶路；
+    # 对手已经进入公开长读条后，任务能完整塞入领先预算，应该照做。
+    task = {"taskId": "T_GATE_PACE", "nodeId": "S09",
+            "processRound": 4, "baseScore": 30}
+    plan = Plan("task", task=task, position="S09")
+    gs = make_state(bypass=True, bypass_distance=85, race_variant=True,
+                    cur="S09", opp_cur="S09", round_no=260)
+    hybrid = HybridStrategy()
+    hybrid.mode = HybridStrategy.MODE_MOBILE
+    hybrid._gate_pace_active = True
+    acts = hybrid._gate_pace_actions(
+        gs, [P.a_claim_task(task["taskId"])], plan)
+    ok &= check("hybrid: 任务会吃掉S14先手时立即提速",
+                any(a.get("action") == "MOVE" for a in acts)
+                and not any(a.get("action") == "CLAIM_TASK" for a in acts),
+                f"budget={hybrid._gate_lead_budget(gs)} acts={acts}")
+
+    gs.opp["state"] = P.ST_PROCESSING
+    gs.opp["currentProcess"] = {
+        "action": "CLAIM_TASK", "type": "TASK",
+        "targetNodeId": "S09", "remainRound": 30}
+    acts = hybrid._gate_pace_actions(
+        gs, [P.a_claim_task(task["taskId"])], plan)
+    ok &= check("hybrid: 脚下任务能塞入S14先手时继续得分",
+                acts and acts[0].get("action") == "CLAIM_TASK",
+                f"budget={hybrid._gate_lead_budget(gs)} "
+                f"cost={hybrid._gate_plan_opportunity_cost(gs, plan)}")
+
+    gs.opp["currentProcess"]["remainRound"] = 18  # 此夹具恰好 budget=0
+    acts = hybrid._gate_pace_actions(
+        gs, [P.a_wait()], Plan("deliver"))
+    ok &= check("hybrid: 零领先预算不被顺手WAIT磨掉一帧",
+                any(a.get("action") == "MOVE" for a in acts),
+                f"budget={hybrid._gate_lead_budget(gs)} acts={acts}")
 
     # replay r319：对手已经 S09->S10，我方在 S09。E25 长旁路虽能绕开
     # S10，却比 S10-S13-S14 慢；必须跟住最终墙竞速，不能等 43 帧。
