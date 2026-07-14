@@ -693,6 +693,21 @@ class WardenStrategy(BaselineStrategy):
         if not origin or not gate:
             return 0
 
+        stay_delay = self._mobile_stay_delay(
+            state, node_id, extra, edge_remain)
+        direct_after, direct_path = self._shortest(
+            state, node_id, gate, P.SPEED_RUSH)
+        alt, alt_path = self._shortest_avoiding(
+            state, origin, gate, node_id, P.SPEED_RUSH)
+        if not direct_path:
+            return 0
+        direct = edge_remain + direct_after
+        reroute_delay = max(0, alt - direct) if alt_path else 999
+        return min(stay_delay, reroute_delay)
+
+    def _mobile_stay_delay(self, state, node_id, extra, edge_remain):
+        """卡在对手到站时剩余的阻塞时间，含其公开小分队拆卡上界。"""
+        opp = state.opp
         node_type = state.node(node_id).get("nodeType")
         defense = min(4 if node_type == "GATE" else 7,
                       2 + 2 * max(0, extra))
@@ -707,16 +722,7 @@ class WardenStrategy(BaselineStrategy):
                 and squads >= dispatches * 2:
             clear_time = 8 + max(0, dispatches - 1) * self.WEAKEN_RESEND_GAP
             stay_delay = min(stay_delay, clear_time)
-
-        direct_after, direct_path = self._shortest(
-            state, node_id, gate, P.SPEED_RUSH)
-        alt, alt_path = self._shortest_avoiding(
-            state, origin, gate, node_id, P.SPEED_RUSH)
-        if not direct_path:
-            return 0
-        direct = edge_remain + direct_after
-        reroute_delay = max(0, alt - direct) if alt_path else 999
-        return min(stay_delay, reroute_delay)
+        return stay_delay
 
     def mobile_intercept_action(self, state, delivery_slack=None):
         """对手踏向我方所在节点时，按确定性收益落一张滚动截击卡。

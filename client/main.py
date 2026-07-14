@@ -8,7 +8,7 @@
                                [--strategy planner|warden|hybrid]
 
 策略选择：本分支默认 hybrid（见 DEFAULT_STRATEGY）。公开老图经拓扑证明
-后完整沿用守望者；隐藏旁路图自动回退 Planner，并保留 S14 控制机会。
+后完整沿用守望者；隐藏旁路图进入 2621 移动守望者，边做任务边抢动态墙。
 """
 import argparse
 import os

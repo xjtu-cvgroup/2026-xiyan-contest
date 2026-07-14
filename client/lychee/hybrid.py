@@ -1,9 +1,9 @@
-"""隐藏地图混合策略：传统得分底盘 + 必经关隘/S14 守望者。
+"""隐藏地图混合策略：固定主墙 + 2621 移动守望者。
 
-战略只做互斥切换，不把三套估值揉在同一帧里：
+战略按地图拓扑切换控制方式：
 - 当前地图存在真正必经的 KEY_PASS：完整沿用 Warden；
-- KEY_PASS 可绕：Planner 最大化得分；
-- Planner 局后段能严格证明抢到宫门先手：粘性切入 S14 Warden。
+- KEY_PASS 可绕：移动守望者主动抢汇合点，Planner 负责可塞入余量的任务；
+- 移动局后段能严格证明抢到宫门先手：粘性切入 S14 Warden。
 """
 import math
 
@@ -15,7 +15,8 @@ from .warden import DELIVER_FRAMES, RUSH_SPEED_FRAMES, WardenStrategy
 
 class HybridStrategy(Strategy):
     MODE_PRIMARY = "PRIMARY_WARDEN"
-    MODE_SCORE = "SCORE_RACE"
+    MODE_MOBILE = "MOBILE_WARDEN"
+    MODE_SCORE = MODE_MOBILE       # 兼容既有测试/外部观测字段
     MODE_GATE = "GATE_WARDEN"
 
     # S14 设卡 T->T+4 完成、T+5 才拦。再留 3 帧 ETA 误差，只有明确先手
@@ -26,6 +27,7 @@ class HybridStrategy(Strategy):
     GATE_MAX_ETA = 150
     GATE_THREAT_ETA = 120
     GATE_GOOD_FRUIT_FLOOR = 7  # 防4宫门卡 2 篓 + Warden 5 篓底仓
+    MOBILE_APPROACH_MAX_DETOUR = 12
 
     def __init__(self, logger=None):
         self.log = logger
@@ -33,6 +35,7 @@ class HybridStrategy(Strategy):
         self.warden = WardenStrategy(logger)
         self.mode = None
         self.primary_choke = None
+        self.mobile_target = None
 
     def on_start(self, state):
         self.planner.on_start(state)
@@ -45,20 +48,21 @@ class HybridStrategy(Strategy):
                 self.warden.force_camp(self.primary_choke)
                 self.mode = self.MODE_PRIMARY
             else:
-                self.mode = self.MODE_SCORE
+                self.mode = self.MODE_MOBILE
             if self.log:
                 self.log.info("hybrid: initial mode=%s primary=%s",
                               self.mode, self.primary_choke)
 
-        if self.mode == self.MODE_SCORE and self._should_commit_gate(state):
+        if self.mode == self.MODE_MOBILE and self._should_commit_gate(state):
             self._activate_gate_control(state)
 
         if self.mode in (self.MODE_PRIMARY, self.MODE_GATE):
             return self.warden.decide(state)
+        actions = self._score_actions(state)
         intercept = self._score_mobile_intercept(state)
         if intercept:
-            return [intercept]
-        return self._score_actions(state)
+            return self._replace_main_action(actions, intercept)
+        return self._mobile_control_actions(state, actions)
 
     # ================= 地图资格审查 =================
 
@@ -154,7 +158,7 @@ class HybridStrategy(Strategy):
             + gate_term + DELIVER_FRAMES
 
     def _score_mobile_intercept(self, state):
-        """旁路图保留 Planner，只叠加 2621 式已承诺路线截击。"""
+        """已经占住对手下一站时，立即兑现 2621 式反应卡。"""
         me = state.me
         if not me or me.get("verified") or me.get("delivered") \
                 or me.get("retired"):
@@ -164,6 +168,149 @@ class HybridStrategy(Strategy):
         slack = state.duration_round - state.round \
             - finish_need - self.warden.EXIT_PAD
         return self.warden.mobile_intercept_action(state, slack)
+
+    @staticmethod
+    def _replace_main_action(actions, replacement):
+        auxiliary = [a for a in actions
+                     if a.get("action") not in P.MAIN_ACTION_TYPES]
+        return [replacement] + auxiliary
+
+    def _mobile_control_plan(self, state):
+        """选择我方能先到、对手绕开也会付税的最近汇合点。"""
+        me, opp = state.me, state.opp
+        if not me or not opp or state.my_open_contests():
+            return None
+        if me.get("state") in P.BUSY_STATES or me.get("routeEdgeId") \
+                or me.get("verified") or me.get("delivered") \
+                or me.get("retired"):
+            return None
+        if not opp.get("routeEdgeId") or not opp.get("nextNodeId") \
+                or opp.get("delivered") or opp.get("retired"):
+            return None
+
+        cur = me.get("currentNodeId")
+        origin = opp.get("currentNodeId")
+        anchor = opp.get("nextNodeId")
+        gate = state.gate_node
+        if not cur or not origin or not gate or cur in ("S01", "S02"):
+            return None
+
+        edge_remain = self._edge_remaining_frames(opp, optimistic=True)
+        opp_gate, opp_path = self.warden._shortest(
+            state, anchor, gate, P.SPEED_RUSH)
+        my_gate, my_path = self.warden._shortest(
+            state, cur, gate, state.my_speed())
+        if not opp_path or not my_path:
+            return None
+
+        remain = state.duration_round - state.round
+        candidates = []
+        for node_id in opp_path[:-1]:
+            node_type = state.node(node_id).get("nodeType")
+            if node_type in ("GATE", "TERMINAL", "START"):
+                continue
+            guard = state.node(node_id).get("guard")
+            if guard and guard.get("active", guard.get("defense", 0) > 0):
+                continue
+
+            my_eta, my_route = self.warden._shortest(
+                state, cur, node_id, state.my_speed())
+            opp_leg, opp_route = self.warden._shortest(
+                state, anchor, node_id, P.SPEED_RUSH)
+            if not my_route or not opp_route:
+                continue
+            opp_eta = edge_remain + opp_leg
+            if my_eta + self.warden.MOBILE_GUARD_PAD > opp_eta:
+                continue
+
+            extra = self.warden._mobile_guard_extra(state, node_id)
+            cost = self.warden._guard_base_cost(state, node_id) + extra
+            if (me.get("goodFruit", 0) or 0) - cost \
+                    < self.warden.FRUIT_RESERVE:
+                continue
+
+            if node_id == anchor:
+                alt, alt_path = self.warden._shortest_avoiding(
+                    state, origin, gate, node_id, P.SPEED_RUSH)
+                direct = edge_remain + opp_gate
+            else:
+                alt, alt_path = self.warden._shortest_avoiding(
+                    state, anchor, gate, node_id, P.SPEED_RUSH)
+                direct = opp_gate
+            reroute_delay = max(0, alt - direct) if alt_path else 999
+            stay_delay = self.warden._mobile_stay_delay(
+                state, node_id, extra, opp_eta - my_eta)
+            delay = min(stay_delay, reroute_delay)
+            if delay < self.warden.MOBILE_GUARD_MIN_DELAY:
+                continue
+
+            to_gate, after_path = self.warden._shortest(
+                state, node_id, gate, state.my_speed())
+            if not after_path:
+                continue
+            detour = max(0, my_eta + to_gate - my_gate)
+            if detour > self.MOBILE_APPROACH_MAX_DETOUR:
+                continue
+            finish_need = self._my_finish_need(state, my_eta + to_gate)
+            if finish_need + self.warden.EXIT_PAD > remain:
+                continue
+            candidates.append((opp_eta, detour, -delay, node_id,
+                               my_eta, delay))
+
+        if not candidates:
+            return None
+        opp_eta, detour, neg_delay, node_id, my_eta, delay = min(candidates)
+        return {"target": node_id, "myEta": my_eta, "oppEta": opp_eta,
+                "delay": delay, "detour": detour}
+
+    @staticmethod
+    def _main_action(actions):
+        return next((a for a in actions
+                     if a.get("action") in P.MAIN_ACTION_TYPES), None)
+
+    def _action_fits_mobile_lead(self, state, action, plan):
+        if not action:
+            return False
+        typ = action.get("action")
+        if typ == "PROCESS":
+            return True                    # 固定处理不完成，本来也无法离站
+        cost = None
+        if typ == "CLAIM_TASK":
+            task = next((t for t in state.claimable_tasks()
+                         if t.get("taskId") == action.get("taskId")), None)
+            if task and task.get("nodeId") == state.me.get("currentNodeId"):
+                cost = (task.get("processRound", 4) or 4) + 1
+        elif typ == "CLAIM_RESOURCE" \
+                and action.get("targetNodeId") == state.me.get("currentNodeId"):
+            cost = 2
+        elif typ == "USE_RESOURCE":
+            cost = 1
+        return cost is not None and plan["myEta"] + cost \
+            + self.warden.MOBILE_GUARD_PAD <= plan["oppEta"]
+
+    def _mobile_control_actions(self, state, actions):
+        """主动奔赴截击点；脚下收益能塞进先手窗口时继续交给 Planner。"""
+        plan = self._mobile_control_plan(state)
+        if not plan:
+            self.mobile_target = None
+            return actions
+        self.mobile_target = plan["target"]
+        main = self._main_action(actions)
+        if self._action_fits_mobile_lead(state, main, plan):
+            return actions
+
+        cur = state.me.get("currentNodeId")
+        if cur == plan["target"]:
+            return self._replace_main_action(actions, P.a_wait())
+        nxt = self.warden._next_hop(
+            state, cur, plan["target"], state.my_speed())
+        if not nxt or state.has_obstacle(nxt) or state.enemy_guard(nxt):
+            return actions
+        if self.log:
+            self.log.info(
+                "hybrid: mobile intercept target=%s eta=%s/%s delay=%s",
+                plan["target"], plan["myEta"], plan["oppEta"], plan["delay"])
+        return self._replace_main_action(actions, P.a_move(nxt))
 
     def _score_actions(self, state):
         """Planner 管得分，但 S02 继续执行 3.96.34 的不认输出牌。"""

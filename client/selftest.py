@@ -5297,7 +5297,7 @@ def test_warden_strategy():
 
 
 def test_hybrid_strategy():
-    """3.97：老图守望者不变，S10 旁路切 Planner，严格先手才接 S14。"""
+    """隐藏图：固定墙可用就守，否则运行 2621 移动守望者。"""
     ok = True
     with open(os.path.join(DOC_DIR, "start消息.json"), encoding="utf-8") as f:
         start = json.load(f)["msg_data"]
@@ -5307,7 +5307,7 @@ def test_hybrid_strategy():
     def make_state(bypass=False, short_gate=False, terminal_bypass=False,
                    cur="S01", opp_cur="S01", round_no=1,
                    phase=P.PHASE_NORMAL, task_score=0, verified=False,
-                   opp_next=None, opp_edge=None):
+                   opp_next=None, opp_edge=None, opp_edge_ms=18000):
         s = json.loads(json.dumps(start))
         if bypass:
             s["edges"].append({
@@ -5343,7 +5343,7 @@ def test_hybrid_strategy():
             else:
                 p.update(state=P.ST_MOVING if opp_edge else P.ST_IDLE,
                          currentNodeId=opp_cur, nextNodeId=opp_next,
-                         routeEdgeId=opp_edge, edgeTotalMs=18000,
+                         routeEdgeId=opp_edge, edgeTotalMs=opp_edge_ms,
                          edgeProgressMs=0, currentProcess=None, buffs=[],
                          goodFruit=70, badFruit=1, taskScore=120,
                          squadAvailable=8, verified=False,
@@ -5385,17 +5385,66 @@ def test_hybrid_strategy():
     hybrid.on_start(gs_h)
     planner = PlannerStrategy()
     acts_h, acts_p = hybrid.decide(gs_h), planner.decide(gs_p)
-    ok &= check("hybrid: 旁路图首帧完整回退传统策略",
-                hybrid.mode == HybridStrategy.MODE_SCORE
+    ok &= check("hybrid: 旁路图无路线情报时沿用Planner得分动作",
+                hybrid.mode == HybridStrategy.MODE_MOBILE
                 and acts_h == acts_p,
                 f"hybrid={acts_h} planner={acts_p}")
+
+    # S10 可绕时不奔固定 S10 墙。对手已经承诺 S05->S09，我方从 S10
+    # 可以赶在它前面到 S11；S11 又是后续不可绕汇合点，应主动去占位。
+    gs = make_state(bypass=True, cur="S10", opp_cur="S05",
+                    opp_next="S09", opp_edge="E19", opp_edge_ms=45000,
+                    round_no=100)
+    hybrid = HybridStrategy()
+    hybrid.mode = HybridStrategy.MODE_MOBILE
+    plan = hybrid._mobile_control_plan(gs)
+    acts = hybrid.decide(gs)
+    ok &= check("hybrid: 主墙可绕时主动奔赴下一动态汇合点",
+                bool(plan and plan["target"] == "S11"
+                and any(a["action"] == "MOVE"
+                        and a["targetNodeId"] == "S11" for a in acts)),
+                f"plan={plan} acts={acts}")
+
+    # 任务长度按真实先手窗口构造：短任务仍能完成设卡，长任务会错失。
+    lead_budget = max(1, plan["oppEta"] - plan["myEta"]
+                      - hybrid.warden.MOBILE_GUARD_PAD - 1)
+    t_short = {"taskId": "T_MOBILE_SHORT", "taskTemplateId": "T01",
+               "nodeId": "S10", "processRound": lead_budget, "score": 30,
+               "expireRound": 500, "active": True, "completed": False,
+               "failed": False, "ownerPlayerId": 0,
+               "protectionPlayerId": 0}
+    gs = make_state(bypass=True, cur="S10", opp_cur="S05",
+                    opp_next="S09", opp_edge="E19", opp_edge_ms=45000,
+                    round_no=100)
+    gs.tasks = [t_short]
+    hybrid = HybridStrategy()
+    hybrid.mode = HybridStrategy.MODE_MOBILE
+    acts = hybrid.decide(gs)
+    ok &= check("hybrid: 动态堵人先手余量内仍做脚下短任务",
+                any(a["action"] == "CLAIM_TASK"
+                    and a["taskId"] == "T_MOBILE_SHORT" for a in acts),
+                str(acts))
+
+    t_long = dict(t_short, taskId="T_MOBILE_LONG",
+                  processRound=lead_budget + 3,
+                  score=90)
+    gs = make_state(bypass=True, cur="S10", opp_cur="S05",
+                    opp_next="S09", opp_edge="E19", opp_edge_ms=45000,
+                    round_no=100)
+    gs.tasks = [t_long]
+    hybrid = HybridStrategy()
+    hybrid.mode = HybridStrategy.MODE_MOBILE
+    acts = hybrid.decide(gs)
+    ok &= check("hybrid: 长任务会丢截击窗口时优先抢动态墙",
+                any(a["action"] == "MOVE"
+                    and a["targetNodeId"] == "S11" for a in acts), str(acts))
 
     gs = make_state(bypass=True, cur="S09", opp_cur="S07",
                     opp_next="S09", opp_edge="E04", round_no=100)
     hybrid = HybridStrategy()
     hybrid.mode = HybridStrategy.MODE_SCORE
     acts = hybrid.decide(gs)
-    ok &= check("hybrid: 旁路图传统底盘叠加2621路线截击",
+    ok &= check("hybrid: 旁路图移动守望者兑现2621路线截击",
                 acts and acts[0]["action"] == "SET_GUARD"
                 and acts[0]["targetNodeId"] == "S09"
                 and acts[0]["extraGoodFruit"] == 0, str(acts))
