@@ -90,9 +90,23 @@ class HybridStrategy(Strategy):
                 or self.warden._node_processed(state, "S02"):
             return False, []
 
+        # 完成事件必须先吸收再交回融合层。不能先跑完整 Warden 再丢弃
+        # 动作：squad_action 会同步扣减内部小分队账本，造成“线上没派、
+        # 策略却以为已经派过”的幽灵消耗。
+        completed = False
+        for event in state.my_events("PROCESS_COMPLETE", "PROCESS_COMPLETED"):
+            payload = event.get("payload") or {}
+            target = payload.get("targetNodeId") or payload.get("nodeId")
+            if target in (None, "S02"):
+                completed = True
+                break
+        if completed:
+            self.warden._absorb_feedback(state)
+            return False, []
+
         actions = self.warden.decide(state)
-        # PROCESS_COMPLETE 在 decide() 开头吸收。完成后丢弃 Warden 面向固定
-        # S10 的首跳，由本帧后续移动控路/得分层按真实隐藏图重新选路。
+        # 兼容服务端未来新增的完成事件别名；正常完成事件已在上面提前
+        # 截获，因此这里不应产生被丢弃的小分队副作用。
         if self.warden._node_processed(state, "S02"):
             return False, []
         return True, actions

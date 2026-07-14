@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
-"""Hybrid 动态卡点快速结构化鲁棒性检查（不跑对局电池）。
+"""Hybrid 快速结构化检查（不跑完整对局电池）。
 
-随机扰动地图旁路、边长、天气、边进度与双方资源，验证计划数学不变量。
-该脚本只读策略输出，不参与线上行为。
+两组边界彼此独立：
+1. 随机扰动地图旁路、边长、天气、边进度与资源，验证动态卡点公式；
+2. 专门覆盖 r40-r69 的 S02 状态，逐动作对照 3.96.34 Warden。
+
+这仍不是胜率模拟，输出只证明列出的结构化契约，不代表“随机对局全通过”。
 """
 import argparse
 import copy
@@ -16,6 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from lychee import protocol as P                 # noqa: E402
 from lychee.hybrid import HybridStrategy         # noqa: E402
 from lychee.state import GameState               # noqa: E402
+from lychee.warden import WardenStrategy          # noqa: E402
 
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -124,6 +128,109 @@ def _build_state(rng, index):
     return state
 
 
+def _s02_fixture(rng, index):
+    """生成早期 S02 动作快照；刻意覆盖旧脚本完全跳过的 r40-r69。"""
+    start = _variant_start(rng, 1000000 + index)
+    # 明确制造 S10 旁路，保证测试走 Hybrid 的 MOBILE 集成路径。
+    start["edges"].append({
+        "edgeId": f"E_S02_BYPASS_{index}",
+        "fromNodeId": "S09", "toNodeId": "S11",
+        "routeType": P.BRANCH, "distance": 24, "bidirectional": True,
+    })
+    inquire = copy.deepcopy(BASE_INQUIRE)
+    round_no = rng.randint(40, 69)
+    my_state = rng.choice((P.ST_IDLE, P.ST_CONTESTING,
+                           P.ST_RESTING, P.ST_PROCESSING))
+    inquire.update({
+        "round": round_no, "phase": P.PHASE_NORMAL,
+        "edges": start["edges"], "tasks": [], "events": [],
+        "actionResults": [], "weather": {"active": [], "forecast": []},
+    })
+    inquire["contests"] = []
+    if my_state == P.ST_CONTESTING:
+        inquire["contests"] = [{
+            "contestId": f"C_S02_FUZZ_{index}",
+            "contestType": P.CONTEST_DOCK, "targetNodeId": "S02",
+            "redPlayerId": 1001, "bluePlayerId": 2002,
+            "redPoint": rng.randint(0, 1), "bluePoint": rng.randint(0, 1),
+            "resolved": False,
+        }]
+
+    opp_mode = rng.choice(("idle", "inbound", "processing", "departed"))
+    for player in inquire["players"]:
+        if player["playerId"] == 1001:
+            process = None
+            if my_state == P.ST_PROCESSING:
+                process = {"action": "PROCESS", "type": "PROCESS",
+                           "targetNodeId": "S02", "remainRound": 2}
+            player.update(
+                state=my_state, currentNodeId="S02", nextNodeId=None,
+                routeEdgeId=None, currentProcess=process, buffs=[],
+                resources={}, freshness=rng.uniform(78.0, 100.0),
+                goodFruit=rng.randint(0, 100), badFruit=rng.randint(0, 2),
+                taskScore=0, squadAvailable=rng.choice((0, 2, 4, 6, 8)),
+                guardActionPoint=rng.randint(0, 4), rushTacticUsedCount=0,
+                verified=False, delivered=False, retired=False)
+            continue
+
+        player.update(
+            state=P.ST_IDLE, currentNodeId="S02", nextNodeId=None,
+            routeEdgeId=None, currentProcess=None, buffs=[], resources={},
+            freshness=95.0, goodFruit=90, badFruit=0, taskScore=0,
+            squadAvailable=8, verified=False, delivered=False, retired=False)
+        if opp_mode == "inbound":
+            player.update(
+                state=P.ST_MOVING, currentNodeId="S01", nextNodeId="S02",
+                routeEdgeId="E01", edgeTotalMs=42780,
+                edgeProgressMs=rng.randint(0, 42000))
+        elif opp_mode == "processing":
+            player.update(
+                state=P.ST_PROCESSING,
+                currentProcess={"action": "PROCESS", "type": "PROCESS",
+                                "targetNodeId": "S02", "remainRound": 2})
+        elif opp_mode == "departed":
+            player.update(currentNodeId=rng.choice(("S03", "S04")))
+
+    for node in inquire["nodes"]:
+        node["guard"] = None
+        if node["nodeId"] == "S02":
+            node.update(processType="TRANSFER", processRound=4,
+                        hasObstacle=False)
+    return start, inquire
+
+
+def _state_from(start, inquire):
+    state = GameState(1001)
+    state.on_start(copy.deepcopy(start))
+    state.on_inquire(copy.deepcopy(inquire))
+    return state
+
+
+def _check_s02_differential(cases, seed):
+    """MOBILE 集成层在 S02 未完成时必须与 Warden 逐动作相等。"""
+    rng = random.Random(seed ^ 0x39634)
+    for index in range(cases):
+        start, inquire = _s02_fixture(rng, index)
+        state_h = _state_from(start, inquire)
+        state_w = _state_from(start, inquire)
+        hybrid = HybridStrategy()
+        hybrid.on_start(state_h)
+        hybrid.mode = HybridStrategy.MODE_MOBILE
+        reference = WardenStrategy()
+        reference.on_start(state_w)
+        actions_h = hybrid.decide(state_h)
+        actions_w = reference.decide(state_w)
+        assert actions_h == actions_w, (
+            index, state_h.round, state_h.me.get("state"), actions_h, actions_w)
+        assert not any(a.get("action") == "SET_GUARD" for a in actions_h), (
+            index, actions_h)
+        assert not any(
+            a.get("action") == "SQUAD_SCOUT"
+            and a.get("targetNodeId") in ("S03", "S04")
+            for a in actions_h), (index, actions_h)
+    return cases
+
+
 def _check_plan(state, strategy, plan):
     remain = state.duration_round - state.round
     assert plan["target"] not in (
@@ -149,7 +256,9 @@ def _check_plan(state, strategy, plan):
 def run(cases, seed):
     rng = random.Random(seed)
     stats = {"cases": cases, "plans": 0, "denials": 0,
-             "bypassPlans": 0, "mandatoryPlans": 0}
+             "bypassPlans": 0, "mandatoryPlans": 0,
+             "s02Differential": _check_s02_differential(
+                 max(200, min(cases, 2000)), seed)}
     for index in range(cases):
         state = _build_state(rng, index)
         strategy = HybridStrategy()
@@ -182,7 +291,7 @@ def main():
     parser.add_argument("--seed", type=int, default=20260714)
     args = parser.parse_args()
     stats = run(args.cases, args.seed)
-    print("Hybrid robustness PASS " + " ".join(
+    print("Hybrid structural contracts PASS " + " ".join(
         f"{key}={value}" for key, value in stats.items()))
 
 

@@ -5432,6 +5432,51 @@ def test_hybrid_strategy():
                 and not any(a["action"] == "SET_GUARD" for a in acts_h),
                 f"hybrid={acts_h} warden={acts_w}")
 
+    # replay(1) r44 的真实回归形态：S02 窗口尚未结束时，即使计划表里
+    # 已有两个互斥分支，也不能预探 S03/S04。旧随机拓扑测试从 r70 起步
+    # 且只校验主动作数量，完全抓不到这种辅动作泄漏。
+    gs = make_state(bypass=True, cur="S02", opp_cur="S02", round_no=44)
+    gs.me["state"] = P.ST_CONTESTING
+    gs.contests = [{"contestId": "C_S02_TRACE",
+                    "contestType": P.CONTEST_DOCK,
+                    "targetNodeId": "S02", "redPlayerId": 1001,
+                    "bluePlayerId": 2002, "redPoint": 0,
+                    "bluePoint": 0, "resolved": False}]
+    gs_w = make_state(bypass=True, cur="S02", opp_cur="S02", round_no=44)
+    gs_w.me["state"] = P.ST_CONTESTING
+    gs_w.contests = json.loads(json.dumps(gs.contests))
+    hybrid.warden._scout_plan = ["S03", "S04"]
+    hybrid.warden._scout_sent = {}
+    reference._scout_plan = ["S03", "S04"]
+    reference._scout_sent = {}
+    acts = hybrid.decide(gs)
+    acts_w = reference.decide(gs_w)
+    ok &= check("hybrid: replay1-r44窗口中不预探互斥分支",
+                acts == acts_w
+                and any(a["action"] == "WINDOW_CARD"
+                    and a["card"] == P.CARD_XIAN_GONG for a in acts)
+                and not any(a["action"] == "SQUAD_SCOUT"
+                            and a.get("targetNodeId") in ("S03", "S04")
+                            for a in acts), str(acts))
+
+    # replay(1) r59-r61 的 OBJECT_BUSY 前态：对方占用换乘时具体提交
+    # PROCESS 还是 WAIT 由 3.96.34 决定，但融合层不得趁排队插入设卡或
+    # 分支探路。使用同一策略实例继续推进，覆盖内部历史而非孤立快照。
+    gs_h = make_state(bypass=True, cur="S02", opp_cur="S02", round_no=59)
+    gs_w = make_state(bypass=True, cur="S02", opp_cur="S02", round_no=59)
+    for state in (gs_h, gs_w):
+        state.opp["state"] = P.ST_PROCESSING
+        state.opp["currentProcess"] = {
+            "action": "PROCESS", "type": "PROCESS",
+            "targetNodeId": "S02", "remainRound": 2}
+    acts_h = hybrid.decide(gs_h)
+    acts_w = reference.decide(gs_w)
+    ok &= check("hybrid: replay1-r59排队态仍逐动作继承3.96.34",
+                acts_h == acts_w
+                and not any(a["action"] in ("SET_GUARD", "SQUAD_SCOUT")
+                            for a in acts_h),
+                f"hybrid={acts_h} warden={acts_w}")
+
     # 完成换乘的当帧即交回融合层，不让固定 S10 目标锁住隐藏图首跳。
     gs = make_state(bypass=True, cur="S02", opp_cur="S03", round_no=66)
     gs.events = [{"type": "PROCESS_COMPLETE",
@@ -5439,12 +5484,21 @@ def test_hybrid_strategy():
                               "targetNodeId": "S02"}}]
     hybrid = HybridStrategy()
     hybrid.mode = HybridStrategy.MODE_MOBILE
+    hybrid.warden._plans_ready = True
+    hybrid.warden.camp_node = "S10"
+    hybrid.warden._clear_plan = ["S10"]
+    gs.nodes["S10"]["hasObstacle"] = True
     acts = hybrid.decide(gs)
     ok &= check("hybrid: S02完成当帧交回隐藏图融合层",
                 hybrid.warden._node_processed(gs, "S02")
                 and any(a["action"] == "MOVE" for a in acts)
                 and not any(a["action"] == "SET_GUARD" for a in acts),
                 str(acts))
+    ok &= check("hybrid: S02完成帧不产生被丢弃的小分队账本",
+                hybrid.warden._squad_spent == 0
+                and not hybrid.warden._clear_sent,
+                f"spent={hybrid.warden._squad_spent} "
+                f"sent={hybrid.warden._clear_sent} acts={acts}")
 
     # S10 可绕时不奔固定 S10 墙。对手已经承诺 S05->S09，我方从 S10
     # 可以赶在它前面到 S11；S11 又是后续不可绕汇合点，应主动去占位。

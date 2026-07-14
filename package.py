@@ -7,9 +7,12 @@ Windows 打包的两个坑，这里都处理：
   2. Windows 原生压缩不保存 Unix 可执行位 —— 直接在 zip 条目里写入 0755。
 """
 import glob
+import hashlib
 import os
 import re
+import subprocess
 import sys
+import tempfile
 import zipfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))   # 仓库根目录
@@ -40,6 +43,9 @@ INCLUDE_DIRS = ["lychee", "lychee_basic_client"]
 
 EXEC_ATTR = 0o755 << 16      # zip external_attr 的 Unix 权限位
 NORM_ATTR = 0o644 << 16
+CRITICAL_FILES = (
+    "main.py", "lychee/hybrid.py", "lychee/warden.py", "lychee/version.py",
+)
 
 
 def add_file(zf, rel_path, is_script):
@@ -55,7 +61,25 @@ def add_file(zf, rel_path, is_script):
     print(f"  + {rel_path}{'  (LF, 755)' if is_script else ''}")
 
 
+def run_strategy_selftest():
+    """打包前强制跑快速闸门，避免测试源码与提交包脱节。"""
+    env = os.environ.copy()
+    env["PYTHONPYCACHEPREFIX"] = os.path.join(
+        tempfile.gettempdir(), "xiyan-package-pycache")
+    result = subprocess.run(
+        [sys.executable, os.path.join(CLIENT, "selftest.py")],
+        cwd=HERE, env=env, text=True, capture_output=True)
+    if result.returncode:
+        sys.stdout.write(result.stdout)
+        sys.stderr.write(result.stderr)
+        raise SystemExit("策略自检失败，拒绝打包")
+    if "ALL PASS" not in result.stdout:
+        raise SystemExit("策略自检未返回 ALL PASS，拒绝打包")
+    print("  + 策略快速自检 ALL PASS")
+
+
 def main():
+    run_strategy_selftest()
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
     # 清掉 dist 里所有旧候选包（含无版本号的老 gameclient.zip）：
     # dist 里永远只留一个提交候选，杜绝挑错文件上传
@@ -89,7 +113,15 @@ def main():
                 ver = line.split("=", 1)[1].strip().strip('"')
         # 包名版本必须与包内 version.py 一致（防手工改名/半新半旧）
         assert ver == VERSION, f"包名版本 {VERSION} != 包内版本 {ver}"
+        digest = hashlib.sha256()
+        for rel in CRITICAL_FILES:
+            with open(os.path.join(CLIENT, rel), "rb") as src:
+                expected = src.read()
+            actual = zf.read(rel)
+            assert actual == expected, f"包内 {rel} 与当前源码不一致"
+            digest.update(actual)
         print(f"\n自检通过: start.sh 位于根目录 / LF / 权限 {oct(mode)}")
+        print(f"关键策略文件与源码一致: sha256={digest.hexdigest()[:16]}")
         print(f"*** 构建版本: {ver} ***  (对局日志开头应出现同样版本号)")
         print(f"打包完成: {OUT}  ({len(names)} 个文件)")
     return 0
