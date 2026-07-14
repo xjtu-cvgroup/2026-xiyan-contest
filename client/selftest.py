@@ -4648,7 +4648,7 @@ def test_warden_strategy():
     st._processed_here = False
     a = st.main_action(gs_at("S02", opp_cur="S02", round_no=366,
                              freshness=79.8, good_fruit=29, guard_ap=4))
-    ok &= check("warden: S02终点已死时兵争可用也转农",
+    ok &= check("warden: S02双方终点已死时兵争可用也转农",
                 st._score_farm_mode and a and a["action"] == "PROCESS",
                 str(a))
 
@@ -4658,7 +4658,7 @@ def test_warden_strategy():
     st._processed_here = False
     a = st.main_action(gs_at("S02", opp_cur="S02", round_no=366,
                              freshness=79.8, good_fruit=29, guard_ap=0))
-    ok &= check("warden: S02献贡和兵争都不可用时转农处理",
+    ok &= check("warden: S02双方死且无牌时转农处理",
                 st._score_farm_mode and a and a["action"] == "PROCESS",
                 str(a))
 
@@ -4776,9 +4776,10 @@ def test_warden_strategy():
     st._processed_here = True
     a = st.main_action(gs_at("S02", opp_cur="S10", round_no=430,
                              phase=P.PHASE_RUSH, tasks=(t_late_s03,)))
-    ok &= check("warden: S02赢太晚到不了终点则转农不冲S10",
-                st._score_farm_mode and a and a["action"] == "MOVE"
-                and a["targetNodeId"] == "S03",
+    ok &= check("warden: S02赢太晚但对手仍能交付则拒止不转农",
+                st._deny_only_mode and not st._score_farm_mode
+                and a and a["action"] == "MOVE"
+                and a["targetNodeId"] != "S03",
                 str(a))
 
     t_back = {"taskId": "T_BACK", "taskTemplateId": "T01",
@@ -5229,6 +5230,17 @@ def test_warden_strategy():
                 a and a["action"] == "SET_GUARD" and a["targetNodeId"] == "S14",
                 str(a))
 
+    st = WardenStrategy(forced_camp="S14")
+    st.camp_node = "S14"
+    st._plans_ready = True
+    st._deny_only_mode = True
+    a = st.main_action(gs_at(
+        "S14", opp_cur="S13", opp_next="S14", opp_edge="E09",
+        round_no=520, phase=P.PHASE_RUSH, good_fruit=2))
+    ok &= check("warden: 拒止局动用最后2篓果守S14",
+                a and a["action"] == "SET_GUARD"
+                and a["targetNodeId"] == "S14", str(a))
+
     st = WardenStrategy()
     st.camp_node = "S14"
     st._plans_ready = True
@@ -5534,6 +5546,62 @@ def test_hybrid_strategy():
                 and not hybrid.warden._clear_sent,
                 f"spent={hybrid.warden._squad_spent} "
                 f"sent={hybrid.warden._clear_sent} acts={acts}")
+
+    # S02 放行后的结果不是二分法。我方交付已死、对手仍可交付时，任务
+    # 分不能救局，必须进入拒止态；只有对手的极限下界也超时才转纯农。
+    late_task = {"taskId": "T_S02_LATE", "taskTemplateId": "T01",
+                 "nodeId": "S03", "processRound": 4, "score": 90,
+                 "expireRound": 600, "active": True, "completed": False,
+                 "failed": False, "ownerPlayerId": 0,
+                 "protectionPlayerId": 0}
+    gs = make_state(bypass=True, cur="S02", opp_cur="S10",
+                    round_no=430, phase=P.PHASE_RUSH)
+    gs.tasks = [late_task]
+    gs.events = [{"type": "PROCESS_COMPLETE",
+                  "payload": {"playerId": 1001,
+                              "targetNodeId": "S02"}}]
+    hybrid = HybridStrategy()
+    hybrid.mode = HybridStrategy.MODE_MOBILE
+    acts = hybrid.decide(gs)
+    ok &= check("hybrid: S02仅我方交付死时禁任务全力拒止",
+                hybrid._s02_deny_only and not hybrid._s02_farm_only
+                and hybrid.warden._deny_only_mode
+                and not any(a.get("action") == "CLAIM_TASK" for a in acts)
+                and any(a.get("action") == "MOVE" for a in acts),
+                f"deny={hybrid._s02_deny_only} acts={acts}")
+
+    # 拒止态恰好占住动态汇合点时，Warden 已生成的落卡动作必须原样返回，
+    # 不能被融合层随后计算的移动计划覆盖；最后2篓果也应允许投入关键关。
+    gs = make_state(bypass=True, bypass_distance=85,
+                    cur="S10", opp_cur="S09",
+                    opp_next="S10", opp_edge="E05", round_no=183,
+                    good_fruit=2)
+    hybrid = HybridStrategy()
+    hybrid.mode = HybridStrategy.MODE_MOBILE
+    hybrid.warden.camp_node = "S11"
+    hybrid.warden._plans_ready = True
+    hybrid.warden._deny_only_mode = True
+    acts = hybrid._denial_only_actions(gs)
+    ok &= check("hybrid: 拒止态动态落卡不被后续移动覆盖",
+                any(a.get("action") == "SET_GUARD"
+                        and a.get("targetNodeId") == "S10" for a in acts),
+                str(acts))
+
+    gs = make_state(bypass=True, cur="S02", opp_cur="S10",
+                    round_no=550, phase=P.PHASE_RUSH)
+    gs.tasks = [late_task]
+    gs.events = [{"type": "PROCESS_COMPLETE",
+                  "payload": {"playerId": 1001,
+                              "targetNodeId": "S02"}}]
+    hybrid = HybridStrategy()
+    hybrid.mode = HybridStrategy.MODE_MOBILE
+    acts = hybrid.decide(gs)
+    ok &= check("hybrid: S02双方交付都死才切纯农",
+                hybrid._s02_farm_only and not hybrid._s02_deny_only
+                and hybrid.warden._score_farm_mode
+                and any(a.get("action") == "MOVE"
+                        and a.get("targetNodeId") == "S03" for a in acts),
+                f"farm={hybrid._s02_farm_only} acts={acts}")
 
     # 本次长旁路变种：我方 r54 先完成 S02、对手仍困在 S02。S10 已可绕，
     # 但 S14 仍是不可绕最终墙；从此启用领先预算，而不是立刻锁死零分路线。

@@ -40,6 +40,8 @@ class HybridStrategy(Strategy):
         self.mobile_target = None
         self.mobile_plan = None
         self._gate_pace_active = False
+        self._s02_farm_only = False
+        self._s02_deny_only = False
 
     def on_start(self, state):
         self.planner.on_start(state)
@@ -66,6 +68,20 @@ class HybridStrategy(Strategy):
         s02_handled, s02_actions = self._s02_legacy_actions(state)
         if s02_handled:
             return s02_actions
+
+        self._resolve_s02_outcome(state)
+        if self._s02_farm_only:
+            self.warden._deny_only_mode = False
+            self.warden._score_farm_mode = True
+            return self.warden.decide(state)
+        if self._s02_deny_only:
+            if not self._opponent_can_still_finish(state):
+                self._s02_deny_only = False
+                self._s02_farm_only = True
+                self.warden._deny_only_mode = False
+                self.warden._score_farm_mode = True
+                return self.warden.decide(state)
+            return self._denial_only_actions(state)
 
         # S02 已拿到明确处理先手时，开始保护最终墙的领先预算。此处不再
         # 直接粘性切到 S14：只要任务的完整机会成本吃不掉先手，就继续得分。
@@ -153,6 +169,107 @@ class HybridStrategy(Strategy):
         if self.warden._node_processed(state, "S02"):
             return False, []
         return True, actions
+
+    def _resolve_s02_outcome(self, state):
+        """S02 处理完成后锁存：正常竞速、只拒止、或双方转农。"""
+        if self._s02_farm_only or self._s02_deny_only:
+            return
+        me = state.me
+        if not me or me.get("routeEdgeId") \
+                or me.get("currentNodeId") != "S02" \
+                or not self.warden._node_processed(state, "S02"):
+            return
+
+        remain = state.duration_round - state.round
+        my_eta = self._gate_eta(state, me, optimistic=False)
+        my_safe = my_eta < 999 \
+            and self._my_finish_need(state, my_eta) \
+            + self.warden.EXIT_PAD <= remain
+        if my_safe:
+            self.warden._score_farm_mode = False
+            self.warden._deny_only_mode = False
+            return
+
+        if self._opponent_can_still_finish(state):
+            self._s02_deny_only = True
+            self.warden._score_farm_mode = False
+            self.warden._deny_only_mode = True
+            if self.log:
+                self.log.info(
+                    "hybrid: S02 outcome=deny-only remain=%d myEta=%s",
+                    remain, my_eta)
+        else:
+            self._s02_farm_only = True
+            self.warden._deny_only_mode = False
+            self.warden._score_farm_mode = True
+            if self.log:
+                self.log.info(
+                    "hybrid: S02 outcome=farm-only remain=%d myEta=%s",
+                    remain, my_eta)
+
+    def _opponent_can_still_finish(self, state):
+        """给对手晴天、疾行、零中转处理；仍超时才证明对手也死。"""
+        opp = state.opp
+        if not opp or opp.get("delivered") or opp.get("retired"):
+            return False
+        opp_eta = self._gate_eta(state, opp, optimistic=True)
+        if opp_eta >= 999:
+            return False
+        need = self._opponent_finish_lower_bound(state, opp_eta)
+        return need <= state.duration_round - state.round
+
+    def _should_commit_denial_gate(self, state):
+        """拒止局不要求我方还能交付，只证明能先到且来得及落卡。"""
+        me, opp = state.me, state.opp
+        if not me or not opp or me.get("verified") \
+                or opp.get("verified") or opp.get("delivered") \
+                or opp.get("retired"):
+            return False
+        if not self._gate_has_reaction_window(state):
+            return False
+        cost = self.warden._guard_base_cost(state, state.gate_node) + 1
+        if (me.get("goodFruit", 0) or 0) < cost:
+            return False
+        my_eta = self._gate_eta(state, me, optimistic=False)
+        opp_eta = self._gate_eta(state, opp, optimistic=True)
+        if my_eta >= 999:
+            return False
+        margin = self.warden.MOBILE_GUARD_PAD \
+            if self._opponent_gate_committed(state) else self.GATE_LEAD_MARGIN
+        return my_eta + margin <= opp_eta
+
+    def _denial_only_actions(self, state):
+        """我方交付已死：禁止任务，依次抢动态墙、宫门墙和最近拒止位。"""
+        self.warden._deny_only_mode = True
+        self.warden._score_farm_mode = False
+        actions = self.warden.decide(state)
+        main = self._main_action(actions)
+        if main and main.get("action") == "SET_GUARD":
+            return actions
+
+        intercept = self._score_mobile_intercept(
+            state, allow_reserve=True, deny_only=True)
+        if intercept:
+            return self._replace_main_action(actions, intercept)
+
+        plan = self._mobile_control_plan(state, require_delivery=False)
+        if plan:
+            return self._mobile_control_actions(state, actions, plan)
+
+        if self._should_commit_denial_gate(state):
+            self._activate_gate_control(state)
+            self.warden._deny_only_mode = True
+            return self.warden.decide(state)
+
+        me = state.me
+        if not me or me.get("routeEdgeId") \
+                or me.get("state") in P.BUSY_STATES:
+            return actions
+        cur = me.get("currentNodeId")
+        if not cur or cur == state.gate_node:
+            return actions
+        advance = self.warden._advance(state, cur, state.gate_node)
+        return self._replace_main_action(actions, advance)
 
     # ================= 地图资格审查 =================
 
@@ -308,7 +425,8 @@ class HybridStrategy(Strategy):
         return gate_eta + rush_wait + self.warden._gate_verify_frames(state) \
             + gate_term + DELIVER_FRAMES
 
-    def _score_mobile_intercept(self, state, allow_reserve=False):
+    def _score_mobile_intercept(self, state, allow_reserve=False,
+                                deny_only=False):
         """已经占住对手下一站时，立即兑现 2621 式反应卡。"""
         me = state.me
         if not me or me.get("verified") or me.get("delivered") \
@@ -316,7 +434,7 @@ class HybridStrategy(Strategy):
             return None
         my_eta = self._gate_eta(state, me, optimistic=False)
         finish_need = self._my_finish_need(state, my_eta)
-        slack = state.duration_round - state.round \
+        slack = 999 if deny_only else state.duration_round - state.round \
             - finish_need - self.warden.EXIT_PAD
         return self.warden.mobile_intercept_action(
             state, slack, allow_reserve=allow_reserve)
@@ -327,7 +445,7 @@ class HybridStrategy(Strategy):
                      if a.get("action") not in P.MAIN_ACTION_TYPES]
         return [replacement] + auxiliary
 
-    def _mobile_control_plan(self, state):
+    def _mobile_control_plan(self, state, require_delivery=True):
         """选择我方能先到、对手绕开也会付税的最近汇合点。"""
         me, opp = state.me, state.opp
         if not me or not opp or state.my_open_contests():
@@ -348,7 +466,8 @@ class HybridStrategy(Strategy):
                            state.terminal_node):
             return None
         if not opp.get("routeEdgeId") or not opp.get("nextNodeId"):
-            return self._held_mobile_plan(state)
+            return self._held_mobile_plan(
+                state, require_delivery=require_delivery)
 
         edge_remain = self._edge_remaining_frames(opp, optimistic=True)
         opp_gate, opp_path = self.warden._shortest(
@@ -432,7 +551,8 @@ class HybridStrategy(Strategy):
                 continue
             detour = max(0, via_gate - my_gate)
             finish_need = self._my_finish_need(state, via_gate)
-            if finish_need + self.warden.EXIT_PAD > remain:
+            if require_delivery \
+                    and finish_need + self.warden.EXIT_PAD > remain:
                 continue
 
             delayed_finish = self._opponent_finish_lower_bound(
@@ -463,10 +583,11 @@ class HybridStrategy(Strategy):
             }))
 
         if not candidates:
-            return self._held_mobile_plan(state)
+            return self._held_mobile_plan(
+                state, require_delivery=require_delivery)
         return min(candidates, key=lambda item: item[0])[1]
 
-    def _held_mobile_plan(self, state):
+    def _held_mobile_plan(self, state, require_delivery=True):
         """对手短暂停站时守住已抢墙位；确认改线或触碰死线才解除。"""
         target = self.mobile_target
         previous = self.mobile_plan
@@ -515,7 +636,8 @@ class HybridStrategy(Strategy):
             conservative_weather=True, **travel_kwargs)
         remain = state.duration_round - state.round
         finish_need = self._my_finish_need(state, my_gate_eta)
-        if not my_gate_path or finish_need + self.warden.EXIT_PAD > remain:
+        if not my_gate_path or (require_delivery
+                                and finish_need + self.warden.EXIT_PAD > remain):
             self.mobile_target = self.mobile_plan = None
             return None
 

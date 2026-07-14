@@ -105,6 +105,7 @@ class WardenStrategy(BaselineStrategy):
         self._processed_here = False   # 兼容旧 S02 状态；新逻辑用 _processed_nodes
         self._processed_nodes = set()  # 已完成固定处理的节点，避免 S02 污染后站
         self._score_farm_mode = False  # S02 锁死/RUSH 后只抢任务分，不再奔终点
+        self._deny_only_mode = False   # 我方交付已死、对手仍可交付：只抢墙拒止
         self._s02_won_window = False   # 我方赢下 S02 窗口：处理完必须抢 S10
         self._rush_tactic_tried = False
         self._delivery_committed = False  # 离墙收官后一律去宫门/终点，禁止回头
@@ -429,13 +430,25 @@ class WardenStrategy(BaselineStrategy):
         gate, terminal = state.gate_node, state.terminal_node
         remain = state.duration_round - state.round
 
-        # ---- 最高优先级：我方理论上已到不了终点 → 立刻转农 ----
+        # ---- 最高优先级：我方交付已死时，先判断对手是否也死 ----
         # EXIT_PAD 是离墙安全垫，不是放弃交付阈值；否则到 S14 临界帧会
         # 误判成转农 WAIT，白白错过验核/交付。
-        if not self._delivery_committed and not me.get("verified") \
-                and remain < self._my_need(state, cur) + self.FARM_DEAD_PAD:
+        my_dead = (not self._delivery_committed and not me.get("verified")
+                   and remain < self._my_need(state, cur)
+                   + self.FARM_DEAD_PAD)
+        opp_alive = self._opp_alive_can_deliver(state, remain)
+        if self._deny_only_mode and not opp_alive:
+            self._deny_only_mode = False
             self._score_farm_mode = True
             return self._farm_endgame(state, cur)
+        if my_dead:
+            if opp_alive:
+                self._deny_only_mode = True
+                self._score_farm_mode = False
+            else:
+                self._deny_only_mode = False
+                self._score_farm_mode = True
+                return self._farm_endgame(state, cur)
 
         # ---- 墙优先级：对手已经踏边时，本帧能设卡就先设卡 ----
         # 任务是墙成立后的白捡收益；不能反过来让 3-4 帧读条吃掉落卡窗口。
@@ -447,7 +460,10 @@ class WardenStrategy(BaselineStrategy):
         # 2621 式滚动截击：对手已经用 routeEdgeId/nextNodeId 公开承诺路线，
         # 我方恰好占住其目标点时，先落最低成本有效卡，再做处理/任务。
         # 这层不猜画像，也不预卡；到不了终点或已进入收官时完全关闭。
-        guard = self.mobile_intercept_action(state)
+        guard = self.mobile_intercept_action(
+            state,
+            delivery_slack=999 if self._deny_only_mode else None,
+            allow_reserve=self._deny_only_mode)
         if guard:
             return guard
 
@@ -458,7 +474,7 @@ class WardenStrategy(BaselineStrategy):
                 and self._node_processed(state, cur):
             return self._advance(state, cur, camp)
         if cur == "S02" and not self._node_processed(state, cur) \
-                and self._s02_lock_spent(state):
+                and self._s02_lock_spent(state) and not opp_alive:
             self._score_farm_mode = True
             return self._farm_endgame(state, cur)
         if self._score_farm_mode and not me.get("verified"):
@@ -532,9 +548,10 @@ class WardenStrategy(BaselineStrategy):
 
         # ---- 竞速段：直奔关隘 ----
         if cur != camp and not leaving:
-            claim = self._claim_en_route(state, cur)
-            if claim:
-                return claim
+            if not self._deny_only_mode:
+                claim = self._claim_en_route(state, cur)
+                if claim:
+                    return claim
             return self._advance(state, cur, camp)
 
         # ---- 封锁段：驻守 ----
@@ -835,7 +852,7 @@ class WardenStrategy(BaselineStrategy):
             return None
         # 宫门卡只是最后保险，不能反过来吃掉我方交付安全垫。第一墙仍按
         # 原守望者纪律焊死；只有 S14 在设卡处理来不及装进余量时放弃卡。
-        if cur == state.gate_node \
+        if cur == state.gate_node and not self._deny_only_mode \
                 and self._departure_slack(state, cur) < self.GUARD_MIN_LEAD:
             return None
         if self._opp_edge_remaining(state) < self.GUARD_MIN_LEAD:
@@ -844,7 +861,9 @@ class WardenStrategy(BaselineStrategy):
         rolling = self._rolling_wall and cur != state.gate_node
         if rolling:
             extra = self._mobile_guard_extra(state, cur)
-        if not self._guardable(state, cur, extra=extra, mobile=rolling):
+        if not self._guardable(
+                state, cur, extra=extra, mobile=rolling,
+                allow_reserve=self._deny_only_mode):
             return None
         self._guard_sent[cur] = state.round
         if self.log:
@@ -915,18 +934,17 @@ class WardenStrategy(BaselineStrategy):
                     and opp and opp.get("currentNodeId") == cur)
 
     def _opp_alive_can_deliver(self, state, remain):
-        """还需要用争夺/驻守拖住对手吗？对手已交付/退赛/数学死=不需要。"""
+        """对手极限下界仍能交付时，不能把拒止资产全部转去农分。"""
         opp = state.opp
         if not opp or opp.get("delivered") or opp.get("retired"):
             return False
         pos = opp.get("nextNodeId") or opp.get("currentNodeId")
         if not pos:
             return True
-        need = self._delivery_need(state, pos, P.BASE_SPEED,
-                                   move_factor=self.OPP_SPEED_MARGIN)
+        need = self._opp_delivery_lower_bound(state, pos)
         if need >= 999:
             return False
-        return need <= remain      # 零缓冲：它数学死即死，秒让抢农起跑
+        return need <= remain      # 给对手晴天/疾行/零处理；仍超时才允许纯农
 
     def _farm_endgame(self, state, cur):
         """交付双死后的任务分收割：让行出站 → 追最近可达任务 →
@@ -1543,6 +1561,8 @@ class WardenStrategy(BaselineStrategy):
         opp = state.opp
         if not opp or opp.get("delivered") or opp.get("retired"):
             return True
+        if self._deny_only_mode:
+            return False           # 我方交付已死：墙就是唯一胜负手，不能离开
         # ⓪b 当前 S10 墙快风化且可以证明 S14 接墙后对手到不了终点：
         # 才提前转宫门。不能只看防守值低，否则会把"守到数学死"
         # 误改成无谓早走。
