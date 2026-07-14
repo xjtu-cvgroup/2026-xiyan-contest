@@ -5381,6 +5381,23 @@ def test_hybrid_strategy():
                 and acts_h == acts_w,
                 f"hybrid={acts_h} warden={acts_w}")
 
+    # 固定 S10 主墙被攻坚后，不结束堵人策略：在 PRIMARY 模式内部切入
+    # 2621 滚动墙，先抢下一汇合点，最终才可能接 S14。
+    gs = make_state(cur="S10", opp_cur="S09", round_no=300)
+    opp = next(p for p in gs.players.values()
+               if p.get("playerId") != gs.player_id)
+    opp["currentProcess"] = {
+        "action": "BREAK_GUARD", "type": "BREAK_GUARD",
+        "targetNodeId": "S10", "remainRound": 3}
+    hybrid = HybridStrategy()
+    acts = hybrid.decide(gs)
+    ok &= check("hybrid: S10主墙被破后无缝转2621滚动墙",
+                hybrid.mode == HybridStrategy.MODE_PRIMARY
+                and hybrid.warden._rolling_wall
+                and hybrid.warden.camp_node != "S10",
+                f"mode={hybrid.mode} camp={hybrid.warden.camp_node} "
+                f"acts={acts}")
+
     gs = make_state(bypass=True)
     hybrid = HybridStrategy()
     ok &= check("hybrid: S09-S11旁路使S10失去堵点资格",
@@ -5542,11 +5559,12 @@ def test_hybrid_strategy():
                 hybrid._should_commit_gate(gs),
                 f"my={hybrid._gate_eta(gs, gs.me)} "
                 f"opp={hybrid._gate_eta(gs, gs.opp, True)}")
-    hybrid._activate_gate_control(gs)
-    ok &= check("hybrid: S14接管为粘性Warden模式",
+    acts = hybrid.decide(gs)
+    ok &= check("hybrid: 2621无更早墙时自动接入S14粘性Warden",
                 hybrid.mode == HybridStrategy.MODE_GATE
                 and hybrid.warden._forced_camp == "S14",
-                f"mode={hybrid.mode} camp={hybrid.warden._forced_camp}")
+                f"mode={hybrid.mode} camp={hybrid.warden._forced_camp} "
+                f"acts={acts}")
 
     gs = make_state(bypass=True, cur="S13", opp_cur="S13",
                     round_no=350, task_score=120)
