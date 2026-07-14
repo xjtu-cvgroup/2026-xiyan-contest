@@ -58,6 +58,13 @@ class HybridStrategy(Strategy):
         if self.mode in (self.MODE_PRIMARY, self.MODE_GATE):
             return self.warden.decide(state)
 
+        # 隐藏旁路图也必须完整继承 3.96.34 的 S02 博弈，不能只复用出牌
+        # 却让 Planner 决定 PROCESS/WAIT/小分队。换乘完成的当帧立即交回
+        # 融合层，避免 Warden 的固定 S10 目标污染隐藏图后续路线。
+        s02_handled, s02_actions = self._s02_legacy_actions(state)
+        if s02_handled:
+            return s02_actions
+
         actions = self._score_actions(state)
         plan = self._mobile_control_plan(state)
         force_guard = bool(
@@ -75,6 +82,20 @@ class HybridStrategy(Strategy):
             self._activate_gate_control(state)
             return self.warden.decide(state)
         return actions
+
+    def _s02_legacy_actions(self, state):
+        me = state.me
+        if not me or me.get("routeEdgeId") \
+                or me.get("currentNodeId") != "S02" \
+                or self.warden._node_processed(state, "S02"):
+            return False, []
+
+        actions = self.warden.decide(state)
+        # PROCESS_COMPLETE 在 decide() 开头吸收。完成后丢弃 Warden 面向固定
+        # S10 的首跳，由本帧后续移动控路/得分层按真实隐藏图重新选路。
+        if self.warden._node_processed(state, "S02"):
+            return False, []
+        return True, actions
 
     # ================= 地图资格审查 =================
 

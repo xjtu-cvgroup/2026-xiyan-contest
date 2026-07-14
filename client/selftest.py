@@ -4871,8 +4871,8 @@ def test_warden_strategy():
     ok &= check("warden: 转农目标估值计入一跳后继收益",
                 follow > 0, f"follow={follow}")
 
-    # 2621 快队实锤：我方先到 S02、对手尚余足够落卡窗口时，设卡必须
-    # 抢在固定处理前；否则 2 帧处理会把唯一的拦截窗口吃掉。
+    # S02 是 3.96.34 的独立窗口/换乘博弈，后加的 2621 动态截击不得
+    # 在对手晚到时抢先设卡，避免融合逻辑改变八强版本的开局状态机。
     gs = gs_at("S02", opp_cur="S01", opp_next="S02", opp_edge="E01",
                round_no=43)
     for p in gs.players.values():
@@ -4883,10 +4883,8 @@ def test_warden_strategy():
     st.camp_node = "S10"
     st._plans_ready = True
     a = st.main_action(gs)
-    ok &= check("warden: 2621式S02精确窗口先卡后处理",
-                a and a["action"] == "SET_GUARD"
-                and a["targetNodeId"] == "S02"
-                and a["extraGoodFruit"] == 2, str(a))
+    ok &= check("warden: S02不被2621动态截击抢优先级",
+                a and a["action"] == "PROCESS", str(a))
 
     # 普通汇合点默认下免费防2：对手已上边才触发，不读对手画像。
     gs = gs_at("S09", opp_cur="S07", opp_next="S09", opp_edge="E04",
@@ -5413,6 +5411,40 @@ def test_hybrid_strategy():
                 hybrid.mode == HybridStrategy.MODE_MOBILE
                 and acts_h == acts_p,
                 f"hybrid={acts_h} planner={acts_p}")
+
+    # 即使隐藏图没有固定 S10 主墙，S02 未完成阶段也必须逐动作继承
+    # 3.96.34 Warden，不能被 Planner 或 2621 动态设卡改写。
+    gs_h = make_state(bypass=True, cur="S02", opp_cur="S01",
+                      opp_next="S02", opp_edge="E01", round_no=43)
+    gs_w = make_state(bypass=True, cur="S02", opp_cur="S01",
+                      opp_next="S02", opp_edge="E01", round_no=43)
+    for gs in (gs_h, gs_w):
+        gs.opp["edgeTotalMs"] = 42780
+        gs.opp["edgeProgressMs"] = 35000
+    hybrid = HybridStrategy()
+    hybrid.mode = HybridStrategy.MODE_MOBILE
+    reference = WardenStrategy()
+    acts_h = hybrid.decide(gs_h)
+    acts_w = reference.decide(gs_w)
+    ok &= check("hybrid: 旁路图S02未完成逐动作继承3.96.34",
+                acts_h == acts_w
+                and any(a["action"] == "PROCESS" for a in acts_h)
+                and not any(a["action"] == "SET_GUARD" for a in acts_h),
+                f"hybrid={acts_h} warden={acts_w}")
+
+    # 完成换乘的当帧即交回融合层，不让固定 S10 目标锁住隐藏图首跳。
+    gs = make_state(bypass=True, cur="S02", opp_cur="S03", round_no=66)
+    gs.events = [{"type": "PROCESS_COMPLETE",
+                  "payload": {"playerId": 1001,
+                              "targetNodeId": "S02"}}]
+    hybrid = HybridStrategy()
+    hybrid.mode = HybridStrategy.MODE_MOBILE
+    acts = hybrid.decide(gs)
+    ok &= check("hybrid: S02完成当帧交回隐藏图融合层",
+                hybrid.warden._node_processed(gs, "S02")
+                and any(a["action"] == "MOVE" for a in acts)
+                and not any(a["action"] == "SET_GUARD" for a in acts),
+                str(acts))
 
     # S10 可绕时不奔固定 S10 墙。对手已经承诺 S05->S09，我方从 S10
     # 可以赶在它前面到 S11；S11 又是后续不可绕汇合点，应主动去占位。

@@ -683,8 +683,6 @@ class WardenStrategy(BaselineStrategy):
             return 1                       # 宫门上限防4，extra=1 不溢出
         if node_type == "KEY_PASS":
             return 1                       # 防4比防6少一篓，首风化仍是45帧
-        if node_id == "S02" and state.round < 100:
-            return 2                       # 2621 快队局：精确首站窗口值得防6
         return 0                           # 普通节点免费防2，可反复滚动截击
 
     def _mobile_guard_delay(self, state, node_id, extra, edge_remain):
@@ -742,7 +740,9 @@ class WardenStrategy(BaselineStrategy):
         if state.my_open_contests():
             return None
         cur = me.get("currentNodeId")
-        if not cur or cur in (self.camp_node, state.gate_node,
+        # S02 完整保留 3.96.34 的窗口/换乘博弈，移动截击不得抢优先级。
+        if not cur or cur == "S02" \
+                or cur in (self.camp_node, state.gate_node,
                               state.terminal_node):
             return None
         if not self._opp_inbound(state, cur):
