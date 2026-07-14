@@ -58,7 +58,7 @@ class HybridStrategy(Strategy):
         intercept = self._score_mobile_intercept(state)
         if intercept:
             return [intercept]
-        return self.planner.decide(state)
+        return self._score_actions(state)
 
     # ================= 地图资格审查 =================
 
@@ -164,6 +164,23 @@ class HybridStrategy(Strategy):
         slack = state.duration_round - state.round \
             - finish_need - self.warden.EXIT_PAD
         return self.warden.mobile_intercept_action(state, slack)
+
+    def _score_actions(self, state):
+        """Planner 管得分，但 S02 继续执行 3.96.34 的不认输出牌。"""
+        actions = self.planner.decide(state)
+        contests = state.my_open_contests()
+        s02 = next((c for c in contests
+                    if c.get("targetNodeId") == "S02"
+                    and c.get("contestType")
+                    in (P.CONTEST_DOCK, P.CONTEST_TASK)), None)
+        if not s02:
+            return actions
+
+        card_action = P.a_window_card(
+            s02["contestId"], self.warden._defense_card(state, s02))
+        # 每帧只发一张窗口牌；S02 持续争夺时由这条策略独占窗口动作。
+        actions = [a for a in actions if a.get("action") != "WINDOW_CARD"]
+        return [card_action] + actions
 
     def _should_commit_gate(self, state):
         me, opp = state.me, state.opp

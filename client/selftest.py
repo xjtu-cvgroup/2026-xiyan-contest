@@ -4927,7 +4927,7 @@ def test_warden_strategy():
     st._plans_ready = True
     st._score_farm_mode = True
     a = st.main_action(gs)
-    ok &= check("warden: S02败局转农后不再为截击丢任务帧",
+    ok &= check("warden: S02终点已死转农后不再为截击丢任务帧",
                 not (a and a["action"] == "SET_GUARD"), str(a))
 
     gs = gs_at("S09", opp_cur="S07", opp_next="S09", opp_edge="E04",
@@ -5408,6 +5408,31 @@ def test_hybrid_strategy():
     acts = hybrid.decide(gs)
     ok &= check("hybrid: 动态截击不侵占交付死线",
                 not any(a["action"] == "SET_GUARD" for a in acts), str(acts))
+
+    gs = make_state(bypass=True, cur="S02", opp_cur="S02", round_no=80)
+    gs.contests = [{"contestId": "C_S02_KEEP",
+                    "contestType": P.CONTEST_DOCK,
+                    "targetNodeId": "S02", "mySide": "RED",
+                    "redPlayerId": 1001, "bluePlayerId": 2002,
+                    "resolved": False}]
+    hybrid = HybridStrategy()
+    hybrid.mode = HybridStrategy.MODE_SCORE
+    hybrid.planner._window_draw_pressure[("S02", P.CONTEST_DOCK)] = (1, 79)
+    acts = hybrid.decide(gs)
+    card = next((a.get("card") for a in acts
+                 if a.get("contestId") == "C_S02_KEEP"), None)
+    ok &= check("hybrid: 旁路图S02 DRAW后仍献贡不主动认输",
+                card == P.CARD_XIAN_GONG, f"card={card} acts={acts}")
+
+    gs.players[1001]["freshness"] = 79.0
+    hybrid = HybridStrategy()
+    hybrid.mode = HybridStrategy.MODE_SCORE
+    hybrid.planner._window_draw_pressure[("S02", P.CONTEST_DOCK)] = (1, 79)
+    acts = hybrid.decide(gs)
+    card = next((a.get("card") for a in acts
+                 if a.get("contestId") == "C_S02_KEEP"), None)
+    ok &= check("hybrid: 旁路图献贡不可用时继续兵争",
+                card == P.CARD_BING_ZHENG, f"card={card} acts={acts}")
 
     gs = make_state(bypass=True, cur="S13", opp_cur="S12",
                     round_no=350, task_score=120)
