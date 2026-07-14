@@ -37,6 +37,8 @@ DELIVER_FRAMES = 2
 FAST_HORSE_FRAMES = 20
 SHORT_HORSE_FRAMES = 14
 RUSH_SPEED_FRAMES = 15
+UNKNOWN_WEATHER_WINDOWS = ((80, 120), (200, 240),
+                           (320, 360), (440, 480))
 FARM_TASK_RACE_MARGIN = 2  # S02转农任务必须真实完成领先，不追同帧/贴身局
 FARM_TASK_CAP = 150        # 未交付刷分以任务基础分封顶为一阶目标
 FARM_CONTEST_DISCOUNT = 0.28
@@ -1244,6 +1246,25 @@ class WardenStrategy(BaselineStrategy):
             return proc if include_verify else 0
         return proc if ptype else 0
 
+    def _node_process_frames_at(self, state, node_id, abs_round,
+                                include_verify=False,
+                                worst_unknown_weather=False):
+        """规则口径固定处理：暴雨命中登船/水路换运时额外 +4 帧。"""
+        proc = self._node_process_frames(
+            state, node_id, include_verify=include_verify)
+        if proc <= 0:
+            return 0
+        ptype = state.node(node_id).get("processType")
+        if ptype not in ("BOARD", "WATER_TRANSFER"):
+            return proc
+        weather = self._weather_type_at(state, abs_round)
+        if weather == P.HEAVY_RAIN or (worst_unknown_weather
+                                      and weather is None
+                                      and self._unknown_weather_possible(
+                                          state, abs_round)):
+            proc += 4
+        return proc
+
     def _path_process_frames(self, state, path, include_current=False):
         """最短路上的中途固定处理站读条，随地图 JSON 动态变化。"""
         total = 0
@@ -1312,7 +1333,36 @@ class WardenStrategy(BaselineStrategy):
             P.RUSH_SPEED: P.SPEED_RUSH,
         }.get(boost_type, P.BASE_SPEED)
 
-    def _weather_tax_at(self, state, route_type, abs_round, conservative=True):
+    @staticmethod
+    def _weather_type_at(state, abs_round):
+        weather = state.weather or {}
+        for w in weather.get("active") or []:
+            rem = w.get("remainRound") or w.get("remainingRound") or 0
+            if state.round <= abs_round < state.round + rem:
+                return w.get("type")
+        for w in weather.get("forecast") or []:
+            start = w.get("startRound") or w.get("start")
+            dur = w.get("durationRound") or w.get("duration") or 0
+            if start is not None and start <= abs_round < start + dur:
+                return w.get("type")
+        return None
+
+    @staticmethod
+    def _unknown_weather_possible(state, abs_round):
+        """未预告天气的规则最坏包络；已知本窗精确起点后不重复悲观。"""
+        weather = state.weather or {}
+        known_starts = []
+        for w in (weather.get("active") or []) + (weather.get("forecast") or []):
+            start = w.get("startRound") or w.get("start")
+            if start is not None:
+                known_starts.append(int(start))
+        for lo, hi in UNKNOWN_WEATHER_WINDOWS:
+            if lo <= abs_round <= hi + 59:
+                return not any(lo <= start <= hi for start in known_starts)
+        return False
+
+    def _weather_tax_at(self, state, route_type, abs_round, conservative=True,
+                        worst_unknown_weather=False):
         """按公开天气计算某一帧通行倍率。
 
         我方账本使用当前/预告天气；对手判死下界可传 conservative=False，
@@ -1320,24 +1370,21 @@ class WardenStrategy(BaselineStrategy):
         """
         if not conservative:
             return 1000
-        weather = state.weather or {}
-        for w in weather.get("active") or []:
-            rem = w.get("remainRound") or w.get("remainingRound") or 0
-            if state.round <= abs_round < state.round + rem:
-                tax = P.WEATHER_MOVE_TAX.get((w.get("type"), route_type))
-                if tax:
-                    return tax
-        for w in weather.get("forecast") or []:
-            start = w.get("startRound") or w.get("start") or 10 ** 9
-            dur = w.get("durationRound") or w.get("duration") or 0
-            if start <= abs_round < start + dur:
-                tax = P.WEATHER_MOVE_TAX.get((w.get("type"), route_type))
-                if tax:
-                    return tax
+        weather_type = self._weather_type_at(state, abs_round)
+        tax = P.WEATHER_MOVE_TAX.get((weather_type, route_type))
+        if tax:
+            return tax
+        if worst_unknown_weather and weather_type is None \
+                and self._unknown_weather_possible(state, abs_round):
+            if route_type == P.WATER:
+                return P.WEATHER_MOVE_TAX[(P.HEAVY_RAIN, P.WATER)]
+            if route_type == P.MOUNTAIN:
+                return P.WEATHER_MOVE_TAX[(P.MOUNTAIN_FOG, P.MOUNTAIN)]
         return 1000
 
     def _edge_dynamic_frames(self, state, edge, elapsed, boost_type, boost_rem,
-                             conservative_weather=True):
+                             conservative_weather=True,
+                             worst_unknown_weather=False):
         """逐帧推进一条边，真实消耗有限时长的马/疾行。"""
         need = state.graph.edge_total_move(edge)
         moved = 0
@@ -1348,7 +1395,8 @@ class WardenStrategy(BaselineStrategy):
                 else P.BASE_SPEED
             tax = self._weather_tax_at(
                 state, route_type, state.round + elapsed + frames,
-                conservative=conservative_weather)
+                conservative=conservative_weather,
+                worst_unknown_weather=worst_unknown_weather)
             moved += max(1, int(speed * 1000 / tax))
             frames += 1
             if boost_rem > 0:
@@ -1360,7 +1408,8 @@ class WardenStrategy(BaselineStrategy):
     def _travel_dynamic(self, state, src, dst, boost_type=None, boost_rem=0,
                         start_elapsed=0, include_current_process=False,
                         include_intermediate_process=True,
-                        conservative_weather=True, return_boost=False):
+                        conservative_weather=True, return_boost=False,
+                        worst_unknown_weather=False, blocked_nodes=None):
         """规则口径 ETA：路线距离/类型 + 公开天气 + 有限马/疾行时长。
 
         Dijkstra 状态携带 boost_rem，确保疾行令 15 帧、快马 20 帧、短马
@@ -1374,7 +1423,9 @@ class WardenStrategy(BaselineStrategy):
         init_type, init_rem = boost_type, boost_rem
         elapsed0 = int(start_elapsed)
         if include_current_process:
-            proc = self._node_process_frames(state, src)
+            proc = self._node_process_frames_at(
+                state, src, state.round + elapsed0,
+                worst_unknown_weather=worst_unknown_weather)
             elapsed0 += proc
             init_type, init_rem = self._consume_boost(init_type, init_rem, proc)
         if src == dst:
@@ -1396,12 +1447,17 @@ class WardenStrategy(BaselineStrategy):
                 best_state = cur_state
                 break
             for nb, edge in state.graph.neighbors(node_id):
+                if blocked_nodes and nb in blocked_nodes:
+                    continue
                 ef, nb_type, nb_rem = self._edge_dynamic_frames(
                     state, edge, elapsed, btype, brem,
-                    conservative_weather=conservative_weather)
+                    conservative_weather=conservative_weather,
+                    worst_unknown_weather=worst_unknown_weather)
                 nd = elapsed + ef
                 if include_intermediate_process and nb != dst:
-                    proc = self._node_process_frames(state, nb)
+                    proc = self._node_process_frames_at(
+                        state, nb, state.round + nd,
+                        worst_unknown_weather=worst_unknown_weather)
                     if proc:
                         nd += proc
                         nb_type, nb_rem = self._consume_boost(

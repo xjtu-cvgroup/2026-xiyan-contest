@@ -5,8 +5,8 @@
 时刻表/寿命按回放语料（20/25/31）校准：波次帧固定，内容按种子生成。
 
 保真度声明（与真实服务端的已知偏差，对 A/B 对称因此不影响比较结论）：
-- 未实现：清障残留通行税(6帧)、COST_BANKRUPT 冻结好果清算、暴雨对
-  登船/换运处理 +4 帧、悬赏的关键关隘 3 次计数线（30 帧线已实现）、
+- 未实现：清障残留通行税(6帧)、COST_BANKRUPT 冻结好果清算、
+  悬赏的关键关隘 3 次计数线（30 帧线已实现）、
   资源二次打断保护的细节、任务保护期（用 30 帧简化）。
 - 简化：强制通行全程按路线鲜度扣（真实规则税段按 0.05）；交付瞬时结算。
 - 事件载荷刻意复刻平台缺陷：ACTION_REJECTED 不带 action 字段
@@ -661,8 +661,13 @@ class Arena:
         t.state = P.ST_PROCESSING
 
     def _proc_frames(self, pid, node_id, base):
-        """探路标记减时（-3，最低 2），消耗标记。"""
+        """任务书处理帧：暴雨码头 +4，再应用探路标记 -3（最低 2）。"""
         n = self.nodes[node_id]
+        ptype = n.get("processType")
+        if ptype in ("BOARD", "WATER_TRANSFER") and any(
+                w.get("type") == P.HEAVY_RAIN
+                for w in self._weather_dict()["active"]):
+            base += 4
         for i, (tm, exp) in enumerate(n["scout_marks"]):
             if tm == TEAM[pid] and exp >= self.round and base >= 3:
                 del n["scout_marks"][i]

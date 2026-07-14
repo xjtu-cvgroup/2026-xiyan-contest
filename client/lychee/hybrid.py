@@ -207,15 +207,25 @@ class HybridStrategy(Strategy):
         if not anchor:
             return 999
 
-        edge_frames = self._edge_remaining_frames(player, optimistic) \
-            if moving else 0
         if optimistic:
             boost_type, boost_rem = P.RUSH_SPEED, RUSH_SPEED_FRAMES
+            edge_frames = self._edge_remaining_frames(player, True) \
+                if moving else 0
+            boost_type, boost_rem = self.warden._consume_boost(
+                boost_type, boost_rem, edge_frames)
         else:
             boost_type, boost_rem, _ = self.warden._active_speed_buff(
                 state, player)
-        boost_type, boost_rem = self.warden._consume_boost(
-            boost_type, boost_rem, edge_frames)
+            if moving:
+                if state.enemy_guard(anchor):
+                    return 999
+                edge_frames, boost_type, boost_rem = \
+                    self._conservative_edge_remaining(
+                        state, player, boost_type, boost_rem)
+                if edge_frames >= 999:
+                    return 999
+            else:
+                edge_frames = 0
 
         include_current = False
         if moving:
@@ -227,18 +237,54 @@ class HybridStrategy(Strategy):
                 and node.get("processType") != "VERIFY"
                 and not self.planner._processed_here)
 
+        travel_kwargs = {} if optimistic else self._gate_travel_kwargs(state)
         eta, path = self.warden._travel_dynamic(
             state, anchor, state.gate_node, boost_type, boost_rem,
             start_elapsed=edge_frames,
             include_current_process=include_current,
             include_intermediate_process=not optimistic,
-            conservative_weather=not optimistic)
+            conservative_weather=not optimistic, **travel_kwargs)
         return eta if path else 999
+
+    def _conservative_edge_remaining(self, state, player,
+                                     boost_type, boost_rem):
+        """我方已经在边上时，按有限增益和最坏公开天气逐帧走完余量。"""
+        edge = state.graph.edges.get(player.get("routeEdgeId"))
+        if not edge:
+            return 999, None, 0
+        need = max(0, (player.get("edgeTotalMs") or 0)
+                   - (player.get("edgeProgressMs") or 0))
+        moved = frames = 0
+        while moved < need and frames < 1000:
+            speed = self.warden._boost_speed(boost_type) \
+                if boost_rem > 0 else P.BASE_SPEED
+            tax = self.warden._weather_tax_at(
+                state, edge.get("routeType"), state.round + frames,
+                conservative=True, worst_unknown_weather=True)
+            moved += max(1, int(speed * 1000 / tax))
+            frames += 1
+            if boost_rem > 0:
+                boost_rem -= 1
+                if boost_rem <= 0:
+                    boost_type = None
+        return frames, boost_type, boost_rem
+
+    @staticmethod
+    def _gate_travel_kwargs(state):
+        """保证型 ETA 不穿越尚未确定能排除的公开阻挡。"""
+        blocked = {
+            node_id for node_id in state.static_nodes
+            if state.has_obstacle(node_id) or state.enemy_guard(node_id)
+        }
+        return {
+            "worst_unknown_weather": True,
+            "blocked_nodes": blocked,
+        }
 
     def _my_finish_need(self, state, gate_eta):
         gate_term, path = self.warden._travel_dynamic(
             state, state.gate_node, state.terminal_node,
-            conservative_weather=True)
+            conservative_weather=True, **self._gate_travel_kwargs(state))
         if not path:
             return 999
         rush_wait = 0
@@ -307,8 +353,13 @@ class HybridStrategy(Strategy):
         edge_remain = self._edge_remaining_frames(opp, optimistic=True)
         opp_gate, opp_path = self.warden._shortest(
             state, anchor, gate, P.SPEED_RUSH)
-        my_gate, my_path = self.warden._shortest(
-            state, cur, gate, state.my_speed())
+        my_boost, my_boost_rem, _ = self.warden._active_speed_buff(
+            state, me)
+        travel_kwargs = self._gate_travel_kwargs(state)
+        my_gate, my_path = self.warden._travel_dynamic(
+            state, cur, gate, my_boost, my_boost_rem,
+            include_intermediate_process=True,
+            conservative_weather=True, **travel_kwargs)
         if not opp_path or not my_path:
             return None
 
@@ -327,8 +378,12 @@ class HybridStrategy(Strategy):
             if guard and guard.get("active", guard.get("defense", 0) > 0):
                 continue
 
-            my_eta, my_route = self.warden._shortest(
-                state, cur, node_id, state.my_speed())
+            my_eta, my_route, after_type, after_rem = \
+                self.warden._travel_dynamic(
+                    state, cur, node_id, my_boost, my_boost_rem,
+                    include_intermediate_process=True,
+                    conservative_weather=True, return_boost=True,
+                    **travel_kwargs)
             opp_leg, opp_route = self.warden._shortest(
                 state, anchor, node_id, P.SPEED_RUSH)
             if not my_route or not opp_route:
@@ -364,12 +419,19 @@ class HybridStrategy(Strategy):
             if delay < self.warden.MOBILE_GUARD_MIN_DELAY:
                 continue
 
-            to_gate, after_path = self.warden._shortest(
-                state, node_id, gate, state.my_speed())
+            target_needs_process = bool(
+                state.node(node_id).get("processType")) \
+                and (node_id != cur or not self.planner._processed_here)
+            via_gate, after_path = self.warden._travel_dynamic(
+                state, node_id, gate, after_type, after_rem,
+                start_elapsed=my_eta,
+                include_current_process=target_needs_process,
+                include_intermediate_process=True,
+                conservative_weather=True, **travel_kwargs)
             if not after_path:
                 continue
-            detour = max(0, my_eta + to_gate - my_gate)
-            finish_need = self._my_finish_need(state, my_eta + to_gate)
+            detour = max(0, via_gate - my_gate)
+            finish_need = self._my_finish_need(state, via_gate)
             if finish_need + self.warden.EXIT_PAD > remain:
                 continue
 
@@ -417,8 +479,15 @@ class HybridStrategy(Strategy):
         if not cur or not opp_pos or me.get("routeEdgeId"):
             return None
 
-        my_eta, my_path = self.warden._shortest(
-            state, cur, target, state.my_speed())
+        my_boost, my_boost_rem, _ = self.warden._active_speed_buff(
+            state, me)
+        travel_kwargs = self._gate_travel_kwargs(state)
+        my_eta, my_path, after_type, after_rem = \
+            self.warden._travel_dynamic(
+                state, cur, target, my_boost, my_boost_rem,
+                include_intermediate_process=True,
+                conservative_weather=True, return_boost=True,
+                **travel_kwargs)
         opp_eta, opp_path = self.warden._shortest(
             state, opp_pos, target, P.SPEED_RUSH)
         opp_gate, gate_path = self.warden._shortest(
@@ -435,10 +504,17 @@ class HybridStrategy(Strategy):
             self.mobile_target = self.mobile_plan = None
             return None
 
-        my_to_gate, my_gate_path = self.warden._shortest(
-            state, target, gate, state.my_speed())
+        target_needs_process = bool(
+            state.node(target).get("processType")) \
+            and (target != cur or not self.planner._processed_here)
+        my_gate_eta, my_gate_path = self.warden._travel_dynamic(
+            state, target, gate, after_type, after_rem,
+            start_elapsed=my_eta,
+            include_current_process=target_needs_process,
+            include_intermediate_process=True,
+            conservative_weather=True, **travel_kwargs)
         remain = state.duration_round - state.round
-        finish_need = self._my_finish_need(state, my_eta + my_to_gate)
+        finish_need = self._my_finish_need(state, my_gate_eta)
         if not my_gate_path or finish_need + self.warden.EXIT_PAD > remain:
             self.mobile_target = self.mobile_plan = None
             return None
@@ -615,14 +691,20 @@ class HybridStrategy(Strategy):
         if not cur or me.get("routeEdgeId"):
             return 999
         direct = self._gate_eta(state, me, optimistic=False)
+        travel_kwargs = self._gate_travel_kwargs(state)
         boost_type, boost_rem, _ = self.warden._active_speed_buff(state, me)
         to_target, path, after_type, after_rem = self.warden._travel_dynamic(
             state, cur, target, boost_type, boost_rem,
             include_intermediate_process=True,
-            conservative_weather=True, return_boost=True)
+            conservative_weather=True, return_boost=True, **travel_kwargs)
         if not path:
             return 999
 
+        fixed_process = 0
+        if target != cur or not self.planner._processed_here:
+            fixed_process = self.warden._node_process_frames_at(
+                state, target, state.round + to_target,
+                worst_unknown_weather=True)
         if plan.kind == "task" and plan.task:
             process = (plan.task.get("processRound", 4) or 4) + 1
         elif plan.kind == "resource":
@@ -631,13 +713,14 @@ class HybridStrategy(Strategy):
             process = 1
         else:
             return 999
+        process += fixed_process
         after_type, after_rem = self.warden._consume_boost(
             after_type, after_rem, process)
         via, path = self.warden._travel_dynamic(
             state, target, gate, after_type, after_rem,
             start_elapsed=to_target + process,
             include_intermediate_process=True,
-            conservative_weather=True)
+            conservative_weather=True, **travel_kwargs)
         return max(0, via - direct) if path and direct < 999 else 999
 
     def _gate_pace_actions(self, state, actions, plan, opportunity_cost=None):

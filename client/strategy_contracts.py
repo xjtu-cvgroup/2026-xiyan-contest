@@ -32,9 +32,21 @@ class GuardBreakerRusher(RusherBot):
 
 WEATHER = {
     "clear": [],
-    "rain": [{"type": "HEAVY_RAIN", "start": 1, "dur": 180}],
-    "fog": [{"type": "MOUNTAIN_FOG", "start": 1, "dur": 180}],
-    "hot": [{"type": "HOT", "start": 250, "dur": 180}],
+    "rain": [{"type": "HEAVY_RAIN", "start": 100, "dur": 60}],
+    "fog": [{"type": "MOUNTAIN_FOG", "start": 100, "dur": 60}],
+    "hot": [{"type": "HOT", "start": 220, "dur": 60}],
+    "early-extremes": [
+        {"type": "MOUNTAIN_FOG", "start": 80, "dur": 60},
+        {"type": "HEAVY_RAIN", "start": 200, "dur": 60},
+        {"type": "MOUNTAIN_FOG", "start": 320, "dur": 60},
+        {"type": "HEAVY_RAIN", "start": 440, "dur": 60},
+    ],
+    "late-extremes": [
+        {"type": "HEAVY_RAIN", "start": 120, "dur": 60},
+        {"type": "MOUNTAIN_FOG", "start": 240, "dur": 60},
+        {"type": "HEAVY_RAIN", "start": 360, "dur": 60},
+        {"type": "HOT", "start": 480, "dur": 60},
+    ],
 }
 
 
@@ -65,6 +77,10 @@ CASES = (
     ("e25-rain", e25_bypass_start, (), RusherBot, "A", "rain"),
     ("e25-fog", e25_bypass_start, (), RusherBot, "A", "fog"),
     ("e25-hot", e25_bypass_start, (), RusherBot, "A", "hot"),
+    ("e25-weather-early", e25_bypass_start, (), RusherBot, "A",
+     "early-extremes"),
+    ("e25-weather-late", e25_bypass_start, (), RusherBot, "A",
+     "late-extremes"),
 )
 
 
