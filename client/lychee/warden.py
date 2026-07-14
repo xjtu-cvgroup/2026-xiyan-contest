@@ -41,6 +41,7 @@ UNKNOWN_WEATHER_WINDOWS = ((80, 120), (200, 240),
                            (320, 360), (440, 480))
 FARM_TASK_RACE_MARGIN = 2  # S02转农任务必须真实完成领先，不追同帧/贴身局
 FARM_TASK_CAP = 150        # 未交付刷分以任务基础分封顶为一阶目标
+FARM_CHAIN_DEPTH = 3       # 看完整路线任务链，避免只看最近一项误选低分走廊
 FARM_CONTEST_DISCOUNT = 0.28
 FARM_REFRESH_VALUE = 8     # 无活跃任务时，蹲任务候选点的保底期望
 FARM_BUCKET_VALUE_MULT = 0.32
@@ -1265,6 +1266,124 @@ class WardenStrategy(BaselineStrategy):
         nxt = path[1]
         return bool(state.has_obstacle(nxt) or state.enemy_guard(nxt))
 
+    def _farm_route_blocked(self, state, path):
+        """任务链投影使用整段路径，不能让最短路静默穿过后续障碍。"""
+        return any(state.has_obstacle(nid) or state.enemy_guard(nid)
+                   for nid in (path or ())[1:])
+
+    def _farm_station_release_frames(self, state, player):
+        """玩家开始赶任务前仍欠的可见处理帧。"""
+        if not player or player.get("routeEdgeId"):
+            return 0
+        remain = self._process_remain(player)
+        if remain > 0:
+            return remain
+        node_id = player.get("currentNodeId")
+        if not node_id:
+            return 0
+        frames = self._node_process_frames(state, node_id)
+        if frames <= 0:
+            return 0
+        if player.get("playerId") == state.player_id:
+            return 0 if self._node_processed(state, node_id) else frames
+
+        # 对手完成事件可见时不重复收费。否则我方刚完成同一处理站、对手
+        # 仍原地空闲，规则上至少还欠一次固定处理；可见探路标记按规则减3。
+        for event in state.events:
+            if event.get("type") not in ("PROCESS_COMPLETE", "PROCESS_COMPLETED"):
+                continue
+            payload = event.get("payload") or {}
+            if payload.get("playerId") == player.get("playerId") \
+                    and (payload.get("targetNodeId") or payload.get("nodeId")) \
+                    == node_id:
+                return 0
+        if not self._node_processed(state, node_id) \
+                or state.me.get("currentNodeId") != node_id:
+            return 0
+        marked = any(m.get("teamId") != state.my_team
+                     and m.get("remainingTriggers", 1) > 0
+                     for m in state.node(node_id).get("scouted") or [])
+        return max(2, frames - 3) if marked and frames >= 3 else frames
+
+    def _farm_task_process_frames(self, state, task):
+        frames = task.get("processRound")
+        if frames is not None:
+            return frames or 0
+        tpl = state.task_templates.get(task.get("taskTemplateId")) or {}
+        return tpl.get("processRound") or 4
+
+    @staticmethod
+    def _farm_task_key(task):
+        return task.get("taskId") or (task.get("taskTemplateId"),
+                                      task.get("nodeId"))
+
+    def _farm_chain_path_cost(self, state, path, elapsed, processed):
+        """计入沿途首次固定处理，返回新增成本与新的已处理集合。"""
+        cost = 0
+        done = set(processed)
+        for nid in (path or ())[1:]:
+            if nid in done or self._node_processed(state, nid):
+                continue
+            frames = self._node_process_frames_at(
+                state, nid, state.round + elapsed + cost)
+            if frames > 0:
+                cost += frames
+                done.add(nid)
+        return cost, done
+
+    def _farm_task_chain_projection(self, state, origin, first, has_horse):
+        """枚举至多三项可执行任务，优先最大化600帧结算任务分。"""
+        tasks = [t for t in state.claimable_tasks()
+                 if not self._farm_task_blocked(state, t, has_horse)]
+        first_key = self._farm_task_key(first)
+        if not any(self._farm_task_key(t) == first_key for t in tasks):
+            return 0, 0
+        base = state.me.get("taskScore", 0) or 0
+        initial_done = set(self._processed_nodes)
+        if self._processed_here:
+            initial_done.add("S02")
+
+        def take(task, cur, elapsed, score, used, processed):
+            eta, path = self._shortest(state, cur, task["nodeId"],
+                                       state.my_speed())
+            if not path or self._farm_route_blocked(state, path) \
+                    or self._farm_backtrack_step(state, cur, path):
+                return None
+            fixed, done = self._farm_chain_path_cost(
+                state, path, elapsed + eta, processed)
+            proc = self._farm_task_process_frames(state, task)
+            finish = elapsed + eta + fixed + proc
+            expire = task.get("expireRound") or 0
+            if expire and state.round + finish + 2 > expire:
+                return None
+            if state.round + finish > state.duration_round:
+                return None
+            gain = min(self._farm_task_score_hint(state, task),
+                       max(0, FARM_TASK_CAP - base - score))
+            return task["nodeId"], finish, score + gain, \
+                used | {self._farm_task_key(task)}, done
+
+        def search(cur, elapsed, score, used, processed, depth):
+            best = (score, elapsed)
+            if depth >= FARM_CHAIN_DEPTH or base + score >= FARM_TASK_CAP:
+                return best
+            for task in tasks:
+                if self._farm_task_key(task) in used:
+                    continue
+                nxt = take(task, cur, elapsed, score, used, processed)
+                if not nxt:
+                    continue
+                candidate = search(*nxt, depth + 1)
+                if candidate[0] > best[0] \
+                        or (candidate[0] == best[0] and candidate[1] < best[1]):
+                    best = candidate
+            return best
+
+        first_step = take(first, origin, 0, 0, set(), initial_done)
+        if not first_step:
+            return 0, 0
+        return search(*first_step, 1)
+
     # ---- 农任务终局 ----
 
     def _at_contested_station(self, state, cur):
@@ -1347,20 +1466,23 @@ class WardenStrategy(BaselineStrategy):
                 continue
             if self._farm_backtrack_step(state, cur, path):
                 continue
-            proc = t.get("processRound", 4) or 4
+            proc = self._farm_task_process_frames(state, t)
             expire = t.get("expireRound") or 0
             if expire and state.round + eta + proc + 2 > expire:
                 continue
             if state.round + eta + proc > state.duration_round:
                 continue
-            ev = self._farm_task_expected_value(state, t, eta, proc, opp_pos)
-            ev += self._farm_followup_value(
-                state, t, eta, proc, opp_pos, has_horse)
+            chain_score, chain_busy = self._farm_task_chain_projection(
+                state, cur, t, has_horse)
+            factor = self._farm_task_race_factor(
+                state, t["nodeId"], eta, proc, opp_pos)
+            ev = chain_score * factor
             if ev <= 0:
                 continue          # 它必先完成：别追尸体，换线抢别的桶
             back = self._farm_backtrack_step(state, cur, path)
-            busy = max(1, eta + proc)
-            rank = (1 if back else 0, -ev / busy, -ev, eta)
+            busy = max(1, chain_busy or eta + proc)
+            # 600帧结算先比能拿到的总任务分，只有同分才比完成速度。
+            rank = (1 if back else 0, -ev, busy, eta)
             if best_rank is None or rank < best_rank:
                 best, best_rank = t["nodeId"], rank
         if best is None:
@@ -1401,7 +1523,12 @@ class WardenStrategy(BaselineStrategy):
                     fb, fb_rank = nid, rank
                 if opp_pos:
                     oeta, opath = self._shortest(state, opp_pos, nid)
-                    if opath and oeta <= eta + FARM_TASK_RACE_MARGIN:
+                    opp_release = self._farm_station_release_frames(
+                        state, state.opp)
+                    my_release = self._farm_station_release_frames(
+                        state, state.me)
+                    if opath and oeta + opp_release \
+                            <= eta + my_release + FARM_TASK_RACE_MARGIN:
                         continue          # 它更近：优先换桶，别追尾
                 if best_rank is None or rank < best_rank:
                     best, best_rank = nid, rank
@@ -1519,7 +1646,10 @@ class WardenStrategy(BaselineStrategy):
         opp_bucket = self._farm_opp_bucket(state, cur)
         if bucket and opp_bucket == bucket and opp_pos:
             oeta, opath = self._shortest(state, opp_pos, node_id)
-            if opath and oeta <= eta + FARM_TASK_RACE_MARGIN:
+            opp_release = self._farm_station_release_frames(state, state.opp)
+            my_release = self._farm_station_release_frames(state, state.me)
+            if opath and oeta + opp_release \
+                    <= eta + my_release + FARM_TASK_RACE_MARGIN:
                 opp_base = (state.opp or {}).get("taskScore", 0) or 0
                 opp_cap = self._farm_bucket_score_ceiling(
                     state, bucket, opp_pos, opp_base)
@@ -1585,8 +1715,10 @@ class WardenStrategy(BaselineStrategy):
         oeta, opath = self._shortest(state, opp_pos, node_id)
         if not opath:
             return 1.0
-        my_finish = state.round + my_eta + proc
-        opp_finish = state.round + oeta + proc
+        my_finish = state.round + self._farm_station_release_frames(
+            state, state.me) + my_eta + proc
+        opp_finish = state.round + self._farm_station_release_frames(
+            state, state.opp) + oeta + proc
         if my_finish + FARM_TASK_RACE_MARGIN < opp_finish:
             return 1.0
         if my_finish < opp_finish:

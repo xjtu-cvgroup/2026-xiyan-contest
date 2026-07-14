@@ -4984,6 +4984,49 @@ def test_warden_strategy():
     ok &= check("warden: 转农目标估值计入一跳后继收益",
                 follow > 0, f"follow={follow}")
 
+    # 2026-07-14 败局精确归因：我方 r457 完成 S02，敌方仍欠 4 帧。
+    # 官道 S03+S03+S07 可拿90，水路 S04+S05只能拿60且有两次固定处理；
+    # 必须把真实出站领先与三任务链一起计价，不能被 S04 短马吸走。
+    def replay_task(task_id, node_id, expire, bucket):
+        return {"taskId": task_id, "taskTemplateId": "T01",
+                "nodeId": node_id, "processRound": 4, "score": 30,
+                "expireRound": expire, "active": True,
+                "completed": False, "failed": False,
+                "ownerPlayerId": 0, "protectionPlayerId": 0,
+                "routeBucket": bucket}
+
+    replay_tasks = (
+        replay_task("T013", "S10", 520, P.WATER),
+        replay_task("T014", "S03", 520, P.ROAD),
+        replay_task("T015", "S05", 520, P.WATER),
+        replay_task("T016", "S06", 520, P.MOUNTAIN),
+        replay_task("T017", "S03", 540, P.ROAD),
+        replay_task("T018", "S04", 540, P.WATER),
+        replay_task("T019", "S08", 540, P.MOUNTAIN),
+        replay_task("T020", "S07", 600, P.ROAD),
+        replay_task("T021", "S05", 600, P.WATER),
+    )
+    st = WardenStrategy()
+    st.camp_node = "S10"
+    st._plans_ready = True
+    st._score_farm_mode = True
+    gs = gs_at(
+        "S02", opp_cur="S02", round_no=457, phase=P.PHASE_RUSH,
+        tasks=replay_tasks,
+        events=({"type": "PROCESS_COMPLETE",
+                 "payload": {"playerId": 1001,
+                             "targetNodeId": "S02"}},))
+    set_proc(gs, "S04", "BOARD", 7)
+    set_proc(gs, "S05", "WATER_TRANSFER", 6)
+    gs.nodes["S04"]["resourceStock"] = {P.SHORT_HORSE: 1}
+    gs.nodes["S06"]["hasObstacle"] = True
+    gs.nodes["S08"]["hasObstacle"] = True
+    acts = st.decide(gs)
+    main = next((x for x in acts if x["action"] in P.MAIN_ACTION_TYPES), None)
+    ok &= check("warden: S02先手转农按三任务链选择90分官道",
+                main and main["action"] == "MOVE"
+                and main["targetNodeId"] == "S03", str(acts))
+
     # S02 是 3.96.34 的独立窗口/换乘博弈，后加的 2621 动态截击不得
     # 在对手晚到时抢先设卡，避免融合逻辑改变八强版本的开局状态机。
     gs = gs_at("S02", opp_cur="S01", opp_next="S02", opp_edge="E01",
