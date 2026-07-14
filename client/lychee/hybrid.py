@@ -113,6 +113,13 @@ class HybridStrategy(Strategy):
                 return self.warden.decide(state)
             return self._denial_only_actions(state)
 
+        # 短宫门边无法等对手踏边后再反应：我方已占门、对手
+        # 到达相邻起步点时，必须当帧粘性接管并预埋。这一层
+        # 放在 Planner 之前，任务估值不得再把已拿到的必经点先手花掉。
+        if self._short_gate_takeover_required(state):
+            self._activate_gate_control(state)
+            return self.warden.decide(state)
+
         hold = self._mobile_reguard_action(state)
         if hold:
             if state.my_open_contests():
@@ -1662,6 +1669,42 @@ class HybridStrategy(Strategy):
                     inbound.append(state.graph.edge_frames(
                         edge, P.SPEED_RUSH))
         return bool(inbound) and min(inbound) >= self.warden.GUARD_MIN_LEAD
+
+    def _gate_control_available(self, state):
+        """宫门是必经点且存在正常入边，即具备控制价值。
+
+        入边长度只决定“踏边后反应”还是“相邻点起步前预埋”，
+        不能再把短边误解为宫门没有战略价值。
+        """
+        if self._reachable_without(
+                state, state.start_node, state.terminal_node,
+                state.gate_node):
+            return False
+        return any(
+            dst == state.gate_node and src != state.terminal_node
+            for src in state.graph.adj
+            for dst, _ in state.graph.neighbors(src))
+
+    def _short_gate_takeover_required(self, state):
+        """我方已占宫门时，短入边威胁必须立即进入预埋状态。"""
+        me, opp = state.me, state.opp
+        if not me or not opp or self.mode != self.MODE_MOBILE \
+                or me.get("routeEdgeId") \
+                or me.get("currentNodeId") != state.gate_node \
+                or me.get("verified") or me.get("delivered") \
+                or opp.get("verified") or opp.get("delivered") \
+                or opp.get("retired") \
+                or not self._gate_control_available(state) \
+                or self._gate_has_reaction_window(state):
+            return False
+        if opp.get("routeEdgeId"):
+            return opp.get("nextNodeId") == state.gate_node
+        origin = opp.get("currentNodeId")
+        if not origin or origin == state.terminal_node:
+            return False
+        edge = state.graph.edge_between(origin, state.gate_node)
+        return bool(edge and state.graph.edge_frames(edge, P.SPEED_RUSH)
+                    < self.warden.GUARD_MIN_LEAD)
 
     def _activate_gate_control(self, state):
         self.mode = self.MODE_GATE

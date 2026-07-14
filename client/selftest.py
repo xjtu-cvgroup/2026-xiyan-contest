@@ -4463,6 +4463,35 @@ def test_front_tempo_tail_follow():
                 and a["taskId"] == "T_S10_SAME",
                 str(a))
 
+    # 04 回放 r319：S13 是动态宫门的一跳前驱，T016 已在脚下，不能
+    # 先拿情报离站、再从 S14/S10 折返补任务。低价值资源让任务，冰鉴不让。
+    t_gate_feeder = {
+        "taskId": "T_GATE_FEEDER", "taskTemplateId": "T01",
+        "nodeId": "S13", "processRound": 5, "score": 15,
+        "expireRound": 420, "active": True, "completed": False,
+        "failed": False, "ownerPlayerId": 0, "protectionPlayerId": 0,
+        "routeBucket": P.ROAD,
+    }
+    gs = gs_replay93("S13", 75, (t_gate_feeder,),
+                     "S09", "S10", "E05", opp_task_score=150)
+    gs.players[2002].update(state="IDLE", currentNodeId="S11",
+                            nextNodeId=None, routeEdgeId=None,
+                            edgeTotalMs=0, edgeProgressMs=0,
+                            delivered=True)
+    gs.nodes["S13"]["resourceStock"] = {P.INTEL: 1}
+    a = PlannerStrategy().main_action(
+        gs, Plan("resource", position="S13", resource=P.INTEL, slack=90))
+    ok &= check("宫门前补分: 脚下短任务优先于情报",
+                a and a["action"] == "CLAIM_TASK"
+                and a["taskId"] == "T_GATE_FEEDER", str(a))
+
+    gs.nodes["S13"]["resourceStock"] = {P.ICE_BOX: 1}
+    a = PlannerStrategy().main_action(
+        gs, Plan("resource", position="S13", resource=P.ICE_BOX, slack=90))
+    ok &= check("宫门前补分: 不抢冰鉴规划目标",
+                a and a["action"] == "CLAIM_RESOURCE"
+                and a["resourceType"] == P.ICE_BOX, str(a))
+
     gs = gs_replay93("S10", 120, (t_s10_same,), "S09", "S10", "E05",
                      opp_task_score=150)
     gs.players[2002]["delivered"] = True
@@ -6052,7 +6081,8 @@ def test_hybrid_strategy():
                 hybrid._gate_pace_active,
                 f"budget={hybrid._gate_lead_budget(gs)} acts={acts}")
 
-    # 若所有 S14 入边短于设卡生效窗，物理上没有宫门合同，必须回落得分。
+    # 若所有 S14 入边短于设卡生效窗，上游不能伪造“踏边后
+    # 反应”的全局领先合同；只在我方真正占门后切换为预埋。
     gs = make_state(bypass=True, bypass_distance=85, race_variant=True,
                     short_gate=True, cur="S03", opp_cur="S01",
                     round_no=100)
@@ -6061,7 +6091,7 @@ def test_hybrid_strategy():
     hybrid.warden._s02_opening = False
     hybrid.warden._processed_nodes.add("S02")
     hybrid.decide(gs)
-    ok &= check("hybrid: S14短入边不可堵时不伪造领先合同",
+    ok &= check("hybrid: S14短入边上游不伪造反应领先合同",
                 not hybrid._gate_pace_active)
 
     # 同一个脚下短任务：对手与我方同位时会吃掉设卡先手，必须赶路；
@@ -6440,8 +6470,33 @@ def test_hybrid_strategy():
     hybrid = HybridStrategy()
     hybrid.mode = HybridStrategy.MODE_SCORE
     hybrid.planner._processed_here = True
-    ok &= check("hybrid: S14入边不足5帧则不误判可堵",
+    ok &= check("hybrid: S14短入边未占门时仍不误判可反应",
                 not hybrid._should_commit_gate(gs))
+
+    # 04 实战核心帧：我方已到 S14，对手停在短入边相邻的
+    # S13。此时 Planner 即使看到后方任务，也必须当帧粘性接管、
+    # 提前设卡，不得再从 S14 回头。
+    gs = make_state(bypass=True, short_gate=True, cur="S14",
+                    opp_cur="S13", round_no=329, task_score=75)
+    hybrid = HybridStrategy()
+    hybrid.mode = HybridStrategy.MODE_SCORE
+    acts = hybrid.decide(gs)
+    ok &= check("hybrid: S14短边相邻威胁当帧预埋且粘性接管",
+                hybrid.mode == HybridStrategy.MODE_GATE
+                and any(a.get("action") == "SET_GUARD"
+                        and a.get("targetNodeId") == "S14" for a in acts)
+                and not any(a.get("action") == "MOVE" for a in acts),
+                f"mode={hybrid.mode} acts={acts}")
+
+    # 长入边仍坚持“对手上边再设卡”，短边例外不得扩散。
+    gs = make_state(bypass=True, cur="S14", opp_cur="S13",
+                    round_no=329, task_score=75)
+    st = WardenStrategy(forced_camp="S14")
+    st.camp_node, st._plans_ready = "S14", True
+    action = st.main_action(gs)
+    ok &= check("warden: S14长入边仍不提前设卡",
+                not action or action.get("action") != "SET_GUARD",
+                str(action))
 
     gs = make_state(bypass=True, terminal_bypass=True, cur="S13",
                     opp_cur="S12", round_no=350, task_score=120)

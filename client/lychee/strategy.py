@@ -179,6 +179,10 @@ class PlannerStrategy(BaselineStrategy):
     CLAIM_EN_ROUTE = (P.ICE_BOX, P.FAST_HORSE, P.SHORT_HORSE)
     # 竞速模式下的收缩清单（V3.18）：只领交付硬件与速度资源
     RACE_CLAIM_ONLY = (P.ICE_BOX, P.FAST_HORSE, P.SHORT_HORSE)
+    # 宫门前脚下任务可以压过这些低边际资源；冰鉴和马仍交给规划器竞价。
+    LOW_VALUE_LATE_RESOURCES = {
+        P.INTEL, P.PASS_TOKEN, P.OFFICIAL_PERMIT, P.BOAT_RIGHT,
+    }
     CLAIM_LIMIT = {P.ICE_BOX: 2}    # 冰鉴多多益善（+10 鲜度 ≈ 18 分），其余各 1
     USE_ICE_BELOW = 86          # 首关前先留 1 个坏果弹药，低到 86 左右再补冰
     USE_ICE_LATE_BELOW = 91     # 过首关/冲刺末端不再故意养坏果，恢复保鲜阈值
@@ -886,10 +890,15 @@ class PlannerStrategy(BaselineStrategy):
                 return steal_risk
             return P.a_claim_task(plan.task["taskId"])
 
-        # S10/S11 已经是后段任务泉；低分直送前，脚下 4~6 帧任务比情报/
-        # 官凭这类顺路资源更该先兑现（2026-07-05 60:150 任务分败局）。
+        # S10/S11 与动态宫门前驱点都是后段补分位；低分时脚下 4~6 帧
+        # 任务比情报/官凭这类资源更该先兑现。宫门前驱只压低价值资源，
+        # 不抢冰鉴和马，避免为了补分丢掉真正的交付硬件。
         rescue = self._same_node_low_score_task(state, plan, cur)
-        if rescue and cur in ("S10", "S11") \
+        gate_feeder = self._is_gate_feeder(state, cur)
+        low_value_plan = plan.kind != "resource" \
+            or plan.resource in self.LOW_VALUE_LATE_RESOURCES
+        if rescue and (cur in ("S10", "S11")
+                       or (gate_feeder and low_value_plan)) \
                 and (me.get("taskScore", 0) or 0) < 150:
             return P.a_claim_task(rescue["taskId"])
 
@@ -1396,12 +1405,16 @@ class PlannerStrategy(BaselineStrategy):
         """直送兜底：先吃脚下短任务，避免低任务分早交付。"""
         if state.phase != P.PHASE_NORMAL:
             return None
-        if state.me.get("verified") or cur not in ("S09", "S10", "S11"):
+        if state.me.get("verified") or (
+                cur not in ("S09", "S10", "S11")
+                and not self._is_gate_feeder(state, cur)):
             return None
         base = state.me.get("taskScore", 0) or 0
         milestone_rescue = plan.kind == "deliver" and 90 <= base < 120
-        s10_score_rescue = cur in ("S10", "S11") and base < 150
-        if not (milestone_rescue or s10_score_rescue):
+        late_score_rescue = (cur in ("S10", "S11")
+                             or self._is_gate_feeder(state, cur)) \
+            and base < 150
+        if not (milestone_rescue or late_score_rescue):
             return None
         best = None
         for t in state.claimable_tasks():
@@ -1422,6 +1435,13 @@ class PlannerStrategy(BaselineStrategy):
             if best is None or (t.get("score", 0), -proc) > best_key:
                 best = t
         return best
+
+    @staticmethod
+    def _is_gate_feeder(state, cur):
+        """当前点是否可一跳进入动态宫门（不依赖 S13/S14 编号）。"""
+        if not cur or cur in (state.gate_node, state.terminal_node):
+            return False
+        return state.graph.edge_between(cur, state.gate_node) is not None
 
     def _contested_claim_first(self, state, cur, plan):
         """任务前的稀缺资源保卫：对手赶得上在我们读条期间偷走时，先领。"""

@@ -554,6 +554,10 @@ class WardenStrategy(BaselineStrategy):
 
         # ---- 墙优先级：对手已经踏边时，本帧能设卡就先设卡 ----
         # 任务是墙成立后的白捡收益；不能反过来让 3-4 帧读条吃掉落卡窗口。
+        if cur == gate and self.camp_node == gate:
+            guard = self._short_gate_prearm_guard(state, cur)
+            if guard:
+                return guard
         if cur in (self.camp_node, gate):
             guard = self._reactive_guard(state, cur)
             if guard:
@@ -1326,6 +1330,42 @@ class WardenStrategy(BaselineStrategy):
         self._guard_sent[cur] = state.round
         if self.log:
             self.log.info("warden: reactive guard @%s (opp inbound)", cur)
+        return P.a_set_guard(cur, extra)
+
+    def _short_gate_prearm_guard(self, state, cur):
+        """宫门入边短于设卡生效窗时，在相邻威胁起步前预埋。
+
+        普通长边仍由 _reactive_guard 保持“对手上边再设卡”。
+        这个例外只服务已粘性接管的宫门；Hybrid 在接管前还会
+        证明宫门是交付必经点，因此不会扩散成普通点预卡。
+        """
+        if cur != state.gate_node or self.camp_node != state.gate_node \
+                or self._my_active_guard(state, cur):
+            return None
+        opp = state.opp
+        if not opp or opp.get("delivered") or opp.get("retired") \
+                or opp.get("routeEdgeId"):
+            return None
+        origin = opp.get("currentNodeId")
+        if not origin or origin in (cur, state.terminal_node):
+            return None
+        edge = state.graph.edge_between(origin, cur)
+        if not edge or state.graph.edge_frames(edge, P.SPEED_RUSH) \
+                >= self.GUARD_MIN_LEAD:
+            return None
+        if not self._deny_only_mode \
+                and self._departure_slack(state, cur) < self.GUARD_MIN_LEAD:
+            return None
+        extra = 1
+        if not self._guardable(
+                state, cur, extra=extra,
+                allow_reserve=self._deny_only_mode):
+            return None
+        self._guard_sent[cur] = state.round
+        if self.log:
+            self.log.info(
+                "warden: short-gate prearm @%s (opp staging=%s)",
+                cur, origin)
         return P.a_set_guard(cur, extra)
 
     def _depart_guard(self, state, cur):
