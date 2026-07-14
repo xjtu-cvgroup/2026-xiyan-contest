@@ -5510,11 +5510,17 @@ def test_hybrid_strategy():
                     opp_next="S09", opp_edge="E04", round_no=100)
     hybrid = HybridStrategy()
     hybrid.mode = HybridStrategy.MODE_SCORE
+    plan = hybrid._mobile_control_plan(gs)
     acts = hybrid.decide(gs)
     ok &= check("hybrid: 旁路图移动守望者兑现2621路线截击",
-                acts and acts[0]["action"] == "SET_GUARD"
+                plan and plan["target"] == "S09"
+                and not plan["globallyMandatory"]
+                and plan["delay"] == min(plan["stayDelay"],
+                                         plan["rerouteDelay"])
+                and acts and acts[0]["action"] == "SET_GUARD"
                 and acts[0]["targetNodeId"] == "S09"
-                and acts[0]["extraGoodFruit"] == 0, str(acts))
+                and acts[0]["extraGoodFruit"] == 0,
+                f"plan={plan} acts={acts}")
 
     gs = make_state(bypass=True, cur="S09", opp_cur="S07",
                     opp_next="S09", opp_edge="E04", round_no=550,

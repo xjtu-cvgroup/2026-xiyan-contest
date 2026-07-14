@@ -304,11 +304,15 @@ class HybridStrategy(Strategy):
                 continue
 
             finish_tax = max(0, delayed_finish - opp_finish)
+            globally_mandatory = not self._reachable_without(
+                state, state.start_node, gate, node_id)
             rank = (0 if denial else 1, opp_eta, detour,
                     -finish_tax, -delay, node_id)
             candidates.append((rank, {
                 "target": node_id, "myEta": my_eta, "oppEta": opp_eta,
                 "delay": delay, "finishTax": finish_tax,
+                "stayDelay": stay_delay, "rerouteDelay": reroute_delay,
+                "globallyMandatory": globally_mandatory,
                 "detour": detour, "denial": denial,
                 "myFinish": finish_need, "oppFinish": delayed_finish,
             }))
@@ -412,9 +416,12 @@ class HybridStrategy(Strategy):
             return actions
         if self.log:
             self.log.info(
-                "hybrid: mobile target=%s eta=%s/%s delay=%s denial=%s",
+                "hybrid: mobile target=%s eta=%s/%s tax=%s "
+                "(stay=%s reroute=%s mandatory=%s) denial=%s",
                 plan["target"], plan["myEta"], plan["oppEta"],
-                plan["delay"], plan["denial"])
+                plan["delay"], plan.get("stayDelay"),
+                plan.get("rerouteDelay"), plan.get("globallyMandatory"),
+                plan["denial"])
         return self._replace_main_action(actions, P.a_move(nxt))
 
     def _score_actions(self, state):
