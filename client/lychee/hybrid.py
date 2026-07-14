@@ -60,7 +60,20 @@ class HybridStrategy(Strategy):
                 self.log.info("hybrid: initial mode=%s primary=%s",
                               self.mode, self.primary_choke)
 
-        if self.mode in (self.MODE_PRIMARY, self.MODE_GATE):
+        if self.mode == self.MODE_PRIMARY:
+            # 公开图/必经主墙仍由 Warden 决策，但它也会在途中发出普通点
+            # 免费截击卡。复卡状态机必须包住这条入口，不能只在旁路图的
+            # MOBILE 分支生效。
+            hold = self._mobile_reguard_action(state)
+            if hold:
+                if state.my_open_contests():
+                    return self._replace_main_action(
+                        self.warden.decide(state), hold)
+                return [hold]
+            actions = self.warden.decide(state)
+            self._remember_mobile_guard_action(state, actions)
+            return actions
+        if self.mode == self.MODE_GATE:
             return self.warden.decide(state)
 
         # 隐藏旁路图也必须完整继承 3.96.34 的 S02 博弈，不能只复用出牌
@@ -521,15 +534,26 @@ class HybridStrategy(Strategy):
             - finish_need - self.warden.EXIT_PAD
         action = self.warden.mobile_intercept_action(
             state, slack, allow_reserve=allow_reserve)
-        if action and action.get("action") == "SET_GUARD":
-            node_id = action.get("targetNodeId")
-            extra = action.get("extraGoodFruit", 0) or 0
-            # 只把普通节点的免费移动卡升级为有界驻守。关键关/宫门仍走
-            # 原 Warden 的付费墙纪律，避免把小补丁扩散成新的固定蹲点。
-            if node_id == state.me.get("currentNodeId") \
-                    and self.warden._guard_base_cost(state, node_id) + extra == 0:
-                self._mobile_hold_node = node_id
+        if action:
+            self._remember_mobile_guard_action(state, [action])
         return action
+
+    def _remember_mobile_guard_action(self, state, actions):
+        """锁存任意策略入口刚提交的普通点免费截击卡。"""
+        main = self._main_action(actions)
+        if not main or main.get("action") != "SET_GUARD":
+            return
+        me = state.me
+        node_id = main.get("targetNodeId")
+        extra = main.get("extraGoodFruit", 0) or 0
+        # 只把对手已经踏边后提交的普通节点免费卡升级为有界驻守。
+        # 关键关、宫门和提前埋伏仍由原 Warden 生命周期管理。
+        if not me or me.get("routeEdgeId") \
+                or node_id != me.get("currentNodeId") \
+                or self.warden._guard_base_cost(state, node_id) + extra != 0 \
+                or not self.warden._opp_inbound(state, node_id):
+            return
+        self._mobile_hold_node = node_id
 
     def _mobile_reguard_safe(self, state, node_id):
         """免费移动卡可续守一帧，且仍保住交付与最终墙先手。"""

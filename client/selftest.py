@@ -5426,6 +5426,56 @@ def test_hybrid_strategy():
                 and acts_h == acts_w,
                 f"hybrid={acts_h} warden={acts_w}")
 
+    # replay.report (3)：S10 仍是必经主墙时模式为 PRIMARY，但途中 S09
+    # 免费截击卡仍必须完整执行“首设->留守->被拆后复设”。此前测试只强制
+    # MODE_MOBILE，导致 PRIMARY 在复卡状态机之前直接返回而漏过实战入口。
+    primary_reguard = HybridStrategy()
+    gs_first = make_state(
+        race_variant=True, cur="S09", opp_cur="S07",
+        opp_next="S09", opp_edge="E04", opp_edge_ms=66240,
+        opp_edge_progress=9000, round_no=363, task_score=30,
+        opp_squads=2)
+    acts = primary_reguard.decide(gs_first)
+    ok &= check("hybrid: PRIMARY途中免费卡同步锁存复卡节点",
+                primary_reguard.mode == HybridStrategy.MODE_PRIMARY
+                and primary_reguard._mobile_hold_node == "S09"
+                and any(a["action"] == "SET_GUARD"
+                        and a["targetNodeId"] == "S09"
+                        and a["extraGoodFruit"] == 0 for a in acts),
+                f"mode={primary_reguard.mode} "
+                f"hold={primary_reguard._mobile_hold_node} acts={acts}")
+
+    gs_live = make_state(
+        race_variant=True, cur="S09", opp_cur="S07",
+        opp_next="S09", opp_edge="E04", opp_edge_ms=66240,
+        opp_edge_progress=13000, round_no=367, task_score=30,
+        opp_squads=2)
+    gs_live.nodes["S09"]["guard"] = {
+        "ownerTeamId": gs_live.my_team, "defense": 2,
+        "initialDefense": 2, "maxDefense": 6, "active": True,
+        "completeRound": 367}
+    acts = primary_reguard.decide(gs_live)
+    ok &= check("hybrid: PRIMARY途中免费卡生效后不立即离位",
+                any(a["action"] == "WAIT" for a in acts)
+                and not any(a["action"] == "MOVE" for a in acts),
+                f"hold={primary_reguard._mobile_hold_node} acts={acts}")
+
+    gs_dead = make_state(
+        race_variant=True, cur="S09", opp_cur="S07",
+        opp_next="S09", opp_edge="E04", opp_edge_ms=66240,
+        opp_edge_progress=14000, round_no=375, task_score=30,
+        opp_squads=2)
+    gs_dead.nodes["S09"]["guard"] = {
+        "ownerTeamId": gs_dead.my_team, "defense": 0,
+        "initialDefense": 2, "maxDefense": 6, "active": False,
+        "completeRound": 367}
+    acts = primary_reguard.decide(gs_dead)
+    ok &= check("hybrid: PRIMARY途中免费卡被拆后立即复设",
+                any(a["action"] == "SET_GUARD"
+                    and a["targetNodeId"] == "S09"
+                    and a["extraGoodFruit"] == 0 for a in acts),
+                f"hold={primary_reguard._mobile_hold_node} acts={acts}")
+
     # 固定 S10 主墙被攻坚后，不结束堵人策略：在 PRIMARY 模式内部切入
     # 2621 滚动墙，先抢下一汇合点，最终才可能接 S14。
     gs = make_state(cur="S10", opp_cur="S09", round_no=300)
