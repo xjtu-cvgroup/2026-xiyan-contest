@@ -123,6 +123,7 @@ class WardenStrategy(BaselineStrategy):
         self._s02_opening_path = []
         self._s02_resource_drawn = False
         self._s02_tempo_claim_started = False
+        self._s02_tempo_resource_type = None
 
     # ================= 初始化 =================
 
@@ -429,14 +430,26 @@ class WardenStrategy(BaselineStrategy):
     def _defense_card(self, state, contest):
         me = state.me
         res = me.get("resources") or {}
+        contest_target = contest.get("targetNodeId") or contest.get("nodeId")
+        contest_resource = contest.get("resourceType")
+        # 平台/本地裁判的资源窗口精简字段可能只给 contestType。用本局刚
+        # 提交的领取动作恢复对象，避免 S01/S02 马窗漏入通用兵争分支。
+        if contest.get("contestType") == P.CONTEST_RESOURCE \
+                and not contest_target:
+            cur = me.get("currentNodeId")
+            if cur == "S02" and self._s02_tempo_claim_started:
+                contest_target = cur
+                contest_resource = self._s02_tempo_resource_type
+            elif cur == state.start_node and self._s02_opening_resource:
+                contest_target = cur
+                contest_resource = self._s02_opening_resource
         # 变种图 S01 可能投放马。双方同时领取时，对手尚无马/
         # 疾行，因而无法合法打出唯一能克献贡的强行；献贡至少不败。
         if contest.get("contestType") == P.CONTEST_RESOURCE \
-                and contest.get("targetNodeId") \
-                in (state.start_node, "S02") \
-                and contest.get("resourceType") \
+                and contest_target in (state.start_node, "S02") \
+                and contest_resource \
                 in (P.FAST_HORSE, P.SHORT_HORSE) \
-                and (contest.get("targetNodeId") == "S02"
+                and (contest_target == "S02"
                      or self.s02_opening_active(state)) \
                 and not self._opp_can_qiang_xing(state) \
                 and self._xian_gong_available(state):
@@ -911,8 +924,23 @@ class WardenStrategy(BaselineStrategy):
         tail, path = state.graph.shortest_path(pos, "S02", speed)
         return edge_remain + tail if path else float("inf")
 
+    def _s02_horse_changes_gate_race(self, state, resource_type):
+        """S02 的马在计入移动中激活一帧后，是否仍能更早到 S14。"""
+        if resource_type not in (P.FAST_HORSE, P.SHORT_HORSE):
+            return False
+        direct, direct_path = self._travel_dynamic(
+            state, "S02", state.gate_node,
+            include_intermediate_process=True,
+            conservative_weather=True)
+        boosted, boosted_path = self._travel_dynamic(
+            state, "S02", state.gate_node, resource_type,
+            self._opening_horse_duration(resource_type),
+            start_elapsed=1, include_intermediate_process=True,
+            conservative_weather=True)
+        return bool(direct_path and boosted_path and boosted < direct)
+
     def _s02_tempo_resource_action(self, state, cur):
-        """领资源后仍能先启动 PROCESS，或领取完全塞进排队时才放行。"""
+        """保处理先手；同点高价值马若会改变宫门竞速，则主动争夺。"""
         if cur != "S02" or self._node_processed(state, cur) \
                 or self._s02_tempo_claim_started \
                 or self._score_farm_mode or self._deny_only_mode:
@@ -940,14 +968,25 @@ class WardenStrategy(BaselineStrategy):
             and opp.get("currentNodeId") == cur
             and proc.get("targetNodeId") == cur
             and proc_type == "PROCESS")
+        same_station_horse_race = bool(
+            not opp.get("routeEdgeId")
+            and opp.get("currentNodeId") == cur
+            and not proc_type
+            and not opp_processing_station
+            and self._s02_horse_changes_gate_race(state, resource_type))
         if opp_processing_station:
             safe = claim_frames <= self._process_remain(opp)
+        elif same_station_horse_race:
+            # 若直接 PROCESS，对手可独占这匹马并反超最终墙；资源窗双方
+            # 同时受相同窗口帧约束，争马不会单方面让出后续竞速预算。
+            safe = True
         else:
             # 必须在对手能到站的帧之前完成领取并提交 PROCESS。
             safe = claim_frames < self._opp_s02_arrival_lower_bound(state)
         if not safe:
             return None
         self._s02_tempo_claim_started = True
+        self._s02_tempo_resource_type = resource_type
         if self.log:
             self.log.info(
                 "warden: S02 tempo claim=%s frames=%d oppEta=%s oppProc=%s",
@@ -2045,6 +2084,19 @@ class WardenStrategy(BaselineStrategy):
             return True
         if self._deny_only_mode:
             return False           # 我方交付已死：墙就是唯一胜负手，不能离开
+        # 宫门已验核后，只在墙还有下一拍控制力时继续驻守。对手已经进站/
+        # 验核，或它贴边而当前卡已不存在、抑或卡亡后只剩不足5帧，均已
+        # 无法再次完成4帧设卡；继续 WAIT 只会把交付先手白送给对手。
+        if cur == state.gate_node and state.me.get("verified"):
+            opp_at_gate = (not opp.get("routeEdgeId")
+                           and opp.get("currentNodeId") == cur)
+            if opp_at_gate or opp.get("verified"):
+                return True
+            if self._opp_inbound(state, cur):
+                if not self._my_active_guard(state, cur):
+                    return True
+                if self._opp_edge_remaining(state) <= self.GUARD_MIN_LEAD:
+                    return True
         # ⓪b 当前 S10 墙快风化且可以证明 S14 接墙后对手到不了终点：
         # 才提前转宫门。不能只看防守值低，否则会把"守到数学死"
         # 误改成无谓早走。

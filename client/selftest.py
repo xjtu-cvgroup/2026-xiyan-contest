@@ -4645,11 +4645,18 @@ def test_warden_strategy():
     ok &= check("warden: S02未完成时继续争换乘",
                 a and a["action"] == "PROCESS", str(a))
 
-    # 组委会 Tips：首个窗口站新增资源。固定处理只有同帧才争夺，
-    # 所以同点时必须先 PROCESS；只有领取完仍能先启动处理才拿马。
+    # 组委会 Tips：首个窗口站新增资源。若马在计入移动中激活帧后仍能
+    # 改变 S14 竞速，同点必须争夺，不能先 PROCESS 把马独占权送给对手。
     gs = add_s02_resource(gs_at("S02", opp_cur="S02", round_no=220))
     a = ready_warden().main_action(gs)
-    ok &= check("warden: S02同点有马仍先PROCESS保底",
+    ok &= check("warden: S02同点竞速马先争资源",
+                a and a["action"] == "CLAIM_RESOURCE"
+                and a["resourceType"] == P.FAST_HORSE, str(a))
+
+    gs = add_s02_resource(
+        gs_at("S02", opp_cur="S02", round_no=220), P.ICE_BOX)
+    a = ready_warden().main_action(gs)
+    ok &= check("warden: S02同点非速度资源仍先PROCESS",
                 a and a["action"] == "PROCESS", str(a))
 
     gs = add_s02_resource(gs_at(
@@ -4718,6 +4725,13 @@ def test_warden_strategy():
         "contestType": P.CONTEST_RESOURCE, "targetNodeId": "S02",
         "resourceType": P.FAST_HORSE})
     ok &= check("warden: S02马窗对手无强行时献贡不败",
+                card == P.CARD_XIAN_GONG, card)
+
+    st = ready_warden()
+    st._s02_tempo_claim_started = True
+    st._s02_tempo_resource_type = P.FAST_HORSE
+    card = st._defense_card(gs, {"contestType": P.CONTEST_RESOURCE})
+    ok &= check("warden: S02马窗缺对象字段仍献贡不败",
                 card == P.CARD_XIAN_GONG, card)
 
     st = WardenStrategy()
@@ -5391,6 +5405,41 @@ def test_warden_strategy():
     ok &= check("warden: S14对手未踏边不提前临别卡",
                 a and a["action"] != "SET_GUARD",
                 str(a))
+
+    st = WardenStrategy()
+    st.camp_node = "S14"
+    st._plans_ready = True
+    a = st.main_action(gs_at("S14", opp_cur="S14", round_no=400,
+                             phase=P.PHASE_RUSH, verified=True))
+    ok &= check("warden: S14已验核且对手进站立即交付",
+                a and a["action"] == "MOVE"
+                and a["targetNodeId"] == "S15", str(a))
+
+    gs = gs_at("S14", opp_cur="S13", opp_next="S14", opp_edge="E09",
+               round_no=400, phase=P.PHASE_RUSH, verified=True)
+    for p in gs.players.values():
+        if p["playerId"] != 1001:
+            p["edgeProgressMs"] = p["edgeTotalMs"] - 5000
+    gs.nodes["S14"]["guard"] = {
+        "ownerTeamId": gs.my_team, "defense": 1,
+        "maxDefense": 4, "active": True}
+    st = WardenStrategy()
+    st.camp_node = "S14"
+    st._plans_ready = True
+    a = st.main_action(gs)
+    ok &= check("warden: S14卡亡后不足复卡窗立即交付",
+                a and a["action"] == "MOVE"
+                and a["targetNodeId"] == "S15", str(a))
+
+    for p in gs.players.values():
+        if p["playerId"] != 1001:
+            p["edgeProgressMs"] = p["edgeTotalMs"] - 9000
+    st = WardenStrategy()
+    st.camp_node = "S14"
+    st._plans_ready = True
+    a = st.main_action(gs)
+    ok &= check("warden: S14卡亡后仍可复卡则继续驻守",
+                a and a["action"] == "WAIT", str(a))
 
     st = WardenStrategy()
     st.camp_node = "S10"
