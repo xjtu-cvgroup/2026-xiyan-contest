@@ -623,7 +623,8 @@ class WardenStrategy(BaselineStrategy):
         return 1 if state.node(node_id).get("nodeType") \
             in ("KEY_PASS", "GATE") else 0
 
-    def _guardable(self, state, node_id, extra=None, mobile=False):
+    def _guardable(self, state, node_id, extra=None, mobile=False,
+                   allow_reserve=False):
         """该节点当前无有效卡，成本、重试间隔均允许。"""
         g = state.node(node_id).get("guard")
         if g and g.get("active", g.get("defense", 0) > 0):
@@ -631,7 +632,8 @@ class WardenStrategy(BaselineStrategy):
         if extra is None:
             extra = 1 if node_id == state.gate_node else self.GUARD_EXTRA
         cost = self._guard_base_cost(state, node_id) + extra
-        if (state.me.get("goodFruit", 0) or 0) - cost < self.FRUIT_RESERVE:
+        reserve = 0 if allow_reserve else self.FRUIT_RESERVE
+        if (state.me.get("goodFruit", 0) or 0) - cost < reserve:
             return False
         gap = self.MOBILE_GUARD_RETRY_GAP if mobile \
             else self.GUARD_RETRY_GAP
@@ -717,6 +719,8 @@ class WardenStrategy(BaselineStrategy):
 
         # 非 RUSH 时小分队可每次削 2 防；把公开弹药纳入“留下来拆”的上界。
         squads = opp.get("squadAvailable")
+        if squads is None:
+            squads = 8  # 字段缺失按最强拆卡能力估计，不能误证“锁死”
         dispatches = int(math.ceil(defense / 2.0))
         if state.phase != P.PHASE_RUSH and squads is not None \
                 and squads >= dispatches * 2:
@@ -724,7 +728,8 @@ class WardenStrategy(BaselineStrategy):
             stay_delay = min(stay_delay, clear_time)
         return stay_delay
 
-    def mobile_intercept_action(self, state, delivery_slack=None):
+    def mobile_intercept_action(self, state, delivery_slack=None,
+                                allow_reserve=False):
         """对手踏向我方所在节点时，按确定性收益落一张滚动截击卡。
 
         可供 Hybrid 的 SCORE 模式复用；不改变传统规划器的其余动作。
@@ -752,7 +757,9 @@ class WardenStrategy(BaselineStrategy):
             return None
 
         extra = self._mobile_guard_extra(state, cur)
-        if not self._guardable(state, cur, extra=extra, mobile=True):
+        if not self._guardable(
+                state, cur, extra=extra, mobile=True,
+                allow_reserve=allow_reserve):
             return None
         delay = self._mobile_guard_delay(state, cur, extra, edge_remain)
         if delay < self.MOBILE_GUARD_MIN_DELAY:

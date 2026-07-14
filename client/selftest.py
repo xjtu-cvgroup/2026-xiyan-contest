@@ -5305,9 +5305,11 @@ def test_hybrid_strategy():
         inquire = json.load(f)["msg_data"]
 
     def make_state(bypass=False, short_gate=False, terminal_bypass=False,
+                   direct_gate=False,
                    cur="S01", opp_cur="S01", round_no=1,
                    phase=P.PHASE_NORMAL, task_score=0, verified=False,
-                   opp_next=None, opp_edge=None, opp_edge_ms=18000):
+                   opp_next=None, opp_edge=None, opp_edge_ms=18000,
+                   good_fruit=70, opp_squads=8):
         s = json.loads(json.dumps(start))
         if bypass:
             s["edges"].append({
@@ -5324,6 +5326,11 @@ def test_hybrid_strategy():
                 "edgeId": "E_BYPASS_GATE", "fromNodeId": "S12",
                 "toNodeId": "S15", "routeType": P.BRANCH,
                 "distance": 18, "bidirectional": True})
+        if direct_gate:
+            s["edges"].append({
+                "edgeId": "E_DIRECT_GATE", "fromNodeId": "S10",
+                "toNodeId": "S14", "routeType": P.BRANCH,
+                "distance": 75, "bidirectional": True})
         gs = GameState(1001)
         gs.on_start(s)
         d = json.loads(json.dumps(inquire))
@@ -5336,7 +5343,7 @@ def test_hybrid_strategy():
                 p.update(state=P.ST_IDLE, currentNodeId=cur,
                          nextNodeId=None, routeEdgeId=None,
                          currentProcess=None, buffs=[], resources={},
-                         freshness=90.0, goodFruit=70, badFruit=1,
+                         freshness=90.0, goodFruit=good_fruit, badFruit=1,
                          taskScore=task_score, squadAvailable=8,
                          guardActionPoint=4, rushTacticUsedCount=0,
                          verified=verified, delivered=False, retired=False)
@@ -5346,7 +5353,7 @@ def test_hybrid_strategy():
                          routeEdgeId=opp_edge, edgeTotalMs=opp_edge_ms,
                          edgeProgressMs=0, currentProcess=None, buffs=[],
                          goodFruit=70, badFruit=1, taskScore=120,
-                         squadAvailable=8, verified=False,
+                         squadAvailable=opp_squads, verified=False,
                          delivered=False, retired=False)
         for n in d["nodes"]:
             n["hasObstacle"] = False
@@ -5405,6 +5412,16 @@ def test_hybrid_strategy():
                         and a["targetNodeId"] == "S11" for a in acts)),
                 f"plan={plan} acts={acts}")
 
+    # 抢到 S11 后，对手在 S09 停站做任务会暂时没有 routeEdgeId。目标仍
+    # 位于其合理最短走廊上时必须守住，不能被 Planner 立即带走。
+    gs_hold = make_state(bypass=True, cur="S11", opp_cur="S09",
+                         round_no=110)
+    acts_hold = hybrid.decide(gs_hold)
+    ok &= check("hybrid: 对手停站时保持动态墙粘性不离位",
+                hybrid.mobile_target == "S11"
+                and not any(a["action"] == "MOVE" for a in acts_hold),
+                f"target={hybrid.mobile_target} acts={acts_hold}")
+
     # 任务长度按真实先手窗口构造：短任务仍能完成设卡，长任务会错失。
     lead_budget = max(1, plan["oppEta"] - plan["myEta"]
                       - hybrid.warden.MOBILE_GUARD_PAD - 1)
@@ -5438,6 +5455,39 @@ def test_hybrid_strategy():
     ok &= check("hybrid: 长任务会丢截击窗口时优先抢动态墙",
                 any(a["action"] == "MOVE"
                     and a["targetNodeId"] == "S11" for a in acts), str(acts))
+
+    # 直达宫门是我方得分最短路，但 S11 墙能把对手的极限交付推过 600。
+    # 此时“锁死”高于 12 帧普通绕路纪律，必须主动拐去 S11。
+    gs = make_state(bypass=True, direct_gate=True, cur="S10",
+                    opp_cur="S05", opp_next="S09", opp_edge="E19",
+                    opp_edge_ms=100000, opp_squads=0, round_no=395,
+                    phase=P.PHASE_RUSH)
+    hybrid = HybridStrategy()
+    hybrid.mode = HybridStrategy.MODE_MOBILE
+    plan = hybrid._mobile_control_plan(gs)
+    acts = hybrid.decide(gs)
+    ok &= check("hybrid: 确定锁死优先于普通12帧绕路上限",
+                bool(plan and plan["denial"]
+                     and plan["detour"] > hybrid.MOBILE_APPROACH_MAX_DETOUR
+                     and any(a["action"] == "MOVE"
+                             and a["targetNodeId"] == "S11" for a in acts)),
+                f"plan={plan} acts={acts}")
+
+    # 只剩关键关设卡所需的 2 篓果时，普通卡会被底仓拦截；但若该卡已
+    # 证明能让对手无法交付，就应动用底仓立即落卡。
+    gs = make_state(cur="S10", opp_cur="S09", opp_next="S10",
+                    opp_edge="E05", opp_edge_ms=60000,
+                    good_fruit=2, opp_squads=0, round_no=400,
+                    phase=P.PHASE_RUSH)
+    hybrid = HybridStrategy()
+    hybrid.mode = HybridStrategy.MODE_MOBILE
+    plan = hybrid._mobile_control_plan(gs)
+    acts = hybrid.decide(gs)
+    ok &= check("hybrid: 确定锁死可动用好果底仓立即设卡",
+                bool(plan and plan["denial"]
+                     and acts and acts[0]["action"] == "SET_GUARD"
+                     and acts[0]["targetNodeId"] == "S10"),
+                f"plan={plan} acts={acts}")
 
     gs = make_state(bypass=True, cur="S09", opp_cur="S07",
                     opp_next="S09", opp_edge="E04", round_no=100)
