@@ -6016,8 +6016,8 @@ def test_hybrid_strategy():
                         and a.get("targetNodeId") == "S03" for a in acts),
                 f"farm={hybrid._s02_farm_only} acts={acts}")
 
-    # 本次长旁路变种：我方 r54 先完成 S02、对手仍困在 S02。S10 已可绕，
-    # 但 S14 仍是不可绕最终墙；从此启用领先预算，而不是立刻锁死零分路线。
+    # 本次长旁路变种：我方 r54 先完成 S02、对手只剩 3 帧处理。3 帧还
+    # 不是墙权，但必须启动竞速保险，把它扩大到至少 5 帧设卡生效窗。
     gs = make_state(bypass=True, bypass_distance=85, race_variant=True,
                     cur="S02",
                     opp_cur="S02", round_no=54)
@@ -6031,12 +6031,38 @@ def test_hybrid_strategy():
     hybrid = HybridStrategy()
     hybrid.mode = HybridStrategy.MODE_MOBILE
     acts = hybrid.decide(gs)
-    ok &= check("hybrid: 长旁路S02先手启动S14领先预算",
+    ok &= check("hybrid: S02小先手启动追墙保险",
                 hybrid.mode == HybridStrategy.MODE_MOBILE
                 and hybrid._gate_pace_active
                 and hybrid.warden._forced_camp is None
                 and any(a.get("action") == "MOVE" for a in acts),
-                f"mode={hybrid.mode} acts={acts}")
+                f"mode={hybrid.mode} budget={hybrid._gate_lead_budget(gs)} "
+                f"acts={acts}")
+
+    # 领先合同不能依赖双方恰好同停 S02。我方已离站且对手仍在后方时，
+    # 只要实时保守/乐观 ETA 证明有宫门先手，就必须自动启用。
+    gs = make_state(bypass=True, bypass_distance=85, race_variant=True,
+                    cur="S03", opp_cur="S01", round_no=100)
+    hybrid = HybridStrategy()
+    hybrid.mode = HybridStrategy.MODE_MOBILE
+    hybrid.warden._s02_opening = False
+    hybrid.warden._processed_nodes.add("S02")
+    acts = hybrid.decide(gs)
+    ok &= check("hybrid: 明显领先离开S02后仍自动建立领先合同",
+                hybrid._gate_pace_active,
+                f"budget={hybrid._gate_lead_budget(gs)} acts={acts}")
+
+    # 若所有 S14 入边短于设卡生效窗，物理上没有宫门合同，必须回落得分。
+    gs = make_state(bypass=True, bypass_distance=85, race_variant=True,
+                    short_gate=True, cur="S03", opp_cur="S01",
+                    round_no=100)
+    hybrid = HybridStrategy()
+    hybrid.mode = HybridStrategy.MODE_MOBILE
+    hybrid.warden._s02_opening = False
+    hybrid.warden._processed_nodes.add("S02")
+    hybrid.decide(gs)
+    ok &= check("hybrid: S14短入边不可堵时不伪造领先合同",
+                not hybrid._gate_pace_active)
 
     # 同一个脚下短任务：对手与我方同位时会吃掉设卡先手，必须赶路；
     # 对手已经进入公开长读条后，任务能完整塞入领先预算，应该照做。
@@ -6071,6 +6097,23 @@ def test_hybrid_strategy():
         gs, [P.a_wait()], Plan("deliver"))
     ok &= check("hybrid: 零领先预算不被顺手WAIT磨掉一帧",
                 any(a.get("action") == "MOVE" for a in acts),
+                f"budget={hybrid._gate_lead_budget(gs)} acts={acts}")
+
+    # 已在 S14 时没有“继续向门推进”这一回退动作。超预算任务必须变成
+    # WAIT，让 decide 当帧切 Gate Warden，不能原样离门去拿任务。
+    gate_task = {"taskId": "T_GATE_LEAVE", "nodeId": "S11",
+                 "processRound": 8, "baseScore": 30}
+    gate_plan = Plan("task", task=gate_task, position="S11")
+    gs = make_state(bypass=True, bypass_distance=85, race_variant=True,
+                    cur="S14", opp_cur="S13", round_no=360)
+    hybrid = HybridStrategy()
+    hybrid.mode = HybridStrategy.MODE_MOBILE
+    hybrid._gate_pace_active = True
+    acts = hybrid._gate_pace_actions(
+        gs, [P.a_move("S13")], gate_plan)
+    ok &= check("hybrid: 已到S14的超预算任务不得原样离门",
+                any(a.get("action") == "WAIT" for a in acts)
+                and not any(a.get("action") == "MOVE" for a in acts),
                 f"budget={hybrid._gate_lead_budget(gs)} acts={acts}")
 
     # replay r319：对手已经 S09->S10，我方在 S09。E25 长旁路虽能绕开
@@ -6228,6 +6271,19 @@ def test_hybrid_strategy():
                 and not any(a["action"] == "SET_GUARD" for a in acts),
                 f"hold={recovered_hybrid._mobile_hold_node} "
                 f"budget={recovered_hybrid._gate_lead_budget(gs_hold)} acts={acts}")
+
+    # 墙已经生效、对手还远在入边时，等待本身没有额外防守收益；只要任务
+    # 读完后仍留足完整复卡窗，就应安全吃脚下任务，而不是空等到风化。
+    hold_task = {"taskId": "T_HOLD_SCORE", "nodeId": "S09",
+                 "processRound": 4, "baseScore": 30, "active": True,
+                 "completed": False, "failed": False,
+                 "ownerPlayerId": 0, "protectionPlayerId": 0}
+    gs_hold.tasks = [hold_task]
+    acts = recovered_hybrid.decide(gs_hold)
+    ok &= check("hybrid: 有效移动墙期间安全兑现脚下任务",
+                any(a.get("action") == "CLAIM_TASK"
+                        and a.get("taskId") == "T_HOLD_SCORE" for a in acts),
+                str(acts))
 
     # 普通节点也可能由 Planner 花果堆成防6；它不是免费滚动卡，不能被
     # 现场恢复扩大成长期驻守。
@@ -6429,6 +6485,44 @@ def test_hybrid_strategy():
     ok &= check("hybrid: S14设卡不得吃掉我方交付余量",
                 action and action["action"] != "SET_GUARD",
                 str(action))
+
+    # 第二张宫门卡早几帧生效时，对手可能恰好冻结在剩余 6-7 帧，旧版
+    # 只认 <=5 帧而整张卡都不敢离场。按我方卡龄 + 边余量 + 必验核 +
+    # 最快交付作完整证明：必死就立即走；时间尚足则继续守。
+    gs = make_state(
+        bypass=True, cur="S14", opp_cur="S13", round_no=464,
+        phase=P.PHASE_RUSH, task_score=120, verified=True,
+        opp_next="S14", opp_edge="E09", opp_edge_ms=18000,
+        opp_edge_progress=11000)
+    gs.nodes["S14"]["guard"] = {
+        "ownerTeamId": gs.my_team, "defense": 4,
+        "initialDefense": 4, "maxDefense": 4, "active": True}
+    st = WardenStrategy(forced_camp="S14")
+    st.camp_node, st._plans_ready = "S14", True
+    st._guard_sent["S14"] = 460
+    action = st.main_action(gs)
+    ok &= check("hybrid: S14现墙已证明对手必死则立即交付",
+                st._active_gate_wall_kills(gs, "S14")
+                and action and action["action"] == "MOVE"
+                and action["targetNodeId"] == "S15",
+                f"wall={st._my_guard_remaining(gs, 'S14')} action={action}")
+
+    gs = make_state(
+        bypass=True, cur="S14", opp_cur="S13", round_no=451,
+        phase=P.PHASE_RUSH, task_score=120, verified=True,
+        opp_next="S14", opp_edge="E09", opp_edge_ms=18000,
+        opp_edge_progress=3000)
+    gs.nodes["S14"]["guard"] = {
+        "ownerTeamId": gs.my_team, "defense": 4,
+        "initialDefense": 4, "maxDefense": 4, "active": True}
+    st = WardenStrategy(forced_camp="S14")
+    st.camp_node, st._plans_ready = "S14", True
+    st._guard_sent["S14"] = 418
+    action = st.main_action(gs)
+    ok &= check("hybrid: S14风化边界不凭空多算30帧后早走",
+                not st._active_gate_wall_kills(gs, "S14")
+                and action and action["action"] == "WAIT",
+                f"wall={st._my_guard_remaining(gs, 'S14')} action={action}")
     return ok
 
 

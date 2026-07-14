@@ -5,6 +5,7 @@
 - KEY_PASS 可绕：移动守望者主动抢汇合点，Planner 负责可塞入余量的任务；
 - 移动局后段能严格证明抢到宫门先手：粘性切入 S14 Warden。
 """
+import heapq
 import math
 
 from . import protocol as P
@@ -117,9 +118,10 @@ class HybridStrategy(Strategy):
                     self._score_actions(state), hold)
             return [hold]
 
-        # S02 已拿到明确处理先手时，开始保护最终墙的领先预算。此处不再
-        # 直接粘性切到 S14：只要任务的完整机会成本吃不掉先手，就继续得分。
-        if self._should_preserve_s02_gate_lead(state):
+        # 只要实时 ETA 已经证明我们保有最终墙先手，就启动逐帧领先合同。
+        # 不再要求双方恰好同停 S02：明显领先离站、走可选 S02 快线或中途
+        # 靠任务/天气建立的先手，都必须服从同一个“保先手内最大化得分”。
+        if self._should_preserve_gate_lead(state):
             self._gate_pace_active = True
 
         actions = self._score_actions(state)
@@ -143,9 +145,12 @@ class HybridStrategy(Strategy):
             if self._gate_pace_active and not plan.get("denial"):
                 main = self._main_action(mobile_actions)
                 typ = main.get("action") if main else None
-                # 真落卡会给对手增加延误，不作为纯支出拦截；普通抢位的
-                # 绕路和驻守则逐帧从最终墙领先里付款。
-                if typ != "SET_GUARD":
+                # 动态卡点本身就是更早的领先合同；若动作已被它的 ETA
+                # 证明安全，不再叠加 S14 合同重复收费。只有动态合同没
+                # 覆盖住该动作时，才回落最终墙账本兜底。
+                mobile_safe = self._action_fits_mobile_lead(
+                    state, main, plan)
+                if typ != "SET_GUARD" and not mobile_safe:
                     if typ == "MOVE":
                         pace_cost = plan.get("detour", 999)
                     elif typ == "WAIT":
@@ -507,53 +512,151 @@ class HybridStrategy(Strategy):
         speed = P.SPEED_RUSH if optimistic else P.BASE_SPEED
         return int(math.ceil(remain / max(1, speed)))
 
-    def _gate_eta(self, state, player, optimistic=False):
-        if not player or player.get("delivered") or player.get("retired"):
-            return 999
+    @staticmethod
+    def _shortest_move_work(state, src, dst):
+        """忽略天气/处理的最小移动量；速度时序随后逐帧模拟。"""
+        if not src or not dst:
+            return math.inf
+        if src == dst:
+            return 0
+        dist = {src: 0}
+        queue = [(0, src)]
+        while queue:
+            moved, cur = heapq.heappop(queue)
+            if moved > dist.get(cur, math.inf):
+                continue
+            if cur == dst:
+                return moved
+            for nxt, edge in state.graph.neighbors(cur):
+                total = moved + state.graph.edge_total_move(edge)
+                if total < dist.get(nxt, math.inf):
+                    dist[nxt] = total
+                    heapq.heappush(queue, (total, nxt))
+        return math.inf
+
+    def _opponent_legal_gate_eta(self, state, player):
+        """按规则可实现的对手最快宫门 ETA，不把未来疾行提前到当前帧。
+
+        仍给对手最有利条件：晴天、零障碍、零中转处理、资源瞬时启用，
+        并允许马的有效帧避开疾行窗口（比真实执行更快，保证下界安全）。
+        """
         moving = bool(player.get("routeEdgeId") and player.get("nextNodeId"))
         anchor = player.get("nextNodeId") if moving \
             else player.get("currentNodeId")
         if not anchor:
             return 999
 
-        if optimistic:
-            boost_type, boost_rem = P.RUSH_SPEED, RUSH_SPEED_FRAMES
-            edge_frames = self._edge_remaining_frames(player, True) \
-                if moving else 0
-            boost_type, boost_rem = self.warden._consume_boost(
-                boost_type, boost_rem, edge_frames)
-        else:
-            boost_type, boost_rem, _ = self.warden._active_speed_buff(
-                state, player)
-            if moving:
-                if state.enemy_guard(anchor):
-                    return 999
-                edge_frames, boost_type, boost_rem = \
-                    self._conservative_edge_remaining(
-                        state, player, boost_type, boost_rem)
-                if edge_frames >= 999:
-                    return 999
+        work = self._shortest_move_work(state, anchor, state.gate_node)
+        if work == math.inf:
+            return 999
+        if moving:
+            edge = state.graph.edges.get(player.get("routeEdgeId"))
+            total = player.get("edgeTotalMs")
+            if not total and edge:
+                total = state.graph.edge_total_move(edge)
+            work += max(0, (total or 0)
+                        - (player.get("edgeProgressMs") or 0))
+
+        resources = player.get("resources") or {}
+
+        def count(resource_type):
+            try:
+                return max(0, int(resources.get(resource_type, 0) or 0))
+            except (TypeError, ValueError):
+                return 0
+
+        fast_frames = count(P.FAST_HORSE) * self.warden._opening_horse_duration(
+            P.FAST_HORSE)
+        short_frames = count(P.SHORT_HORSE) * self.warden._opening_horse_duration(
+            P.SHORT_HORSE)
+        rush_frames = 0
+        active_rush = False
+        defaults = {
+            P.FAST_HORSE: self.warden._opening_horse_duration(P.FAST_HORSE),
+            P.SHORT_HORSE: self.warden._opening_horse_duration(P.SHORT_HORSE),
+            P.RUSH_SPEED: RUSH_SPEED_FRAMES,
+        }
+        for buff in player.get("buffs") or []:
+            typ = buff.get("type") or buff.get("buffType")
+            if typ not in defaults:
+                continue
+            remaining = self.warden._buff_remaining(buff, defaults[typ])
+            if typ == P.FAST_HORSE:
+                fast_frames += remaining
+            elif typ == P.SHORT_HORSE:
+                short_frames += remaining
             else:
-                edge_frames = 0
+                rush_frames += remaining
+                active_rush = active_rush or remaining > 0
+
+        used = player.get("rushTacticUsedCount")
+        future_rush = not active_rush and (used is None or used == 0)
+        frames = self._visible_process_remain(player)
+        while work > 0 and frames < 2000:
+            absolute_round = state.round + frames
+            if future_rush and absolute_round >= RUSH_EARLIEST:
+                rush_frames += RUSH_SPEED_FRAMES
+                future_rush = False
+            if rush_frames > 0:
+                speed = P.SPEED_RUSH
+                rush_frames -= 1
+            elif fast_frames > 0:
+                speed = P.SPEED_FAST_HORSE
+                fast_frames -= 1
+            elif short_frames > 0:
+                speed = P.SPEED_SHORT_HORSE
+                short_frames -= 1
+            else:
+                speed = P.BASE_SPEED
+            work -= speed
+            frames += 1
+        return frames if work <= 0 else 999
+
+    def _gate_eta(self, state, player, optimistic=False):
+        if not player or player.get("delivered") or player.get("retired"):
+            return 999
+        if optimistic:
+            return self._opponent_legal_gate_eta(state, player)
+        moving = bool(player.get("routeEdgeId") and player.get("nextNodeId"))
+        anchor = player.get("nextNodeId") if moving \
+            else player.get("currentNodeId")
+        if not anchor:
+            return 999
+
+        boost_type, boost_rem, _ = self.warden._active_speed_buff(
+            state, player)
+        if moving:
+            if state.enemy_guard(anchor):
+                return 999
+            edge_frames, boost_type, boost_rem = \
+                self._conservative_edge_remaining(
+                    state, player, boost_type, boost_rem)
+            if edge_frames >= 999:
+                return 999
+        else:
+            edge_frames = 0
 
         include_current = False
         if moving:
             include_current = anchor != state.gate_node
         elif player.get("playerId") == state.player_id:
             node = state.node(anchor)
+            planner_done = self.planner._last_stationary_node == anchor \
+                and self.planner._processed_here
+            warden_done = self.warden._node_processed(state, anchor)
             include_current = bool(
                 node.get("processType")
                 and node.get("processType") != "VERIFY"
-                and not self.planner._processed_here)
+                and not planner_done and not warden_done)
 
-        travel_kwargs = {} if optimistic else self._gate_travel_kwargs(state)
+        travel_kwargs = self._gate_travel_kwargs(state)
         eta, path = self.warden._travel_dynamic(
             state, anchor, state.gate_node, boost_type, boost_rem,
             start_elapsed=edge_frames,
             include_current_process=include_current,
-            include_intermediate_process=not optimistic,
-            conservative_weather=not optimistic, **travel_kwargs)
-        if not optimistic and player.get("playerId") == state.player_id \
+            include_intermediate_process=True,
+            conservative_weather=True, **travel_kwargs)
+        if player.get("playerId") == state.player_id \
                 and not self._gate_route_executable(
                     state, anchor, path, moving=moving):
             return 999
@@ -751,6 +854,27 @@ class HybridStrategy(Strategy):
             return False
         return self._gate_lead_budget(state) >= 1
 
+    def _mobile_hold_score_action(self, state, node_id):
+        """有效移动墙已成立时，把确定安全的等待帧兑换成脚下收益。"""
+        action = self.warden._farm_here_safe(state, node_id)
+        if not action:
+            return None
+        typ = action.get("action")
+        if typ == "CLAIM_TASK":
+            task = next((t for t in state.claimable_tasks()
+                         if t.get("taskId") == action.get("taskId")), None)
+            cost = (task.get("processRound", 4) if task else 4) + 1
+        elif typ == "CLAIM_RESOURCE":
+            cost = 2
+        else:
+            return None
+        # 即使卡在读条第一帧被远程拆掉，任务结束后仍至少留出完整的
+        # T->T+5 复卡窗；否则继续 WAIT，绝不拿任务赌掉墙权。
+        if self.warden._opp_edge_remaining(state) \
+                < cost + self.warden.MOBILE_GUARD_PAD:
+            return None
+        return action
+
     def _mobile_reguard_action(self, state):
         """对手仍在入边时守住免费卡；拆掉后仍在边上则立即复卡。"""
         if self._fixed_process_pending(state):
@@ -791,7 +915,8 @@ class HybridStrategy(Strategy):
         active = bool(guard and guard.get("ownerTeamId") == state.my_team
                       and guard.get("active", guard.get("defense", 0) > 0))
         if active:
-            return P.a_wait()
+            score = self._mobile_hold_score_action(state, node_id)
+            return score or P.a_wait()
 
         action = self._score_mobile_intercept(
             state,
@@ -1036,6 +1161,8 @@ class HybridStrategy(Strategy):
             cost = 2
         elif typ == "USE_RESOURCE":
             cost = 1
+        elif typ == "WAIT":
+            cost = 1
         return cost is not None and plan["myEta"] + cost \
             + self.warden.MOBILE_GUARD_PAD <= plan["oppEta"]
 
@@ -1107,15 +1234,15 @@ class HybridStrategy(Strategy):
         return bool(cur_path and next_path) \
             and edge_eta + next_eta <= cur_eta + self.MOBILE_ROUTE_TOLERANCE
 
-    def _should_preserve_s02_gate_lead(self, state):
-        """换乘完成领先时启动最终墙节奏账本，不在这里直接锁死路线。"""
+    def _should_preserve_gate_lead(self, state):
+        """实时证明存在宫门先手后启动节奏账本，不依赖特定站位。"""
         me, opp = state.me, state.opp
-        if not me or not opp or me.get("routeEdgeId") \
-                or me.get("currentNodeId") != "S02":
+        if not me or not opp or self.mode != self.MODE_MOBILE \
+                or self._s02_farm_only or self._s02_deny_only \
+                or self.warden._score_farm_mode \
+                or self.warden._deny_only_mode:
             return False
-        if not self.warden._node_processed(state, "S02"):
-            return False
-        if opp.get("routeEdgeId") or opp.get("currentNodeId") != "S02":
+        if me.get("verified") or me.get("delivered") or me.get("retired"):
             return False
         if opp.get("verified") or opp.get("delivered") or opp.get("retired"):
             return False
@@ -1125,8 +1252,20 @@ class HybridStrategy(Strategy):
             return False
         my_eta = self._gate_eta(state, me, optimistic=False)
         remain = state.duration_round - state.round
-        return my_eta < 999 and self._my_finish_need(state, my_eta) \
-            + self.warden.EXIT_PAD <= remain
+        if my_eta >= 999 or self._my_finish_need(state, my_eta) \
+                + self.warden.EXIT_PAD > remain:
+            return False
+        # 对手按晴天、合法疾行时序、零中转处理下界；我方按天气、有限
+        # 增益、障碍/敌卡和处理站上界。非负预算是真墙权；此外我方刚在
+        # S02 完成处理、对手仍停在 S02 时启动竞速保险，把不足 5 帧的
+        # 小先手扩大成可落卡先手，而不是误称已经拥有墙权。
+        if self._gate_lead_budget(state) >= 0:
+            return True
+        return bool(not me.get("routeEdgeId")
+                    and me.get("currentNodeId") == "S02"
+                    and self.warden._node_processed(state, "S02")
+                    and not opp.get("routeEdgeId")
+                    and opp.get("currentNodeId") == "S02")
 
     def _gate_pace_expired(self, state):
         me, opp = state.me, state.opp
@@ -1154,9 +1293,8 @@ class HybridStrategy(Strategy):
         """仍能保证先完成设卡的可消费帧数；负数表示必须立即追门。"""
         my_eta = self._gate_eta(state, state.me, optimistic=False)
         opp_eta = self._gate_eta(state, state.opp, optimistic=True)
-        # 对手 ETA 仍按疾行、晴天、零中转处理的极限下界；唯一加回的是
-        # 当前公开读条剩余帧，因为这部分时间已经发生且不能撤销。
-        opp_eta += self._visible_process_remain(state.opp)
+        # 对手 ETA 按合法时序的速度下界：当前马可立即用，疾行最早 r390；
+        # 晴天、零障碍、零中转处理仍全部让利给对手。
         margin = self.warden.MOBILE_GUARD_PAD \
             if self._opponent_gate_committed(state) else self.GATE_LEAD_MARGIN
         return opp_eta - my_eta - margin
@@ -1253,8 +1391,13 @@ class HybridStrategy(Strategy):
             return actions
 
         cur = me.get("currentNodeId")
-        if not cur or cur == state.gate_node:
+        if not cur:
             return actions
+        if cur == state.gate_node:
+            # 已在宫门时无法再“向宫门推进”。原样返回会被上层误判为
+            # 得分动作安全，进而离开 S14。改成 WAIT 让调用方识别合同
+            # 不成立并当帧粘性切入 Gate Warden。
+            return self._replace_main_action(actions, P.a_wait())
         advance = self.warden._advance(state, cur, state.gate_node)
         if advance.get("action") == "WAIT":
             return actions

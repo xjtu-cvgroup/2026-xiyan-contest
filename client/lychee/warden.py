@@ -2170,6 +2170,8 @@ class WardenStrategy(BaselineStrategy):
             if self._opp_inbound(state, cur):
                 if not self._my_active_guard(state, cur):
                     return True
+                if self._active_gate_wall_kills(state, cur):
+                    return True
                 if self._opp_edge_remaining(state) <= self.GUARD_MIN_LEAD:
                     return True
         # ⓪b 当前 S10 墙快风化且可以证明 S14 接墙后对手到不了终点：
@@ -2214,6 +2216,37 @@ class WardenStrategy(BaselineStrategy):
         if not p1 or not p2:
             return 999
         return max(0, gate_term * self.OPP_SPEED_MARGIN) + DELIVER_FRAMES
+
+    def _active_gate_wall_kills(self, state, cur):
+        """现有宫门卡足以把边上对手拖过结算线时，允许我方立即交付。
+
+        这里只证明已经踏上宫门入边、RUSH 中无法再派小分队的对手。
+        卡寿命、边上剩余、强制验核和宫门后最快路全部取对手有利值；
+        即便这份下界仍超过剩余帧，继续站岗便只有鲜度损失。
+        """
+        opp = state.opp
+        if state.phase != P.PHASE_RUSH or not self._opp_inbound(state, cur) \
+                or not self._my_active_guard(state, cur):
+            return False
+        wall = self._my_guard_remaining(state, cur)
+        if wall <= 0:
+            return False
+        edge = self._opp_edge_remaining(state)
+        after = self._opp_delivery_lower_bound(state, cur)
+        if after >= 999:
+            return True
+        verify = 0 if opp.get("verified") else self._gate_verify_frames(state)
+        earliest = wall + edge + verify + after
+        remain = state.duration_round - state.round
+        # 帧序只留 1 帧边界；wall/after 本身都已向对手方向低估。
+        dead = earliest > remain + 1
+        if dead and self.log:
+            self.log.info(
+                "warden: active gate wall proves death "
+                "(wall %.0f + edge %.0f + verify %.0f + after %.0f "
+                "> remain %d), leaving",
+                wall, edge, verify, after, remain)
+        return dead
 
     def _eta_to_gate(self, state, cur, speed, include_current=False):
         frames, path = self._shortest(state, cur, state.gate_node, speed)
@@ -2387,9 +2420,18 @@ class WardenStrategy(BaselineStrategy):
                         break
                     except (TypeError, ValueError):
                         pass
+        if age is None:
+            # 平台不回传卡龄，但我方提交帧是已知的。SET_GUARD 最早在
+            # 提交后第 3 帧完成；按这个更早时刻计龄只会低估剩余寿命。
+            sent = self._guard_sent.get(node_id)
+            if sent is not None:
+                age = max(0, state.round - (sent + 3))
         if age is not None:
-            rem_to_next = self.GUARD_DECAY_FRAMES \
-                - (age % self.GUARD_DECAY_FRAMES)
+            phase = age % self.GUARD_DECAY_FRAMES
+            # inquire 在本帧风化结算前到达。卡龄正好为 30 的倍数时，
+            # 防守值会在本帧末下降，不能把 phase=0 误算成新一轮 30 帧。
+            rem_to_next = 1 if age > 0 and phase == 0 \
+                else self.GUARD_DECAY_FRAMES - phase
             return rem_to_next + (defense - 1) * self.GUARD_DECAY_FRAMES
         # 无年龄字段时用保守下界，避免高估第一墙能拖住的时间。
         return 1 + (defense - 1) * self.GUARD_DECAY_FRAMES
