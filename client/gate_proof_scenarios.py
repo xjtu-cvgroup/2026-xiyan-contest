@@ -18,7 +18,7 @@ from lychee.planner import Plan
 from lychee.state import GameState
 from lychee.warden import WardenStrategy
 from scenario_maps import (e25_bypass_start, gate_bypass_start, public_v42_start,
-                           variant1_start)
+                           variant1_e25_start, variant1_start)
 
 
 def check(name, condition, detail=""):
@@ -211,11 +211,21 @@ def test_current_edge_and_public_blocks():
     guard = make_state(my_node="S09", opp_node="S02",
                        enemy_guards=("S10",))
     open_eta = hybrid._gate_eta(open_state, open_state.me)
+    obstacle_eta = hybrid._gate_eta(obstacle, obstacle.me)
+    guard_eta = hybrid._gate_eta(guard, guard.me)
     check("无阻挡时宫门ETA可达", open_eta < 999, f"eta={open_eta}")
-    check("保证型ETA不穿越公开障碍",
-          hybrid._gate_eta(obstacle, obstacle.me) == 999)
-    check("保证型ETA不穿越敌方有效设卡",
-          hybrid._gate_eta(guard, guard.me) == 999)
+    check("公开障碍按规则税保持有限可达",
+          open_eta < obstacle_eta < 999,
+          f"open={open_eta} obstacle={obstacle_eta}")
+    check("资源足够时敌卡按一拍攻坚保持有限可达",
+          open_eta < guard_eta < 999,
+          f"open={open_eta} guard={guard_eta}")
+    no_ammo = make_state(my_node="S09", opp_node="S02",
+                         enemy_guards=("S10",))
+    no_ammo.me["goodFruit"] = hybrid.GATE_GOOD_FRUIT_FLOOR
+    no_ammo.me["badFruit"] = 0
+    check("没有确定拆卡资源时保证型ETA才判不可达",
+          hybrid._gate_eta(no_ammo, no_ammo.me) == 999)
     check("对手下界仍按无阻挡极限速度",
           hybrid._gate_eta(guard, guard.opp, optimistic=True) < 999)
 
@@ -304,6 +314,47 @@ def test_mobile_intercept_uses_conservative_eta():
           f"expected={expected} old={full_horse} path={path}")
 
 
+def test_replay_gate_lead_survives_obstacle_combo():
+    """replay.report (1)：S02 的处理先手不能再被 S03 回头卖掉。"""
+    state = make_state(
+        variant1_e25_start(), round_no=54, my_node="S02", opp_node="S02",
+        obstacle_nodes=("S06", "S07", "S10", "S11"))
+    hybrid = HybridStrategy()
+    hybrid.warden._processed_nodes.add("S02")
+    hybrid.warden._processed_here = True
+    hybrid.planner._processed_here = True
+
+    eta = hybrid._gate_eta(state, state.me, optimistic=False)
+    check("组合图公开障碍不再把宫门ETA打成999", eta < 999, f"eta={eta}")
+    check("S02处理先手能启动宫门领先保护",
+          hybrid._should_preserve_s02_gate_lead(state), f"eta={eta}")
+
+    task = {
+        "taskId": "T_S03", "nodeId": "S03", "processRound": 3,
+        "score": 30, "active": True,
+    }
+    plan = Plan("task", task=task, position="S03")
+    budget = hybrid._gate_lead_budget(state)
+    cost = hybrid._gate_plan_opportunity_cost(state, plan)
+    actions = hybrid._gate_pace_actions(state, [P.a_move("S03")], plan)
+    main = next((a for a in actions if a["action"] in P.MAIN_ACTION_TYPES), None)
+    check("S03支线完整成本超过设卡先手预算", cost > budget,
+          f"cost={cost} budget={budget}")
+    check("领先保护覆盖Planner的S03回头动作",
+          main and not (main["action"] == "MOVE"
+                        and main.get("targetNodeId") == "S03"), str(main))
+
+    consecutive = make_state(
+        variant1_start(), round_no=360, phase=P.PHASE_RUSH,
+        my_node="S10", opp_node="S02", obstacle_nodes=("S11",))
+    warden = WardenStrategy()
+    warden._last_forced_node = "S10"
+    action = warden._advance(consecutive, "S10", "S11")
+    check("连续障碍不重复强通而改用合法清障",
+          action.get("action") == "CLEAR"
+          and action.get("targetNodeId") == "S11", str(action))
+
+
 def test_finish_buffer_boundary():
     probe = make_state(round_no=400, phase=P.PHASE_RUSH,
                        my_node="S13", opp_node="S09")
@@ -338,6 +389,7 @@ def main():
     test_current_edge_and_public_blocks()
     test_task_budget_and_gate_topology()
     test_mobile_intercept_uses_conservative_eta()
+    test_replay_gate_lead_survives_obstacle_combo()
     test_finish_buffer_boundary()
     print("ALL GATE PROOF SCENARIOS PASS")
 

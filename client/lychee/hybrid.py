@@ -361,6 +361,10 @@ class HybridStrategy(Strategy):
             include_current_process=include_current,
             include_intermediate_process=not optimistic,
             conservative_weather=not optimistic, **travel_kwargs)
+        if not optimistic and player.get("playerId") == state.player_id \
+                and not self._gate_route_executable(
+                    state, anchor, path, moving=moving):
+            return 999
         return eta if path else 999
 
     def _conservative_edge_remaining(self, state, player,
@@ -386,23 +390,88 @@ class HybridStrategy(Strategy):
                     boost_type = None
         return frames, boost_type, boost_rem
 
-    @staticmethod
-    def _gate_travel_kwargs(state):
-        """保证型 ETA 不穿越尚未确定能排除的公开阻挡。"""
-        blocked = {
-            node_id for node_id in state.static_nodes
-            if state.has_obstacle(node_id) or state.enemy_guard(node_id)
-        }
+    def _gate_guard_invest(self, state, node_id, good, bad):
+        """保住宫门卡底仓后，是否能用一拍确定拆掉公开敌卡。"""
+        guard = state.enemy_guard(node_id)
+        if not guard:
+            return 0, 0
+        defense = guard.get("defense", 0) or 0
+        max_good = min(2, max(0, good - self.GATE_GOOD_FRUIT_FLOOR))
+        best = None
+        for bad_used in range(min(2, bad) + 1):
+            for good_used in range(max_good + 1):
+                if good_used + bad_used <= 0:
+                    continue
+                if good_used * 2 + bad_used * 3 < defense:
+                    continue
+                rank = (good_used, bad_used)
+                if best is None or rank < best:
+                    best = rank
+        return best
+
+    def _gate_travel_kwargs(self, state):
+        """保证型 ETA：障碍计有界通行税，仅无确定拆法的敌卡才断路。"""
+        good = state.me.get("goodFruit", 0) or 0
+        bad = state.me.get("badFruit", 0) or 0
+        blocked = set()
+        entry_penalty = {}
+        for node_id in state.static_nodes:
+            obstacle = state.has_obstacle(node_id)
+            guard = state.enemy_guard(node_id)
+            penalty = 8 if obstacle else 0
+            if guard:
+                invest = self._gate_guard_invest(
+                    state, node_id, good, bad)
+                if invest is None:
+                    blocked.add(node_id)
+                    continue
+                penalty += 1             # BREAK_GUARD 本身占一帧主动作
+            if penalty:
+                entry_penalty[node_id] = penalty
         return {
             "worst_unknown_weather": True,
             "blocked_nodes": blocked,
+            "node_entry_penalty": lambda node_id: entry_penalty.get(node_id, 0),
         }
+
+    def _gate_route_executable(self, state, anchor, path, moving=False):
+        """校验所选保证路线具备真实动作/资源链，不只在图上有数值。"""
+        if not path:
+            return False
+        good = state.me.get("goodFruit", 0) or 0
+        bad = state.me.get("badFruit", 0) or 0
+        last_forced = self.planner._last_forced_node \
+            or self.warden._last_forced_node
+        forced_here = bool(not moving and anchor == last_forced)
+        for node_id in path[1:]:
+            guard = state.enemy_guard(node_id)
+            if guard:
+                invest = self._gate_guard_invest(
+                    state, node_id, good, bad)
+                if invest is None:
+                    return False
+                good_used, bad_used = invest
+                good -= good_used
+                bad -= bad_used
+            if state.has_obstacle(node_id):
+                if forced_here:
+                    # 连续强通被 6.3.2 禁止，只能花 1 好果清障后普通移动。
+                    if good - 1 < self.GATE_GOOD_FRUIT_FLOOR:
+                        return False
+                    good -= 1
+                    forced_here = False
+                else:
+                    forced_here = True
+            else:
+                forced_here = False
+        return True
 
     def _my_finish_need(self, state, gate_eta):
         gate_term, path = self.warden._travel_dynamic(
             state, state.gate_node, state.terminal_node,
             conservative_weather=True, **self._gate_travel_kwargs(state))
-        if not path:
+        if not path or not self._gate_route_executable(
+                state, state.gate_node, path):
             return 999
         rush_wait = 0
         if state.phase != P.PHASE_RUSH:
@@ -815,11 +884,11 @@ class HybridStrategy(Strategy):
         direct = self._gate_eta(state, me, optimistic=False)
         travel_kwargs = self._gate_travel_kwargs(state)
         boost_type, boost_rem, _ = self.warden._active_speed_buff(state, me)
-        to_target, path, after_type, after_rem = self.warden._travel_dynamic(
+        to_target, to_path, after_type, after_rem = self.warden._travel_dynamic(
             state, cur, target, boost_type, boost_rem,
             include_intermediate_process=True,
             conservative_weather=True, return_boost=True, **travel_kwargs)
-        if not path:
+        if not to_path:
             return 999
 
         fixed_process = 0
@@ -838,12 +907,21 @@ class HybridStrategy(Strategy):
         process += fixed_process
         after_type, after_rem = self.warden._consume_boost(
             after_type, after_rem, process)
-        via, path = self.warden._travel_dynamic(
+        via, via_path = self.warden._travel_dynamic(
             state, target, gate, after_type, after_rem,
             start_elapsed=to_target + process,
             include_intermediate_process=True,
             conservative_weather=True, **travel_kwargs)
-        return max(0, via - direct) if path and direct < 999 else 999
+        if not via_path:
+            return 999
+        # S02 的固定换乘在每次重新进站时都会再读条。保领先阶段禁止为了
+        # 支线收益穿回已经完成的 S02；纯农模式不走这套宫门预算。
+        if "S02" in self.warden._processed_nodes:
+            outbound_reentry = cur != "S02" and "S02" in to_path[1:]
+            return_reentry = target != "S02" and "S02" in via_path[1:]
+            if outbound_reentry or return_reentry:
+                return 999
+        return max(0, via - direct) if direct < 999 else 999
 
     def _gate_pace_actions(self, state, actions, plan, opportunity_cost=None):
         """任务吃得下领先就做；吃不下时只替换主动作，保留合法辅动作。"""

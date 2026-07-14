@@ -10,7 +10,8 @@ import sys
 from arena import Arena, PID_A, PID_B
 from lychee import protocol as P
 from lychee.hybrid import HybridStrategy
-from scenario_maps import e25_bypass_start, public_v42_start, variant1_start
+from scenario_maps import (e25_bypass_start, public_v42_start, variant1_e25_start,
+                           variant1_start)
 from sparring import FarmerBot, RoadFarmerBot, RusherBot
 
 
@@ -81,6 +82,11 @@ CASES = (
      "early-extremes"),
     ("e25-weather-late", e25_bypass_start, (), RusherBot, "A",
      "late-extremes"),
+    # 真实漏网组合：变种边长/处理站 + E25 旁路 + 四个公开障碍。
+    ("e25-variant1-obstacles-A", variant1_e25_start, VARIANT1_OBSTACLES,
+     RoadFarmerBot, "A", "clear"),
+    ("e25-variant1-obstacles-B", variant1_e25_start, VARIANT1_OBSTACLES,
+     RoadFarmerBot, "B", "clear"),
 )
 
 
@@ -107,6 +113,27 @@ def _post_s02_waits(timeline, pid):
         if not main or main.get("action") == "WAIT":
             waits.append(frame["round"])
     return waits
+
+
+def _post_s02_reentries(timeline, pid):
+    """完成换乘并离开后再次停回 S02 的帧号。"""
+    completed = left = False
+    reentries = []
+    for frame in timeline:
+        if any(event.get("type") in ("PROCESS_COMPLETE", "PROCESS_COMPLETED")
+               and (event.get("payload") or {}).get("playerId") == pid
+               and _event_target(event) == "S02"
+               for event in frame["events"]):
+            completed = True
+        if not completed:
+            continue
+        player = frame["players"][pid]
+        at_s02 = player["node"] == "S02" and not player["edge"]
+        if not at_s02:
+            left = True
+        elif left:
+            reentries.append(frame["round"])
+    return reentries
 
 
 def _max_s09_race_wait(timeline, us, opp):
@@ -170,6 +197,10 @@ def run_case(spec, seed=0):
         s09_wait = _max_s09_race_wait(result["timeline"], us, opp)
         if s09_wait > 1:
             failures.append(f"S09 race wait streak={s09_wait}")
+        if "variant1-obstacles" in name:
+            reentries = _post_s02_reentries(result["timeline"], us)
+            if reentries:
+                failures.append(f"S02 reentry={reentries}")
 
     return {
         "name": name,

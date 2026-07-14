@@ -118,6 +118,17 @@ def e25_bypass_start(distance=85):
     return _sync_map(start)
 
 
+def variant1_e25_start(distance=85):
+    """本次平台组合：变种1边长/处理站，同时存在绕 S10 的 E25。"""
+    start = variant1_start()
+    start["edges"].append({
+        "edgeId": "E25", "fromNodeId": "S09", "toNodeId": "S11",
+        "routeType": "BRANCH", "distance": distance,
+        "bidirectional": True,
+    })
+    return _sync_map(start)
+
+
 def gate_bypass_start(distance=20):
     """压力场景：终点可绕开 S14，验证策略不会机械押最终墙。"""
     start = public_v42_start()

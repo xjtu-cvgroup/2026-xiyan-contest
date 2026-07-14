@@ -110,6 +110,7 @@ class WardenStrategy(BaselineStrategy):
         self._rush_tactic_tried = False
         self._delivery_committed = False  # 离墙收官后一律去宫门/终点，禁止回头
         self._rolling_wall = False     # 破墙后按2621纪律滚动，普通点只下免费卡
+        self._last_forced_node = None  # 6.3.2：该到达点不能再次作为强通起点
 
     # ================= 初始化 =================
 
@@ -147,12 +148,36 @@ class WardenStrategy(BaselineStrategy):
             self._weather_edge_cost(state))
 
     def _timed_path(self, state, src, dst):
-        """按真实到达时间选路，固定处理站也属于路线成本。"""
+        """按真实到达时间选路，固定处理和公开阻挡都属于路线成本。"""
         boost_type, boost_rem, _ = self._active_speed_buff(state)
         return self._travel_dynamic(
             state, src, dst, boost_type, boost_rem,
             include_intermediate_process=True,
-            conservative_weather=True)
+            conservative_weather=True,
+            node_entry_penalty=self._route_entry_penalty(state))
+
+    @staticmethod
+    def _forced_pass_tax(state, node_id):
+        """任务书 6.3.2 的强通税；障碍与设卡同时存在时取较大者。"""
+        node = state.node(node_id)
+        guard = state.enemy_guard(node_id)
+        guard_tax = 0
+        if guard:
+            defense = guard.get("defense", 0) or 0
+            if node.get("nodeType") == "KEY_PASS":
+                guard_tax = min(50, 15 + defense * 5)
+            elif node_id == state.gate_node:
+                guard_tax = min(32, 12 + defense * 5)
+            elif state.has_obstacle(node_id):
+                guard_tax = min(28, 8 + defense * 5)
+            else:
+                guard_tax = min(40, 10 + defense * 5)
+        obstacle_tax = 8 if state.has_obstacle(node_id) else 0
+        return max(guard_tax, obstacle_tax)
+
+    def _route_entry_penalty(self, state):
+        """执行选路使用的节点进入税，不能把可处理阻挡误当成断路。"""
+        return lambda node_id: self._forced_pass_tax(state, node_id)
 
     def _timed_next_hop(self, state, src, dst):
         _, path = self._timed_path(state, src, dst)
@@ -171,29 +196,23 @@ class WardenStrategy(BaselineStrategy):
         direct_eta, direct_path = self._timed_path(state, cur, target)
         if not direct_path or "S02" in direct_path:
             return None
-        direct_obstacles = sum(
-            1 for nid in direct_path[1:] if state.has_obstacle(nid))
-        if not direct_obstacles:
+        if not any(state.is_blocked(nid) for nid in direct_path[1:]):
             return None
 
+        entry_penalty = self._route_entry_penalty(state)
         to_s02, first = self._travel_dynamic(
-            state, cur, "S02", conservative_weather=True)
+            state, cur, "S02", conservative_weather=True,
+            node_entry_penalty=entry_penalty)
         if not first:
             return None
         via_eta, tail = self._travel_dynamic(
             state, "S02", target, start_elapsed=to_s02,
             include_current_process=True,
             include_intermediate_process=True,
-            conservative_weather=True)
+            conservative_weather=True, node_entry_penalty=entry_penalty)
         if not tail:
             return None
-        via_path = first[:-1] + tail
-        via_obstacles = sum(
-            1 for nid in via_path[1:] if state.has_obstacle(nid))
-        forced_tax = 8
-        direct_total = direct_eta + direct_obstacles * forced_tax
-        via_total = via_eta + via_obstacles * forced_tax
-        if via_total > direct_total + self.START_ROUTE_TAX_PAD:
+        if via_eta > direct_eta + self.START_ROUTE_TAX_PAD:
             return None
         return first[1] if len(first) > 1 else None
 
@@ -302,6 +321,11 @@ class WardenStrategy(BaselineStrategy):
                     and (target == "S02"
                          or p.get("contestType") == P.CONTEST_DOCK):
                 self._s02_won_window = True
+        for event in state.my_events("FORCED_PASS_END"):
+            payload = event.get("payload") or {}
+            node_id = payload.get("nodeId") or payload.get("targetNodeId")
+            if node_id:
+                self._last_forced_node = node_id
 
     def _maybe_fallback_gate(self, state):
         """当前墙被买穿后，沿双方后续路线滚动到下一个可抢截击点。"""
@@ -604,6 +628,12 @@ class WardenStrategy(BaselineStrategy):
             return P.a_forced_pass(nxt)
         if state.has_obstacle(nxt):
             if self._score_farm_mode:
+                return P.a_wait()
+            # 6.3.2 禁止从上次强通到达点再次发起强通。连续障碍时改用
+            # 6 帧主车清障，避免证明账本认为可达、执行却逐帧吃重复拒绝。
+            if cur == self._last_forced_node:
+                if (me.get("goodFruit", 0) or 0) > self.FRUIT_RESERVE:
+                    return P.a_clear(nxt)
                 return P.a_wait()
             return P.a_forced_pass(nxt)      # 固定 8 帧税，无窗口，免冻
         return P.a_move(nxt)
@@ -1427,7 +1457,8 @@ class WardenStrategy(BaselineStrategy):
                         start_elapsed=0, include_current_process=False,
                         include_intermediate_process=True,
                         conservative_weather=True, return_boost=False,
-                        worst_unknown_weather=False, blocked_nodes=None):
+                        worst_unknown_weather=False, blocked_nodes=None,
+                        node_entry_penalty=None):
         """规则口径 ETA：路线距离/类型 + 公开天气 + 有限马/疾行时长。
 
         Dijkstra 状态携带 boost_rem，确保疾行令 15 帧、快马 20 帧、短马
@@ -1472,6 +1503,12 @@ class WardenStrategy(BaselineStrategy):
                     conservative_weather=conservative_weather,
                     worst_unknown_weather=worst_unknown_weather)
                 nd = elapsed + ef
+                entry = max(0, int(node_entry_penalty(nb) or 0)) \
+                    if node_entry_penalty else 0
+                if entry:
+                    nd += entry
+                    nb_type, nb_rem = self._consume_boost(
+                        nb_type, nb_rem, entry)
                 if include_intermediate_process and nb != dst:
                     proc = self._node_process_frames_at(
                         state, nb, state.round + nd,
