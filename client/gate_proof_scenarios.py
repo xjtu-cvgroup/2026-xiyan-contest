@@ -188,6 +188,57 @@ def test_processing_rules():
     check("本地裁判同步暴雨处理规则",
           arena._proc_frames(PID_A, "S04", base) == base + 4)
 
+    configurable = variant1_start()
+    for proc in configurable["map"]["gameplay"].get("processNodes") or []:
+        if proc.get("nodeId") == "S14":
+            proc["processRound"] = 9
+    for node in configurable.get("nodes") or []:
+        if node.get("nodeId") == "S14":
+            node["processRound"] = 9
+    for resource in configurable["map"]["gameplay"].get("resources") or []:
+        if resource.get("nodeId") == "S03" \
+                and resource.get("resourceType") == P.ICE_BOX:
+            resource["claimRound"] = 7
+    dynamic = Arena(2, start_data=configurable, weather_plan=[],
+                    obstacle_nodes=[])
+    dynamic._start_pending(PID_A, {"kind": "VERIFY_GATE"})
+    check("本地裁判宫门验核读取地图9帧",
+          dynamic.teams[PID_A].proc["remain"] == 9)
+    dynamic.teams[PID_A].proc = None
+    dynamic._start_pending(PID_A, {
+        "kind": "CLAIM_RESOURCE", "node": "S03", "rtype": P.ICE_BOX,
+    })
+    check("本地裁判资源领取读取地图7帧",
+          dynamic.teams[PID_A].proc["remain"] == 7)
+
+    gate_nine = make_state(configurable, round_no=120,
+                           my_node="S09", opp_node="S02")
+    gate_six = make_state(variant1_start(), round_no=120,
+                          my_node="S09", opp_node="S02")
+    plan_nine = HybridStrategy().planner.planner.plan(gate_nine)
+    plan_six = HybridStrategy().planner.planner.plan(gate_six)
+    check("Planner交付余量读取宫门9帧而非固定6帧",
+          plan_nine.slack == plan_six.slack - 3,
+          f"nine={plan_nine.slack} six={plan_six.slack}")
+
+    long_horse = make_state(configurable, round_no=120,
+                            my_node="S03", opp_node="S02")
+    long_horse.nodes["S03"]["resourceStock"] = {P.FAST_HORSE: 1}
+    long_horse.resource_config = [
+        item for item in long_horse.resource_config
+        if not (item.get("nodeId") == "S03"
+                and item.get("resourceType") == P.FAST_HORSE)
+    ] + [{"nodeId": "S03", "resourceType": P.FAST_HORSE,
+          "count": 1, "claimRound": 7}]
+    warden = WardenStrategy()
+    check("Warden竞速段不领取7帧负收益快马",
+          warden._claim_en_route(long_horse, "S03") is None)
+    long_horse.resource_config[-1]["claimRound"] = 2
+    action = warden._claim_en_route(long_horse, "S03")
+    check("Warden保留既有2帧顺路快马",
+          action and action.get("action") == "CLAIM_RESOURCE"
+          and action.get("resourceType") == P.FAST_HORSE, str(action))
+
 
 def test_current_edge_and_public_blocks():
     base = make_state(round_no=100)
@@ -450,6 +501,97 @@ def test_finish_buffer_boundary():
           f"round={safe_round + 1}")
 
 
+def test_opponent_verify_lower_bound():
+    """拒止证明必须覆盖对手探路/破关令的最短宫门验核。"""
+    state = make_state(round_no=450, phase=P.PHASE_RUSH,
+                       my_node="S09", opp_node="S14")
+    hybrid = HybridStrategy()
+    gate_term, path = hybrid.warden._travel_dynamic(
+        state, state.gate_node, state.terminal_node,
+        P.RUSH_SPEED, 15, include_intermediate_process=False,
+        conservative_weather=False)
+    expected = 2 + gate_term + 2
+    actual = hybrid._opponent_finish_lower_bound(state, 0)
+    check("对手交付下界按2帧最强验核而非普通6帧",
+          bool(path) and actual == expected,
+          f"expected={expected} actual={actual}")
+
+
+def test_configurable_resources_and_held_wall_budget():
+    """地图读条和粘性计划都不能偷吃设卡/交付安全垫。"""
+    resource = make_state(round_no=180, my_node="S03", opp_node="S09")
+    for item in resource.resource_config:
+        if item.get("nodeId") == "S03" \
+                and item.get("resourceType") == P.ICE_BOX:
+            item["claimRound"] = 7
+    hybrid = HybridStrategy()
+    plan = {"target": "S09", "myEta": 0, "oppEta": 10}
+    action = P.a_claim_resource("S03", P.ICE_BOX)
+    check("可变资源领取帧从地图读取而非固定2帧",
+          hybrid._resource_claim_frames(resource, "S03", P.ICE_BOX) == 7
+          and hybrid.planner.planner._resource_claim_frames(
+              resource, "S03", P.ICE_BOX) == 7
+          and hybrid.warden._resource_claim_frames(
+              resource, "S03", P.ICE_BOX) == 7
+          and not hybrid._action_fits_mobile_lead(resource, action, plan))
+
+    held_state = make_state(round_no=360, phase=P.PHASE_NORMAL,
+                            my_node="S05", opp_node="S03")
+    held = HybridStrategy()
+    held.mobile_target = "S09"
+    held.mobile_plan = {"target": "S09", "denial": False}
+    check("粘性动态墙不足完整5帧设卡余量时自动解除",
+          held._held_mobile_plan(held_state) is None)
+
+
+def test_opponent_future_horse_stock_lower_bound():
+    """尚未领取的公开马也必须进入对手最快到门下界。"""
+    without = make_state(round_no=120, my_node="S09", opp_node="S01")
+    with_stock = make_state(round_no=120, my_node="S09", opp_node="S01")
+    for state in (without, with_stock):
+        for node_id in state.nodes:
+            state.nodes[node_id]["resourceStock"] = {}
+    with_stock.nodes["S03"]["resourceStock"] = {P.FAST_HORSE: 2}
+    hybrid = HybridStrategy()
+    slow = hybrid._opponent_legal_gate_eta(without, without.opp)
+    fast = hybrid._opponent_legal_gate_eta(with_stock, with_stock.opp)
+    check("拒止证明把沿图未领取快马让给对手", fast < slow,
+          f"withStock={fast} without={slow}")
+
+
+def test_guard_escape_and_gate_wall_lower_bounds():
+    """堵人证明覆盖改边回攻、破关令与最快强通。"""
+    shortcut = public_v42_start()
+    for edge in shortcut["edges"]:
+        if edge.get("edgeId") in ("E17", "E22"):
+            edge["distance"] = 1
+    state = make_state(
+        shortcut, round_no=200, my_node="S10", opp_node="S09",
+        opp_edge=("E05", "S09", "S10"), opp_edge_progress=0)
+    warden = WardenStrategy()
+    edge_remain = warden._opp_edge_remaining(state)
+    reentry = warden._mobile_reentry_escape_delay(
+        state, "S10", edge_remain)
+    delay = warden._mobile_guard_delay(state, "S10", 0, edge_remain)
+    check("短三角允许改边回攻时不误证动态墙收益",
+          reentry == 0 and delay == 0,
+          f"edgeRemain={edge_remain} reentry={reentry} delay={delay}")
+
+    breakable = make_state(round_no=450, phase=P.PHASE_RUSH,
+                           my_node="S14", opp_node="S13")
+    breakable.opp.update(goodFruit=2, badFruit=0,
+                         squadAvailable=0, rushTacticUsedCount=0)
+    check("对手可用破关令一拍拆防4时宫门墙下界为0",
+          warden._gate_wall_hold_lower_bound(breakable) == 0)
+
+    forced = make_state(round_no=450, phase=P.PHASE_RUSH,
+                        my_node="S14", opp_node="S13")
+    forced.opp.update(goodFruit=0, badFruit=0,
+                      squadAvailable=0, rushTacticUsedCount=1)
+    check("对手不能攻坚时宫门墙仍按最快32帧强通而非120帧风化",
+          warden._gate_wall_hold_lower_bound(forced) == 32)
+
+
 def main():
     test_route_and_weather_formula()
     test_processing_rules()
@@ -459,6 +601,10 @@ def main():
     test_moving_pivot_replay_contracts()
     test_replay_gate_lead_survives_obstacle_combo()
     test_finish_buffer_boundary()
+    test_opponent_verify_lower_bound()
+    test_configurable_resources_and_held_wall_budget()
+    test_opponent_future_horse_stock_lower_bound()
+    test_guard_escape_and_gate_wall_lower_bounds()
     print("ALL GATE PROOF SCENARIOS PASS")
 
 

@@ -457,7 +457,9 @@ class TaskPlanner:
                                        self._time_edge_cost_fn(state))
         to_gate, _ = g.shortest_path(cur, state.gate_node, speed, penalty, ecost)
         gate_to_term, _ = g.shortest_path(state.gate_node, state.terminal_node, speed)
-        eta_direct = to_gate_t + GATE_VERIFY_FRAMES + gate_to_term + DELIVER_FRAMES
+        gate_verify = state.node(state.gate_node).get("processRound") \
+            or GATE_VERIFY_FRAMES
+        eta_direct = to_gate_t + gate_verify + gate_to_term + DELIVER_FRAMES
         # 余量分档（V3.26）：RUSH 后未建模方差已落定，改用小余量放行
         # 尾段零绕路任务（可行性硬约束本身不变，仍用时间口径逐个检查）
         margin = self.RUSH_SAFETY_MARGIN \
@@ -820,10 +822,24 @@ class TaskPlanner:
         self._res_ctx_cache = ((state.round, cur), ctx)
         return ctx
 
+    @staticmethod
+    def _resource_claim_frames(state, node_id, resource_type):
+        """资源领取帧属于地图配置；缺失时仅为兼容旧样例回退2帧。"""
+        rounds = []
+        for item in state.resource_config:
+            if item.get("nodeId") != node_id \
+                    or item.get("resourceType") != resource_type:
+                continue
+            try:
+                rounds.append(max(1, int(item.get("claimRound"))))
+            except (TypeError, ValueError):
+                continue
+        return max(rounds) if rounds else CLAIM_FRAMES
+
     def _resource_bundle(self, state, pos, onward_path, cur):
         """任务/资源计划的沿途资源捆绑价值 (加分, 附加帧数)。
 
-        任务点上的可领资源全额计入（就地领取只多花 2 帧读条）；
+        任务点上的可领资源全额计入（就地领取按地图配置读条）；
         通往宫门沿途的按半权。replay21/22 教训：官道任务捆着双冰、
         水路任务只捆一匹马，分开估值让 30 分的鲜度捆绑被单任务净值掩盖。
         """
@@ -837,7 +853,7 @@ class TaskPlanner:
             if pos in opp_path:
                 v *= DENIAL_FACTOR
             bonus += v
-            frames += CLAIM_FRAMES
+            frames += self._resource_claim_frames(state, pos, rtype)
         node_raw = state.graph.all_frames(pos) if onward_path else {}
         for nb in set(onward_path or ()) - {pos}:
             nb_node = state.nodes.get(nb) or {}
@@ -867,6 +883,8 @@ class TaskPlanner:
         out = []
         for node_id, node in state.nodes.items():
             for rtype, value in stock_claimables(node):
+                claim_frames = self._resource_claim_frames(
+                    state, node_id, rtype)
                 f_to, path = g.shortest_path(cur, node_id, speed, penalty, ecost)
                 if not path:
                     continue
@@ -878,8 +896,8 @@ class TaskPlanner:
                                                penalty, ecost)
                 if not back:
                     continue
-                detour = max(0, f_to + f_back - to_gate) + CLAIM_FRAMES
-                if self._time_detour(state, cur, node_id) + CLAIM_FRAMES > slack:
+                detour = max(0, f_to + f_back - to_gate) + claim_frames
+                if self._time_detour(state, cur, node_id) + claim_frames > slack:
                     continue  # 硬约束用时间口径
                 v = self._resource_phase_value(state, node_id, value, rtype) \
                     * race_discount(node_id, my_raw.get(node_id, 0))
@@ -891,7 +909,7 @@ class TaskPlanner:
                 for nb in set(back[1:]):
                     nb_node = state.nodes.get(nb) or {}
                     for rt2, val2 in stock_claimables(nb_node):
-                        eta2 = my_raw.get(node_id, 0) + CLAIM_FRAMES \
+                        eta2 = my_raw.get(node_id, 0) + claim_frames \
                             + node_raw.get(nb, 0)
                         d2 = race_discount(nb, eta2)
                         if nb in opp_path:

@@ -1380,6 +1380,47 @@ def test_ice_hunt():
                 a and a["action"] == "CLAIM_RESOURCE"
                 and a["resourceType"] == "ICE_BOX", f"{plan!r} -> {a}")
 
+    # 同站资源首窗照常争，保留关键资源胜机；已经真实 DRAW 后才按
+    # 奇偶错峰，不能像 05/06 预测图那样反复创建低盘口冰鉴窗口。
+    gs = gs_ice(my_pos="S03", opp_pos="S03", round_no=100,
+                ice_nodes=("S03",))
+    st = PlannerStrategy()
+    plan = Plan("resource", position="S03", resource=P.ICE_BOX, slack=100)
+    a = st.main_action(gs, plan)
+    ok &= check("冰猎: 同站资源首窗保留争夺",
+                a and a["action"] == "CLAIM_RESOURCE", str(a))
+    st._window_draw_pressure[("S03", P.CONTEST_RESOURCE)] = (1, 100)
+    a = st.main_action(gs, plan)
+    ok &= check("冰猎: DRAW后资源目标按奇偶错峰",
+                a and a["action"] == "WAIT", str(a))
+
+    # 普通任务也只在真实 DRAW 后拆镜像；首窗仍保留争夺。
+    task = {"taskId": "T_ICE_SPLIT", "nodeId": "S03",
+            "processRound": 4, "score": 30, "active": True,
+            "completed": False, "failed": False,
+            "ownerPlayerId": 0, "protectionPlayerId": 0}
+    gs.tasks = [task]
+    gs.nodes["S03"]["resourceStock"] = {}
+    st = PlannerStrategy()
+    plan = Plan("task", task=task, position="S03", slack=100)
+    a = st.main_action(gs, plan)
+    ok &= check("任务争夺: 普通任务首窗照常争",
+                a and a["action"] == "CLAIM_TASK", str(a))
+    st._window_draw_pressure[("S03", P.CONTEST_TASK)] = (1, 100)
+    a = st.main_action(gs, plan)
+    ok &= check("任务争夺: DRAW后普通任务按奇偶错峰",
+                a and a["action"] == "WAIT", str(a))
+
+    s02_task = dict(task, taskId="T_S02_KEEP", nodeId="S02")
+    gs = gs_ice(my_pos="S02", opp_pos="S02", round_no=100, ice_nodes=())
+    gs.tasks = [s02_task]
+    st = PlannerStrategy()
+    st._window_draw_pressure[("S02", P.CONTEST_TASK)] = (1, 100)
+    a = st.main_action(
+        gs, Plan("task", task=s02_task, position="S02", slack=100))
+    ok &= check("任务争夺: S02不被通用错峰主动让出",
+                a and a["action"] == "CLAIM_TASK", str(a))
+
     # 4) 已持 2 冰 → 不再规划资源目标
     gs = gs_ice(my_ice=2)
     plan = PlannerStrategy().planner.plan(gs)
@@ -5255,8 +5296,9 @@ def test_warden_strategy():
     st.camp_node = "S10"
     st._plans_ready = True
     a = st.main_action(gs)
-    ok &= check("warden: S10贴脸但接墙账本杀不死则不早走",
-                a and a["action"] == "WAIT" and st.camp_node == "S10",
+    ok &= check("warden: S10贴脸进入最后接墙窗且防4强通税能锁死则转S14",
+                a and a["action"] == "RUSH_SPEED"
+                and st.camp_node == "S14",
                 f"{a} camp={st.camp_node}")
 
     gs = gs_at("S10", opp_cur="S08", opp_next="S10", opp_edge="E17",
@@ -6146,6 +6188,44 @@ def test_hybrid_strategy():
                 and not any(a.get("action") == "MOVE" for a in acts),
                 f"budget={hybrid._gate_lead_budget(gs)} acts={acts}")
 
+    # 06 资源重排 seed 20260720：双方已到 S14、距 RUSH 只剩 9 帧，
+    # Planner 曾回 S11 做任务，白送对手验核。事实上的同门争夺必须直接
+    # 粘性接管，和此前是否建立过领先合同无关。
+    gs = make_state(bypass=True, race_variant=True, split_corridors=True,
+                    cur="S14", opp_cur="S14", round_no=381)
+    gs.tasks = [{"taskId": "T_GATE_BAIT", "nodeId": "S11",
+                 "processRound": 3, "baseScore": 30,
+                 "claimable": True, "claimed": False}]
+    hybrid = HybridStrategy()
+    hybrid.mode = HybridStrategy.MODE_MOBILE
+    hybrid.warden._s02_opening = False
+    acts = hybrid.decide(gs)
+    ok &= check("hybrid: S14同门对峙绝不回头做任务",
+                hybrid.mode == HybridStrategy.MODE_GATE
+                and not any(a.get("action") == "MOVE"
+                            and a.get("targetNodeId") != "S15"
+                            for a in acts),
+                f"mode={hybrid.mode} acts={acts}")
+
+    # 同局更早的根因：对手仍在 S03->S07，我方已到 S07，但对手的
+    # 资源下界仍令我方没有完整 T+5 设卡先手。即使双方距宫门尚大于
+    # 旧 120 帧阈值，也必须先上当前地图的最快走廊，不能等它到站后再追。
+    gs = make_state(bypass=True, race_variant=True, split_corridors=True,
+                    cur="S07", opp_cur="S03", opp_next="S07",
+                    opp_edge="E03", opp_edge_ms=75900,
+                    opp_edge_progress=70000, round_no=175,
+                    task_score=60)
+    hybrid = HybridStrategy()
+    hybrid.mode = HybridStrategy.MODE_MOBILE
+    hybrid.warden._s02_opening = False
+    shadow = hybrid._gate_shadow_race_action(gs)
+    ok &= check("hybrid: 对手远距承诺宫门且无墙先手时立即跟速",
+                shadow is not None
+                and shadow.get("action") == "MOVE",
+                f"my={hybrid._gate_eta(gs, gs.me)} "
+                f"opp={hybrid._gate_eta(gs, gs.opp, optimistic=True)} "
+                f"shadow={shadow}")
+
     # replay r319：对手已经 S09->S10，我方在 S09。E25 长旁路虽能绕开
     # S10，却比 S10-S13-S14 慢；必须跟住最终墙竞速，不能等 43 帧。
     gs = make_state(bypass=True, bypass_distance=85, race_variant=True,
@@ -6616,9 +6696,9 @@ def test_hybrid_strategy():
                 action and action["action"] != "SET_GUARD",
                 str(action))
 
-    # 第二张宫门卡早几帧生效时，对手可能恰好冻结在剩余 6-7 帧，旧版
-    # 只认 <=5 帧而整张卡都不敢离场。按我方卡龄 + 边余量 + 必验核 +
-    # 最快交付作完整证明：必死就立即走；时间尚足则继续守。
+    # 第二张宫门卡早几帧生效时，对手仍可按主办方确认的规则改边回攻。
+    # 边余量与卡风化并行，且验核按探路+破关令2帧下界；仍有时间时不能
+    # 把自然风化寿命和边余量相加后误判锁死。
     gs = make_state(
         bypass=True, cur="S14", opp_cur="S13", round_no=464,
         phase=P.PHASE_RUSH, task_score=120, verified=True,
@@ -6631,7 +6711,24 @@ def test_hybrid_strategy():
     st.camp_node, st._plans_ready = "S14", True
     st._guard_sent["S14"] = 460
     action = st.main_action(gs)
-    ok &= check("hybrid: S14现墙已证明对手必死则立即交付",
+    ok &= check("hybrid: S14现墙仍可改边回攻时不得误判锁死",
+                not st._active_gate_wall_kills(gs, "S14")
+                and action and action["action"] == "WAIT",
+                f"wall={st._my_guard_remaining(gs, 'S14')} action={action}")
+
+    gs = make_state(
+        bypass=True, cur="S14", opp_cur="S13", round_no=540,
+        phase=P.PHASE_RUSH, task_score=120, verified=True,
+        opp_next="S14", opp_edge="E09", opp_edge_ms=18000,
+        opp_edge_progress=11000)
+    gs.nodes["S14"]["guard"] = {
+        "ownerTeamId": gs.my_team, "defense": 4,
+        "initialDefense": 4, "maxDefense": 4, "active": True}
+    st = WardenStrategy(forced_camp="S14")
+    st.camp_node, st._plans_ready = "S14", True
+    st._guard_sent["S14"] = 536
+    action = st.main_action(gs)
+    ok &= check("hybrid: 改边回攻极限仍过600时才确认锁死离场",
                 st._active_gate_wall_kills(gs, "S14")
                 and action and action["action"] == "MOVE"
                 and action["targetNodeId"] == "S15",

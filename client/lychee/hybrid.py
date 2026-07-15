@@ -124,6 +124,13 @@ class HybridStrategy(Strategy):
                 return self.warden.decide(state)
             return self._denial_only_actions(state)
 
+        # 宫门已经形成同点争夺时，任何离门任务都会直接把验核先手送给
+        # 对手。此时不再要求“我方仍有完整设卡领先”，而是至少守住窗口
+        # 争夺与自身交付资格；这条只处理已经到门的事实，不提前抢 S14。
+        if self._gate_contest_required(state):
+            self._activate_gate_control(state)
+            return self.warden.decide(state)
+
         # 短宫门边只在对手公开资源证明无法快速拆门时才有控制价值。
         # 常规富资源对手可一拍破防，不能把“裸到门领先”误记成墙先手。
         if self._short_gate_takeover_required(state):
@@ -598,6 +605,23 @@ class HybridStrategy(Strategy):
             P.FAST_HORSE)
         short_frames = count(P.SHORT_HORSE) * self.warden._opening_horse_duration(
             P.SHORT_HORSE)
+        # 地图上的库存也是对手公开可用的潜在加速。拒止证明不能假设这些马
+        # 一定被我方拿走；这里甚至允许对手零绕路、零领取帧瞬间获得全部库存，
+        # 得到比任何合法执行都不慢的速度下界。
+        for node_id in state.static_nodes:
+            stock = state.node(node_id).get("resourceStock") or {}
+            try:
+                fast_count = max(0, int(stock.get(P.FAST_HORSE, 0) or 0))
+            except (TypeError, ValueError):
+                fast_count = 0
+            try:
+                short_count = max(0, int(stock.get(P.SHORT_HORSE, 0) or 0))
+            except (TypeError, ValueError):
+                short_count = 0
+            fast_frames += fast_count * self.warden._opening_horse_duration(
+                P.FAST_HORSE)
+            short_frames += short_count * self.warden._opening_horse_duration(
+                P.SHORT_HORSE)
         rush_frames = 0
         active_rush = False
         defaults = {
@@ -815,8 +839,12 @@ class HybridStrategy(Strategy):
         rush_wait = 0
         if state.phase != P.PHASE_RUSH:
             rush_wait = max(0, RUSH_EARLIEST - (state.round + gate_eta))
-        return gate_eta + rush_wait + self.warden._gate_verify_frames(state) \
-            + gate_term + DELIVER_FRAMES
+        # 证明拒止时必须给对手最强合法验核：探路标记和破关令都能减时，
+        # 地图配置的验核帧也可能变化。按两次 -3、最低 2 帧的乐观包络
+        # 计算；即使服务端不允许二者叠加，这个下界也只会更保守，不会
+        # 把仍可交付的对手误判成已经锁死。
+        verify = max(2, self.warden._gate_verify_frames(state) - 6)
+        return gate_eta + rush_wait + verify + gate_term + DELIVER_FRAMES
 
     def _score_mobile_intercept(self, state, allow_reserve=False,
                                 deny_only=False, control_denial=False):
@@ -916,7 +944,8 @@ class HybridStrategy(Strategy):
                          if t.get("taskId") == action.get("taskId")), None)
             cost = (task.get("processRound", 4) if task else 4) + 1
         elif typ == "CLAIM_RESOURCE":
-            cost = 2
+            cost = self._resource_claim_frames(
+                state, action.get("targetNodeId"), action.get("resourceType"))
         else:
             return None
         # 即使卡在读条第一帧被远程拆掉，任务结束后仍至少留出完整的
@@ -1261,7 +1290,9 @@ class HybridStrategy(Strategy):
                     inbound, P.SPEED_RUSH) if inbound else opp_eta - my_eta
             stay_delay = self.warden._mobile_stay_delay(
                 state, node_id, extra, guard_exposure)
-            delay = min(stay_delay, reroute_delay)
+            reentry_delay = self.warden._mobile_reentry_escape_delay(
+                state, node_id, guard_exposure)
+            delay = min(stay_delay, reroute_delay, reentry_delay)
 
             target_needs_process = bool(
                 state.node(node_id).get("processType")) \
@@ -1319,6 +1350,7 @@ class HybridStrategy(Strategy):
                 "target": node_id, "myEta": my_eta, "oppEta": opp_eta,
                 "delay": delay, "finishTax": finish_tax,
                 "stayDelay": stay_delay, "rerouteDelay": reroute_delay,
+                "reentryDelay": reentry_delay,
                 "globallyMandatory": globally_mandatory,
                 "upstreamContract": upstream_contract,
                 "detour": detour, "denial": denial,
@@ -1392,7 +1424,8 @@ class HybridStrategy(Strategy):
         remain = state.duration_round - state.round
         finish_need = self._my_finish_need(state, my_gate_eta)
         if not my_gate_path or (require_delivery
-                                and finish_need + self.warden.EXIT_PAD > remain):
+                                and finish_need + self.warden.EXIT_PAD
+                                + self.warden.MOBILE_GUARD_PAD > remain):
             self.mobile_target = self.mobile_plan = None
             return None
 
@@ -1405,6 +1438,22 @@ class HybridStrategy(Strategy):
     def _main_action(actions):
         return next((a for a in actions
                      if a.get("action") in P.MAIN_ACTION_TYPES), None)
+
+    @staticmethod
+    def _resource_claim_frames(state, node_id, resource_type):
+        """读取本局资源领取帧；未知配置不允许消费控制先手。"""
+        rounds = []
+        for item in state.resource_config:
+            if item.get("nodeId") != node_id \
+                    or item.get("resourceType") != resource_type:
+                continue
+            try:
+                rounds.append(max(1, int(item.get("claimRound"))))
+            except (TypeError, ValueError):
+                continue
+        # 用较大值保守计时；探路可能减时，但不能预支尚未生效/可能被固定
+        # 处理先消耗的标记。得分模式仍可领取，只有领先合同不为未知耗时背书。
+        return max(rounds) if rounds else 999
 
     def _action_fits_mobile_lead(self, state, action, plan):
         if not action:
@@ -1425,7 +1474,8 @@ class HybridStrategy(Strategy):
                 cost = (task.get("processRound", 4) or 4) + 1
         elif typ == "CLAIM_RESOURCE" \
                 and action.get("targetNodeId") == state.me.get("currentNodeId"):
-            cost = 2
+            cost = self._resource_claim_frames(
+                state, action.get("targetNodeId"), action.get("resourceType"))
         elif typ == "USE_RESOURCE":
             cost = 1
         elif typ == "WAIT":
@@ -1598,7 +1648,8 @@ class HybridStrategy(Strategy):
         if plan.kind == "task" and plan.task:
             process = (plan.task.get("processRound", 4) or 4) + 1
         elif plan.kind == "resource":
-            process = 2
+            process = self._resource_claim_frames(
+                state, target, plan.resource)
         elif plan.kind == "bounty":
             process = 1
         else:
@@ -1645,7 +1696,9 @@ class HybridStrategy(Strategy):
             if typ == "WAIT":
                 cost = max(cost, 1)
             elif typ == "CLAIM_RESOURCE":
-                cost = max(cost, 2)
+                cost = max(cost, self._resource_claim_frames(
+                    state, main.get("targetNodeId"),
+                    main.get("resourceType")))
             elif typ == "CLAIM_TASK":
                 task = next((t for t in state.claimable_tasks()
                              if t.get("taskId") == main.get("taskId")), None)
@@ -1687,7 +1740,12 @@ class HybridStrategy(Strategy):
             return None
         my_eta = self._gate_eta(state, me, optimistic=False)
         opp_eta = self._gate_eta(state, opp, optimistic=True)
-        if opp_eta > self.GATE_THREAT_ETA \
+        # 120 帧只适用于我方已有完整设卡领先、可以继续兑现收益的情况。
+        # 对手已用 routeEdge 暴露直奔宫门，而我方连 T+5 设卡先手都没有
+        # 时，等待它进入 120 帧圈才追已经太迟；立即走我方最快路保住
+        # 宫门窗口。04 型短门因无反应窗会在上方直接退出，仍专心得分。
+        losing_guard_lead = my_eta + self.warden.MOBILE_GUARD_PAD > opp_eta
+        if (opp_eta > self.GATE_THREAT_ETA and not losing_guard_lead) \
                 or my_eta > opp_eta + self.GATE_SHADOW_TRAIL_MAX:
             return None
         remain = state.duration_round - state.round
@@ -1698,6 +1756,18 @@ class HybridStrategy(Strategy):
             return None
         action = self.warden._advance(state, cur, state.gate_node)
         return action if action.get("action") != "WAIT" else None
+
+    def _gate_contest_required(self, state):
+        """我方已到 S14 且对手已经占门/验核时，禁止 Planner 离门。"""
+        me, opp = state.me, state.opp
+        if not me or not opp or me.get("routeEdgeId") \
+                or me.get("currentNodeId") != state.gate_node \
+                or me.get("verified") or me.get("delivered") \
+                or me.get("retired"):
+            return False
+        return bool(opp.get("verified")
+                    or (not opp.get("routeEdgeId")
+                        and opp.get("currentNodeId") == state.gate_node))
 
     def _should_commit_gate(self, state):
         me, opp = state.me, state.opp

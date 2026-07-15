@@ -225,10 +225,18 @@ class Arena:
         # 宫门验核站
         self.nodes[self.gate].setdefault("processType", "VERIFY")
         self.nodes[self.gate].setdefault("processRound", 6)
+        self.resource_claim_rounds = {}
         for r in gp.get("resources") or start.get("resources") or []:
             self.nodes[r["nodeId"]]["resourceStock"][r["resourceType"]] = \
                 self.nodes[r["nodeId"]]["resourceStock"].get(r["resourceType"], 0) \
                 + r.get("count", 1)
+            try:
+                claim_round = max(1, int(r.get("claimRound")))
+            except (TypeError, ValueError):
+                claim_round = 2
+            key = (r["nodeId"], r["resourceType"])
+            self.resource_claim_rounds[key] = max(
+                claim_round, self.resource_claim_rounds.get(key, 0))
         self.edges = start["edges"]
         self.graph = MapGraph(self.edges)
         self.candidates = gp["taskCandidates"]
@@ -589,6 +597,14 @@ class Arena:
         c["resolved"] = True
         pa, pb = c["points"][PID_A], c["points"][PID_B]
         key = self._objkey(c["type"], c["obj"])
+        event_obj = dict(c.get("obj") or {})
+        if c["type"] == P.CONTEST_TASK and not event_obj.get("nodeId"):
+            task_action = next(
+                (action for action in c.get("pending", {}).values()
+                 if action and action.get("task")), None)
+            if task_action:
+                event_obj["nodeId"] = task_action["task"].get("nodeId")
+        event_obj["contestType"] = c["type"]
         winner = PID_A if pa > pb else PID_B if pb > pa else None
         for pid in c["parties"]:
             t = self.teams[pid]
@@ -608,11 +624,13 @@ class Arena:
                 for pid in c["parties"]:
                     self.teams[pid].rest = 3
                     self.teams[pid].state = P.ST_RESTING
-            self._emit("WINDOW_CONTEST_DRAW", contestId=c["id"])
+            self._emit("WINDOW_CONTEST_DRAW", contestId=c["id"],
+                       **event_obj)
             return
         self.draw_count.pop(key, None)
         self.metrics[winner]["contest_wins"] += 1
-        self._emit("WINDOW_CONTEST_END", contestId=c["id"], winnerPlayerId=winner)
+        self._emit("WINDOW_CONTEST_END", contestId=c["id"],
+                   winnerPlayerId=winner, **event_obj)
         act = c["pending"].get(winner)
         if c["type"] == P.CONTEST_PASS:
             atk = next(p for p, a in c["pending"].items() if a is not None)
@@ -632,8 +650,10 @@ class Arena:
         kind = act["kind"]
         t = self.teams[pid]
         if kind == "CLAIM_RESOURCE":
+            frames = self.resource_claim_rounds.get(
+                (act["node"], act["rtype"]), 2)
             t.proc = {"kind": "CLAIM_RESOURCE", "target": act["node"],
-                      "remain": self._proc_frames(pid, act["node"], 2),
+                      "remain": self._proc_frames(pid, act["node"], frames),
                       "meta": {"rtype": act["rtype"]}}
         elif kind == "CLAIM_TASK":
             task = act["task"]
@@ -650,7 +670,9 @@ class Arena:
                                                   n.get("processRound", 0)),
                       "meta": {}}
         elif kind == "VERIFY_GATE":
-            frames = self._proc_frames(pid, self.gate, 6)
+            frames = self._proc_frames(
+                pid, self.gate,
+                max(1, int(self.nodes[self.gate].get("processRound", 6) or 6)))
             if act.get("break_order"):
                 frames = max(3, frames - 3)
             t.proc = {"kind": "VERIFY_GATE", "target": self.gate,

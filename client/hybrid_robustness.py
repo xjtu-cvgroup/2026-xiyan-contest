@@ -45,12 +45,16 @@ def _variant_start(rng, index):
         edge["distance"] = max(
             2, round((edge.get("distance") or 10) * rng.uniform(0.65, 1.55)))
 
+    # S14 仍为终点前必经点，不能随机制造直达 S15 的非法旁路。
+    roles = start["map"]["gameplay"]["roles"]
+    terminal = (roles.get("terminalNodeIds") or ["S15"])[0]
+    extra_nodes = [node_id for node_id in nodes if node_id != terminal]
     existing = {
         frozenset((e.get("fromNodeId"), e.get("toNodeId"))) for e in edges
     }
     for n in range(rng.randint(0, 3)):
         for _ in range(30):
-            src, dst = rng.sample(nodes, 2)
+            src, dst = rng.sample(extra_nodes, 2)
             pair = frozenset((src, dst))
             if pair not in existing:
                 break
@@ -63,8 +67,19 @@ def _variant_start(rng, index):
             "toNodeId": dst,
             "routeType": rng.choice((P.ROAD, P.WATER, P.MOUNTAIN, P.BRANCH)),
             "distance": rng.randint(5, 90),
-            "bidirectional": True,
+            "bidirectional": rng.random() >= 0.25,
         })
+
+    gameplay = start["map"]["gameplay"]
+    for resource in gameplay.get("resources") or []:
+        resource["claimRound"] = rng.randint(1, 8)
+    for proc in gameplay.get("processNodes") or []:
+        proc["processRound"] = rng.randint(2, 9)
+        for node in start["nodes"]:
+            if node["nodeId"] == proc["nodeId"]:
+                node["processRound"] = proc["processRound"]
+                node["processType"] = proc.get("processType")
+                break
     return start
 
 
@@ -88,9 +103,15 @@ def _build_state(rng, index):
     round_no = rng.randint(70, 545)
 
     inquire = copy.deepcopy(BASE_INQUIRE)
+    if round_no >= 450:
+        phase = P.PHASE_RUSH
+    elif round_no >= 390 and rng.random() < 0.55:
+        phase = P.PHASE_RUSH
+    else:
+        phase = P.PHASE_NORMAL
     inquire.update({
         "round": round_no,
-        "phase": P.PHASE_RUSH if round_no >= 390 else P.PHASE_NORMAL,
+        "phase": phase,
         "edges": start["edges"],
         "tasks": [], "contests": [], "events": [], "actionResults": [],
     })
@@ -102,6 +123,10 @@ def _build_state(rng, index):
     else:
         inquire["weather"] = {"active": [], "forecast": []}
 
+    speed_resources = {
+        P.FAST_HORSE: rng.randint(0, 2),
+        P.SHORT_HORSE: rng.randint(0, 2),
+    }
     for player in inquire["players"]:
         if player["playerId"] == state.player_id:
             player.update(
@@ -117,13 +142,17 @@ def _build_state(rng, index):
                 state=P.ST_MOVING, currentNodeId=opp_cur,
                 nextNodeId=opp_next, routeEdgeId=opp_edge["edgeId"],
                 edgeTotalMs=total, edgeProgressMs=progress,
-                currentProcess=None, buffs=[], resources={},
+                currentProcess=None, buffs=[], resources=speed_resources,
                 freshness=rng.uniform(55, 100), goodFruit=rng.randint(0, 100),
                 badFruit=rng.randint(0, 6), taskScore=rng.randrange(0, 181, 15),
                 squadAvailable=rng.choice((0, 2, 4, 6, 8, None)),
                 verified=False, delivered=False, retired=False)
     for node in inquire["nodes"]:
-        node.update(hasObstacle=False, guard=None, resourceStock={}, scouted=[])
+        stock = {}
+        if rng.random() < 0.12:
+            stock[rng.choice((P.FAST_HORSE, P.SHORT_HORSE))] = rng.randint(1, 2)
+        node.update(hasObstacle=False, guard=None,
+                    resourceStock=stock, scouted=[])
     state.on_inquire(inquire)
     return state
 
@@ -237,11 +266,13 @@ def _check_plan(state, strategy, plan):
         state.start_node, "S02", state.gate_node, state.terminal_node)
     assert plan["myEta"] + strategy.warden.MOBILE_GUARD_PAD \
         <= plan["oppEta"]
-    assert plan["delay"] == min(plan["stayDelay"], plan["rerouteDelay"])
+    assert plan["delay"] == min(
+        plan["stayDelay"], plan["rerouteDelay"], plan["reentryDelay"])
     assert plan["delay"] >= strategy.warden.MOBILE_GUARD_MIN_DELAY \
         or (plan.get("upstreamContract")
             and plan["stayDelay"] >= strategy.warden.MOBILE_GUARD_MIN_DELAY)
-    assert plan["myFinish"] + strategy.warden.EXIT_PAD <= remain
+    assert plan["myFinish"] + strategy.warden.EXIT_PAD \
+        + strategy.warden.MOBILE_GUARD_PAD <= remain
     assert plan["finishTax"] == max(
         0, plan["oppFinish"] - plan["oppBaseFinish"])
     expected_mandatory = not strategy._reachable_without(

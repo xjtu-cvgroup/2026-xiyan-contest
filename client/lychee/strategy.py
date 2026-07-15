@@ -563,7 +563,7 @@ class PlannerStrategy(BaselineStrategy):
                     until = state.round + self.WINDOW_SUPPRESS_FALLBACK
                 self._window_suppress_until[key] = max(
                     until, self._window_suppress_until.get(key, -1))
-        elif etype in ("DOCK_CONTEST_WIN", "TASK_CONTEST_WIN",
+        elif etype in ("WINDOW_CONTEST_END", "DOCK_CONTEST_WIN", "TASK_CONTEST_WIN",
                        "RESOURCE_CONTEST_WIN", "GATE_CONTEST_WIN",
                        "OBSTACLE_CONTEST_WIN"):
             self._window_draw_pressure.pop(key, None)
@@ -876,7 +876,7 @@ class PlannerStrategy(BaselineStrategy):
         if s10_toll_hold:
             deny = self._s10_toll_denial_task(state, cur)
             if deny:
-                return P.a_claim_task(deny["taskId"])
+                return self._claim_task_or_yield(state, deny)
             self._s10_toll_hold_spent += 1
             return P.a_wait()
 
@@ -885,6 +885,8 @@ class PlannerStrategy(BaselineStrategy):
         # 读任务条时，落后 5 帧的对手把冰从眼皮底下领走（r92），任务不会跑、
         # 库存资源会。对手赶得上偷时，资源优先。
         if plan.kind == "task" and cur == plan.position:
+            if self._yield_task_after_draw(state, cur):
+                return P.a_wait()
             steal_risk = self._contested_claim_first(state, cur, plan)
             if steal_risk:
                 return steal_risk
@@ -900,10 +902,14 @@ class PlannerStrategy(BaselineStrategy):
         if rescue and (cur in ("S10", "S11")
                        or (gate_feeder and low_value_plan)) \
                 and (me.get("taskScore", 0) or 0) < 150:
-            return P.a_claim_task(rescue["taskId"])
+            return self._claim_task_or_yield(state, rescue)
 
-        # 资源提货目标：到位就领（V3.2 冰鉴猎手；同帧撞车交给窗口博弈）
+        # 资源提货目标：首次照常争；只有窗口已经真实 DRAW，才用奇偶
+        # 错峰拆镜像。这样保留关键资源的首争胜机，又不会让低盘口窗口
+        # 反复平局烧掉整局。S01/S02 仍由 Warden 专门接管。
         if plan.kind == "resource" and cur == plan.position:
+            if self._yield_resource_after_draw(state, cur):
+                return P.a_wait()
             return P.a_claim_resource(cur, plan.resource)
 
         # 顺路领取（余量闸门 15：领取只花 2 帧读条，换 +18 分几乎恒值；
@@ -943,7 +949,7 @@ class PlannerStrategy(BaselineStrategy):
 
         rescue = self._same_node_low_score_task(state, plan, cur)
         if rescue:
-            return P.a_claim_task(rescue["taskId"])
+            return self._claim_task_or_yield(state, rescue)
 
         # 尾段蹲刷（V3.10）：没有值得做的目标且余量充足时，站在任务候选点
         # 上等刷新 —— 刷出的任务下一帧就会被 plan 接住（同点零绕路必中）
@@ -1457,6 +1463,8 @@ class PlannerStrategy(BaselineStrategy):
             return None
         # 只为高价值资源打断任务顺序（冰鉴 17 分；马预留另有机制）
         if stock.get(P.ICE_BOX, 0) > 0 and res.get(P.ICE_BOX, 0) < 2:
+            if self._yield_resource_after_draw(state, cur):
+                return P.a_wait()
             return P.a_claim_resource(cur, P.ICE_BOX)
         return None
 
@@ -1518,7 +1526,7 @@ class PlannerStrategy(BaselineStrategy):
         me = state.me
         task = self._idle_task_upgrade(state, plan, min_wait)
         if task:
-            return P.a_claim_task(task["taskId"])
+            return self._claim_task_or_yield(state, task)
         if (me.get("resources") or {}).get(P.INTEL, 0) <= 0:
             return P.a_wait()
         cur = me.get("currentNodeId")
@@ -1842,6 +1850,30 @@ class PlannerStrategy(BaselineStrategy):
         if opp.get("state") not in (P.ST_IDLE, P.ST_WAITING):
             return False
         return (state.round + state.player_id) % 2 == 1
+
+    def _yield_resource_after_draw(self, state, cur):
+        """普通资源首窗照争；确认 DRAW 后才错峰终止重复窗口。"""
+        key = (cur, P.CONTEST_RESOURCE)
+        count, last_round = self._window_draw_pressure.get(key, (0, -999))
+        if count < 1 or state.round - last_round > self.WINDOW_DRAW_PRESSURE_DECAY:
+            return False
+        return self._yield_for_contention(state)
+
+    def _yield_task_after_draw(self, state, cur):
+        """普通任务首窗照争；S02 永不由通用层主动让出。"""
+        if cur == "S02":
+            return False
+        key = (cur, P.CONTEST_TASK)
+        count, last_round = self._window_draw_pressure.get(key, (0, -999))
+        if count < 1 or state.round - last_round > self.WINDOW_DRAW_PRESSURE_DECAY:
+            return False
+        return self._yield_for_contention(state)
+
+    def _claim_task_or_yield(self, state, task):
+        node_id = task.get("nodeId") or state.me.get("currentNodeId")
+        if self._yield_task_after_draw(state, node_id):
+            return P.a_wait()
+        return P.a_claim_task(task["taskId"])
 
     def _yield_process_after_draw(self, state, cur):
         if cur != "S02":

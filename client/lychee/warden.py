@@ -732,7 +732,12 @@ class WardenStrategy(BaselineStrategy):
         stock = state.node(cur).get("resourceStock") or {}
         res = me.get("resources") or {}
         for rt in self.CLAIM_EN_ROUTE:
-            if stock.get(rt, 0) > 0 and res.get(rt, 0) < 1:
+            if stock.get(rt, 0) <= 0 or res.get(rt, 0) >= 1:
+                continue
+            claim = self._resource_claim_frames(state, cur, rt)
+            # 现有快马只在 2 帧领取时能稳定省回成本；变种图若拉长读条，
+            # 竞速主墙不能沿用旧常数把负收益资源置于赶路之前。
+            if claim is not None and claim <= 2:
                 return P.a_claim_resource(cur, rt)
         return None
 
@@ -829,12 +834,17 @@ class WardenStrategy(BaselineStrategy):
                    for b in (opp.get("buffs") or []))
 
     def _opening_claim_round(self, state, resource_type):
-        rounds = [r.get("claimRound") for r in state.resource_config
-                  if r.get("nodeId") == state.start_node
-                  and r.get("resourceType") == resource_type
-                  and r.get("claimRound") is not None]
+        rounds = []
+        for item in state.resource_config:
+            if item.get("nodeId") != state.start_node \
+                    or item.get("resourceType") != resource_type:
+                continue
+            try:
+                rounds.append(max(1, int(item.get("claimRound"))))
+            except (TypeError, ValueError):
+                continue
         # 即使配置读条为0，CLAIM_RESOURCE 也会占用当帧主动作。
-        return max(1, int(rounds[0])) if rounds else None
+        return max(rounds) if rounds else None
 
     def _opening_horse_route(self, state, resource_type, claim_round):
         """精确模拟：领取后先上边 1 帧，下一帧才能在移动中用马。"""
@@ -950,18 +960,25 @@ class WardenStrategy(BaselineStrategy):
     # ---- S02 资源时机：只花可证明的领先/排队帧 ----
 
     def _s02_resource_claim_frames(self, state, resource_type):
+        frames = self._resource_claim_frames(state, "S02", resource_type)
+        if frames is None:
+            return None
+        if frames >= 3 and self._has_our_mark(state, "S02"):
+            frames = max(2, frames - 3)
+        return frames
+
+    @staticmethod
+    def _resource_claim_frames(state, node_id, resource_type):
+        rounds = []
         for item in state.resource_config:
-            if item.get("nodeId") != "S02" \
+            if item.get("nodeId") != node_id \
                     or item.get("resourceType") != resource_type:
                 continue
             try:
-                frames = max(1, int(item.get("claimRound")))
+                rounds.append(max(1, int(item.get("claimRound"))))
             except (TypeError, ValueError):
-                return None
-            if frames >= 3 and self._has_our_mark(state, "S02"):
-                frames = max(2, frames - 3)
-            return frames
-        return None
+                continue
+        return max(rounds) if rounds else None
 
     @staticmethod
     def _process_remain(player):
@@ -1224,7 +1241,7 @@ class WardenStrategy(BaselineStrategy):
         return 0                           # 普通节点免费防2，可反复滚动截击
 
     def _mobile_guard_delay(self, state, node_id, extra, edge_remain):
-        """对手在“等卡/拆卡”和“中途改道”中选更快者后的保底延误。"""
+        """对手在等卡、绕开和改边后回攻中选最快者的保底延误。"""
         opp = state.opp
         origin = opp.get("currentNodeId")
         gate = state.gate_node
@@ -1241,7 +1258,32 @@ class WardenStrategy(BaselineStrategy):
             return 0
         direct = edge_remain + direct_after
         reroute_delay = max(0, alt - direct) if alt_path else 999
-        return min(stay_delay, reroute_delay)
+        reentry_delay = self._mobile_reentry_escape_delay(
+            state, node_id, edge_remain)
+        return min(stay_delay, reroute_delay, reentry_delay)
+
+    def _mobile_reentry_escape_delay(self, state, node_id, edge_remain):
+        """边上改走其它邻点，再回到被卡点/起点强闯的乐观额外耗时。
+
+        任务书允许在途从原边起点改走其它相邻边。为避免误证“锁死”，
+        对手后续穿过设卡的窗口和时间税全部按 0 计，只保留不可消除的
+        改道路程；这覆盖三角直达和“邻点->原点->强闯”两种合法路线。
+        """
+        opp = state.opp or {}
+        origin = opp.get("currentNodeId")
+        if not origin or not node_id:
+            return 999
+        best = 999
+        for first_hop, first_edge in state.graph.neighbors(origin):
+            if first_hop == node_id:
+                continue
+            tail, path = self._shortest(
+                state, first_hop, node_id, P.SPEED_RUSH)
+            if not path:
+                continue
+            first = state.graph.edge_frames(first_edge, P.SPEED_RUSH)
+            best = min(best, max(0, first + tail - edge_remain))
+        return best
 
     def _mobile_stay_delay(self, state, node_id, extra, edge_remain):
         """卡在对手到站时剩余的阻塞时间，含其公开小分队拆卡上界。"""
@@ -2276,20 +2318,26 @@ class WardenStrategy(BaselineStrategy):
         if wall <= 0:
             return False
         edge = self._opp_edge_remaining(state)
+        arrival = max(wall, edge)
+        reentry = self._mobile_reentry_escape_delay(state, cur, edge)
+        if reentry < 999:
+            arrival = min(arrival, edge + reentry)
         after = self._opp_delivery_lower_bound(state, cur)
         if after >= 999:
             return True
-        verify = 0 if opp.get("verified") else self._gate_verify_frames(state)
-        earliest = wall + edge + verify + after
+        verify = 0 if opp.get("verified") else max(
+            2, self._gate_verify_frames(state) - 6)
+        earliest = arrival + verify + after
         remain = state.duration_round - state.round
-        # 帧序只留 1 帧边界；wall/after 本身都已向对手方向低估。
+        # 边余量与卡风化并行，不能相加；改边回攻按零强通税给对手。
+        # 帧序只留 1 帧边界，其余各项都已向对手方向低估。
         dead = earliest > remain + 1
         if dead and self.log:
             self.log.info(
                 "warden: active gate wall proves death "
-                "(wall %.0f + edge %.0f + verify %.0f + after %.0f "
+                "(arrival %.0f + verify %.0f + after %.0f "
                 "> remain %d), leaving",
-                wall, edge, verify, after, remain)
+                arrival, verify, after, remain)
         return dead
 
     def _eta_to_gate(self, state, cur, speed, include_current=False):
@@ -2336,7 +2384,10 @@ class WardenStrategy(BaselineStrategy):
                          if t.get("taskId") == tid), None)
             cost = (task.get("processRound", 4) if task else 4) + 2
         elif action.get("action") == "CLAIM_RESOURCE":
-            cost = 2
+            cost = self._resource_claim_frames(
+                state, action.get("targetNodeId"), action.get("resourceType"))
+            if cost is None:
+                return None
         if cost and self._departure_slack(state, cur) < cost:
             return None
         return action
@@ -2353,7 +2404,7 @@ class WardenStrategy(BaselineStrategy):
         defense = self._my_guard_defense(state, cur)
         if defense <= 0:
             return None
-        edge_remain = self._opp_edge_remain_to(state, cur)
+        edge_remain = self._opp_edge_remaining(state)
         if defense > self.HANDOFF_GUARD_DEFENSE \
                 and edge_remain >= self.GUARD_MIN_LEAD:
             return None
@@ -2375,6 +2426,9 @@ class WardenStrategy(BaselineStrategy):
         # 对手被当前墙挡到风化，再按最乐观规则冲宫门：
         # 不计天气/中转处理，只要这个下界仍能接死才允许换墙。
         opp_gate_eta = max(edge_remain, self._my_guard_remaining(state, cur))
+        reentry = self._mobile_reentry_escape_delay(state, cur, edge_remain)
+        if reentry < 999:
+            opp_gate_eta = min(opp_gate_eta, edge_remain + reentry)
         opp_to_gate, path = self._travel_dynamic(
             state, cur, state.gate_node, P.RUSH_SPEED, RUSH_SPEED_FRAMES,
             include_intermediate_process=False, conservative_weather=False)
@@ -2412,12 +2466,33 @@ class WardenStrategy(BaselineStrategy):
         attack = min(2, max(0, good)) * 2 + min(2, max(0, bad)) * 3
         if attack >= self.GATE_GUARD_DEFENSE:
             return 0
+        # RUSH 中对手可把破关令绑定攻坚。成本与攻坚投入分开结算：坏果
+        # 至少2时先付2坏果，否则付1好果，再从余量里取本拍攻坚投入。
+        if state.phase == P.PHASE_RUSH \
+                and not (opp.get("rushTacticUsedCount") or 0):
+            break_good, break_bad = good, bad
+            if break_bad >= 2:
+                break_bad -= 2
+            elif break_good >= 1:
+                break_good -= 1
+            else:
+                break_good = break_bad = -1
+            if break_good >= 0:
+                break_attack = min(2, break_good) * 2 \
+                    + min(2, break_bad) * 3 + 3
+                if break_attack >= self.GATE_GUARD_DEFENSE:
+                    return 0
         squad = opp.get("squadAvailable")
         if state.phase != P.PHASE_RUSH and squad is not None \
                 and squad >= self.SQUAD_WEAKEN_COST \
                 and attack + 2 >= self.GATE_GUARD_DEFENSE:
             return 0
-        return self.GATE_GUARD_DEFENSE * self.GUARD_DECAY_FRAMES
+        # 即使攻坚资源不足，对手仍可赢下通行窗后支付宫门强通税。忽略
+        # 窗口本身的耗时，防4宫门卡能确定制造的额外时间最多只有32帧，
+        # 不能再把120帧自然风化当作拒止证明的下界。
+        forced_pass_tax = min(32, 12 + self.GATE_GUARD_DEFENSE * 5)
+        natural = self.GATE_GUARD_DEFENSE * self.GUARD_DECAY_FRAMES
+        return min(natural, forced_pass_tax)
 
     def _can_rush_speed(self, state):
         me = state.me
