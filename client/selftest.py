@@ -6282,27 +6282,50 @@ def test_hybrid_strategy():
                 hybrid._mobile_hold_node == "S09",
                 f"hold={hybrid._mobile_hold_node} acts={acts}")
 
-    # 04 短宫门的预埋墙可被富资源对手一拍拆掉，但这不能关闭 2621
-    # 动态堵：对手已经踏上普通节点入边后，主车无法攻坚，只能派小队
-    # 或改道。只要两种逃法的最小延迟仍达标，就应落免费卡并锁存复卡。
+    # 04 短宫门的预埋墙可被富资源对手一拍拆掉。普通动态卡虽有 8 帧
+    # 保底税，但不足以改变交付结果，不能再覆盖 Planner 得分路线。
     gs = make_state(bypass=True, short_gate=True, cur="S09",
                     opp_cur="S07", opp_next="S09", opp_edge="E04",
                     opp_edge_ms=66240, opp_edge_progress=9000,
                     round_no=363, task_score=30, opp_squads=2)
-    hybrid = HybridStrategy()
-    acts = hybrid.decide(gs)
-    plan = hybrid._mobile_control_plan(gs)
-    ok &= check("hybrid: 最终短门不可控仍保留2621动态截击",
-                hybrid._final_gate_uncontrollable
+    short_soft = HybridStrategy()
+    acts = short_soft.decide(gs)
+    plan = short_soft._mobile_control_plan(gs)
+    ok &= check("hybrid: 最终短门不可控时非拒止动态税不压得分",
+                short_soft._final_gate_uncontrollable
                 and plan and plan["target"] == "S09"
-                and plan["delay"] >= hybrid.warden.MOBILE_GUARD_MIN_DELAY
+                and plan["delay"]
+                >= short_soft.warden.MOBILE_GUARD_MIN_DELAY
+                and not plan["denial"]
                 and not plan["upstreamContract"]
+                and not short_soft._mobile_plan_actionable(plan)
+                and not any(a["action"] == "SET_GUARD" for a in acts)
+                and short_soft._mobile_hold_node is None,
+                f"final={short_soft._final_gate_uncontrollable} "
+                f"plan={plan} hold={short_soft._mobile_hold_node} acts={acts}")
+
+    # 同一几何进入终局后，8 帧保底税已经足以令对手错过 600 帧；此时
+    # 2612 动态堵重新成为最高优先级，并允许免费复卡保持确定拒止。
+    gs = make_state(bypass=True, short_gate=True, cur="S09",
+                    opp_cur="S07", opp_next="S09", opp_edge="E04",
+                    opp_edge_ms=66240, opp_edge_progress=9000,
+                    round_no=447, phase=P.PHASE_RUSH,
+                    task_score=30, opp_squads=2)
+    short_denial = HybridStrategy()
+    acts = short_denial.decide(gs)
+    plan = short_denial._mobile_control_plan(gs)
+    ok &= check("hybrid: 最终短门不可控仍保留确定拒止动态墙",
+                short_denial._final_gate_uncontrollable
+                and plan and plan["target"] == "S09" and plan["denial"]
+                and short_denial._mobile_plan_actionable(plan)
                 and any(a["action"] == "SET_GUARD"
                         and a["targetNodeId"] == "S09"
                         and a["extraGoodFruit"] == 0 for a in acts)
-                and hybrid._mobile_hold_node == "S09",
-                f"final={hybrid._final_gate_uncontrollable} "
-                f"plan={plan} hold={hybrid._mobile_hold_node} acts={acts}")
+                and short_denial._mobile_hold_node == "S09"
+                and short_denial._mobile_hold_denial,
+                f"final={short_denial._final_gate_uncontrollable} "
+                f"plan={plan} hold={short_denial._mobile_hold_node} "
+                f"denial={short_denial._mobile_hold_denial} acts={acts}")
 
     # replay.report (2)：S09 免费卡完成后，对手仍明确在 S07->S09 边上。
     # 模拟进程标记缺失：现场有效免费卡必须恢复留守，不能落卡即走。

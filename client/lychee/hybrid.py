@@ -43,6 +43,7 @@ class HybridStrategy(Strategy):
         self.mobile_target = None
         self.mobile_plan = None
         self._mobile_hold_node = None
+        self._mobile_hold_denial = False
         self._moving_pivot_lock = None
         self._gate_pace_active = False
         self._s02_farm_only = False
@@ -154,11 +155,18 @@ class HybridStrategy(Strategy):
             return self._replace_main_action(actions, pivot)
         score_plan = self.planner.last_plan
         plan = self._mobile_control_plan(state)
+        if not self._mobile_plan_actionable(plan):
+            plan = None
         force_guard = bool(
             plan and plan["denial"]
             and plan["target"] == state.me.get("currentNodeId"))
-        intercept = self._score_mobile_intercept(
-            state, allow_reserve=force_guard)
+        # 04 型最终门不可控时，普通 6~8 帧动态税不能覆盖得分路线；
+        # 只有当前这张卡已证明会把对手推过 600 帧才允许抢主动作。
+        intercept = None
+        if not self._final_gate_uncontrollable or force_guard:
+            intercept = self._score_mobile_intercept(
+                state, allow_reserve=force_guard,
+                control_denial=force_guard)
         if intercept:
             return self._replace_main_action(actions, intercept)
         if plan:
@@ -811,7 +819,7 @@ class HybridStrategy(Strategy):
             + gate_term + DELIVER_FRAMES
 
     def _score_mobile_intercept(self, state, allow_reserve=False,
-                                deny_only=False):
+                                deny_only=False, control_denial=False):
         """已经占住对手下一站时，立即兑现 2621 式反应卡。"""
         me = state.me
         if not me or me.get("verified") or me.get("delivered") \
@@ -826,10 +834,11 @@ class HybridStrategy(Strategy):
         action = self.warden.mobile_intercept_action(
             state, slack, allow_reserve=allow_reserve)
         if action:
-            self._remember_mobile_guard_action(state, [action])
+            self._remember_mobile_guard_action(
+                state, [action], denial=control_denial)
         return action
 
-    def _remember_mobile_guard_action(self, state, actions):
+    def _remember_mobile_guard_action(self, state, actions, denial=False):
         """锁存任意策略入口刚提交的普通点免费截击卡。"""
         main = self._main_action(actions)
         if not main or main.get("action") != "SET_GUARD":
@@ -845,6 +854,22 @@ class HybridStrategy(Strategy):
                 or not self.warden._opp_inbound(state, node_id):
             return
         self._mobile_hold_node = node_id
+        self._mobile_hold_denial = bool(denial)
+
+    def _mobile_delay_denies_delivery(self, state, node_id, delay):
+        """当前节点这一张动态卡是否足以把对手确定推过交付死线。"""
+        opp = state.opp
+        if not opp or not self.warden._opp_inbound(state, node_id):
+            return False
+        edge_remain = self.warden._opp_edge_remaining(state)
+        after, path = self.warden._shortest(
+            state, node_id, state.gate_node, P.SPEED_RUSH)
+        if not path:
+            return False
+        base = self._opponent_finish_lower_bound(
+            state, edge_remain + after)
+        remain = state.duration_round - state.round
+        return base <= remain < base + delay
 
     def _mobile_reguard_safe(self, state, node_id):
         """免费移动卡可续守一帧，且保住交付与后续控制合同。"""
@@ -871,11 +896,13 @@ class HybridStrategy(Strategy):
         # WAIT 本身也占一帧，不能把 EXIT_PAD 的最后一帧拿去陪卡。
         if finish_need + self.warden.EXIT_PAD + 1 > remain:
             return False
-        # 最终宫门不可控不代表局部动态墙不可控。对手已上边后
-        # 无法用主车攻坚，只能用小分队拆或改道；上面已按这两种
-        # 最快应对证明 delay>=6，因此允许 2612 式留守/复卡。
+        # 最终宫门不可控时，胜负底盘只能靠得分。普通 6~8 帧税不再
+        # 支付长期驻守成本；只有当前卡已证明会令对手无法交付，才续守。
         if not self._gate_has_reaction_window(state):
-            return self._final_gate_uncontrollable
+            return bool(self._final_gate_uncontrollable
+                        and (self._mobile_hold_denial
+                             or self._mobile_delay_denies_delivery(
+                                 state, node_id, delay)))
         return self._gate_lead_budget(state) >= 1
 
     def _mobile_hold_score_action(self, state, node_id):
@@ -920,6 +947,10 @@ class HybridStrategy(Strategy):
                     or not self._mobile_reguard_safe(state, cur):
                 return None
             self._mobile_hold_node = node_id = cur
+            self._mobile_hold_denial = self._mobile_delay_denies_delivery(
+                state, cur, self.warden._mobile_guard_delay(
+                    state, cur, self.warden._mobile_guard_extra(state, cur),
+                    self.warden._opp_edge_remaining(state)))
             if self.log:
                 self.log.info("hybrid: recovered mobile guard hold @%s", cur)
         me = state.me
@@ -928,11 +959,13 @@ class HybridStrategy(Strategy):
                 or me.get("verified") or me.get("delivered") \
                 or me.get("retired"):
             self._mobile_hold_node = None
+            self._mobile_hold_denial = False
             return None
         if me.get("state") in P.BUSY_STATES:
             return None
         if not self._mobile_reguard_safe(state, node_id):
             self._mobile_hold_node = None
+            self._mobile_hold_denial = False
             return None
 
         guard = state.node(node_id).get("guard")
@@ -945,10 +978,12 @@ class HybridStrategy(Strategy):
         action = self._score_mobile_intercept(
             state,
             allow_reserve=self._s02_deny_only or self.warden._deny_only_mode,
-            deny_only=self._s02_deny_only or self.warden._deny_only_mode)
+            deny_only=self._s02_deny_only or self.warden._deny_only_mode,
+            control_denial=self._mobile_hold_denial)
         if action:
             return action
         self._mobile_hold_node = None
+        self._mobile_hold_denial = False
         return None
 
     @staticmethod
@@ -1027,10 +1062,25 @@ class HybridStrategy(Strategy):
             return False
         if state.enemy_guard(target):
             return True
+        # 统一画像已确认纯农且全场未见卡时，不再把“它会在每个下一站
+        # 瞬间设卡”当确定事实。否则 E25 会连续改边清空进度。画像一旦
+        # 被真实设卡证据推翻，两个 guard_seen 会永久恢复完整避卡。
+        if not self._final_gate_uncontrollable \
+                and self.planner._opp_profile == "farmer" \
+                and not self.planner._opp_ordinary_guard_seen \
+                and not self.planner.planner._guard_seen:
+            return False
         opp = state.opp
         if not opp or not opp.get("routeEdgeId") \
                 or opp.get("nextNodeId") != target:
             return False
+        # 同边同向时天气会同时作用于双方，不能拿“我方最坏天气”与
+        # “对手永远晴天”制造虚假领先。这里只认公开进度已经形成的
+        # MOBILE_GUARD_PAD；若对手随后用马拉开，逐帧观测会及时触发。
+        if opp.get("routeEdgeId") == state.me.get("routeEdgeId"):
+            my_eta = self._edge_remaining_frames(state.me, optimistic=True)
+            opp_eta = self._edge_remaining_frames(opp, optimistic=True)
+            return opp_eta + self.warden.MOBILE_GUARD_PAD <= my_eta
         boost_type, boost_rem, _ = self.warden._active_speed_buff(
             state, state.me)
         my_eta, _, _ = self._conservative_edge_remaining(
@@ -1096,6 +1146,13 @@ class HybridStrategy(Strategy):
             return None
         plan = self._mobile_control_plan(
             state, require_delivery=True, my_origin=origin)
+        if not self._mobile_plan_actionable(plan):
+            return None
+        # 已经上边后改目标会清空当前进度。躲确定敌卡仍在上方立即执行；
+        # 主动控路则必须证明新墙会令对手无法交付，普通 6~8 帧税留到
+        # 下一节点再规划，禁止 E25 型连续三次软 pivot 把自己走慢。
+        if not plan.get("denial"):
+            return None
         first_hop = plan.get("firstHop") if plan else None
         if not first_hop or first_hop == target:
             return None
@@ -1237,7 +1294,8 @@ class HybridStrategy(Strategy):
             detour = max(0, via_gate - my_gate)
             finish_need = self._my_finish_need(state, via_gate)
             if require_delivery \
-                    and finish_need + self.warden.EXIT_PAD > remain:
+                    and finish_need + self.warden.EXIT_PAD \
+                    + self.warden.MOBILE_GUARD_PAD > remain:
                 continue
 
             delayed_finish = self._opponent_finish_lower_bound(
@@ -1273,6 +1331,16 @@ class HybridStrategy(Strategy):
             return self._held_mobile_plan(
                 state, require_delivery=require_delivery)
         return min(candidates, key=lambda item: item[0])[1]
+
+    def _mobile_plan_actionable(self, plan):
+        """最终门不可控图仅执行能确定改变交付结果的动态控制。"""
+        if not plan:
+            return False
+        if self._s02_deny_only or self.warden._deny_only_mode:
+            return True
+        if not self._final_gate_uncontrollable:
+            return True
+        return bool(plan.get("denial"))
 
     def _held_mobile_plan(self, state, require_delivery=True):
         """对手短暂停站时守住已抢墙位；确认改线或触碰死线才解除。"""

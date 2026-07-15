@@ -19,6 +19,7 @@ from lychee.state import GameState
 from lychee.warden import WardenStrategy
 from scenario_maps import (e25_bypass_start, gate_bypass_start,
                            predicted_optional_s02_start,
+                           predicted_split_corridors_start,
                            predicted_short_gate_start, public_v42_start,
                            variant1_e25_start, variant1_start)
 
@@ -321,7 +322,7 @@ def test_mobile_intercept_uses_conservative_eta():
 
 
 def test_moving_pivot_replay_contracts():
-    """04/05复盘：在途必须吸收下一帧才公开的对手路线证据。"""
+    """04/05复盘：在途只为确定敌卡或确定拒止放弃已有进度。"""
     short = make_state(
         predicted_short_gate_start(), round_no=327,
         my_node="S10", opp_node="S09",
@@ -331,8 +332,8 @@ def test_moving_pivot_replay_contracts():
     hybrid.mode = hybrid.MODE_MOBILE
     hybrid.on_start(short)
     action = hybrid._main_action(hybrid.decide(short))
-    check("04短边图在途转抢S11汇合点",
-          action == P.a_move("S11"), str(action))
+    check("04短边图不为非拒止软税清空在途进度",
+          action is None, str(action))
 
     # 服务端执行改边后，起点仍是 S10、目标变为 S11。同一条公开证据
     # 不得让策略下一帧再次清空进度换回其它边。
@@ -341,8 +342,19 @@ def test_moving_pivot_replay_contracts():
         currentNodeId="S10", nextNodeId="S11", routeEdgeId="E06",
         edgeTotalMs=short.graph.edge_total_move(edge),
         edgeProgressMs=P.BASE_SPEED, state=P.ST_MOVING)
-    check("在途改边锁防止同一起点来回横跳",
+    check("非拒止路线证据下一帧仍不触发横跳",
           hybrid._moving_pivot_action(short) is None)
+
+    same_edge = make_state(
+        predicted_split_corridors_start(), round_no=2,
+        my_node="S01", opp_node="S01",
+        my_edge=("E15", "S01", "S06"), my_edge_progress=P.BASE_SPEED,
+        opp_edge=("E15", "S01", "S06"), opp_edge_progress=P.BASE_SPEED)
+    hybrid_same = HybridStrategy()
+    hybrid_same.mode = hybrid_same.MODE_MOBILE
+    hybrid_same.on_start(same_edge)
+    check("同边同进度不因非对称天气假设误判设卡威胁",
+          not hybrid_same._moving_target_guard_threat(same_edge, "S06"))
 
     optional = make_state(
         predicted_optional_s02_start(), round_no=199,
