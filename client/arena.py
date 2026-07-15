@@ -1484,10 +1484,38 @@ class Arena:
         sa, sb = out[PID_A]["score"], out[PID_B]["score"]
         out["winner"] = PID_A if sa > sb else PID_B if sb > sa else 0
         out["margin"] = sa - sb
+        # 任务书 9.2/9.5 平台积分：总分高 3:0；双 0 → 0:0；同分>0 走
+        # 决胜阶梯（鲜度→好果→惩罚，各 3:1），全平 1:1。winner 字段
+        # 语义保持总分口径不变；平台积分与阶梯结论用独立字段暴露，
+        # 让"80:80 比鲜度输 1:3"这类败局在离线测试里可见、可回归。
+        out["platformPoints"], out["ladder"] = self._platform_points(out)
         if self.capture_timeline:
             out["timeline"] = self.timeline
         out["strategyErrors"] = list(self.strategy_errors)
         return out
+
+    @staticmethod
+    def _platform_points(out):
+        a, b = out[PID_A], out[PID_B]
+        sa, sb = a["score"], b["score"]
+        if sa > sb:
+            return (3, 0), {"applied": False, "level": None, "winner": PID_A}
+        if sb > sa:
+            return (0, 3), {"applied": False, "level": None, "winner": PID_B}
+        if sa == 0:
+            return (0, 0), {"applied": False, "level": None, "winner": 0}
+        for level, key, prefer_high in (
+                ("fresh", "fresh", True),
+                ("good", "good", True),
+                ("penalty", "illegal", False)):
+            va, vb = a[key], b[key]
+            if va == vb:
+                continue
+            a_wins = (va > vb) if prefer_high else (va < vb)
+            winner = PID_A if a_wins else PID_B
+            pts = (3, 1) if a_wins else (1, 3)
+            return pts, {"applied": True, "level": level, "winner": winner}
+        return (1, 1), {"applied": True, "level": "tie", "winner": 0}
 
 
 def run_match(seed, patches_a=None, patches_b=None, max_round=600,

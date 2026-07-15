@@ -111,6 +111,7 @@ class HybridStrategy(Strategy):
             return s02_actions
 
         self._resolve_s02_outcome(state)
+        self._recheck_midgame_death(state)
         if self._s02_farm_only:
             self.warden._deny_only_mode = False
             self.warden._score_farm_mode = True
@@ -433,6 +434,43 @@ class HybridStrategy(Strategy):
             return False
         need = self._opponent_finish_lower_bound(state, opp_eta)
         return need <= state.duration_round - state.round
+
+    def _recheck_midgame_death(self, state):
+        """MOBILE 得分模式的中局死亡补判（V3.98.27）。
+
+        三态原来只在 S02 完成帧锁存一次；中途被冻/被锁死的局会永远
+        空跑交付线，白扔 min(task,80) 的未交付农分和拒止机会。这里
+        用与对手同款的最乐观下界（晴天/疾行/零中转/资源瞬发）证明
+        自身已死才转态——只认证明，不认"未证安全"。
+        """
+        if self._s02_farm_only or self._s02_deny_only:
+            return
+        me = state.me
+        if not me or me.get("delivered") or me.get("verified"):
+            return
+        my_eta = self._gate_eta(state, me, optimistic=True)
+        if my_eta >= 999:
+            return  # 乐观下界断路只是未证可达，不构成死亡证明
+        need = self._opponent_finish_lower_bound(state, my_eta)
+        remain = state.duration_round - state.round
+        if need <= remain:
+            return
+        if self._opponent_can_still_finish(state):
+            self._s02_deny_only = True
+            self.warden._deny_only_mode = True
+            self.warden._score_farm_mode = False
+            if self.log:
+                self.log.info(
+                    "hybrid: midgame death -> deny-only r=%d myEta=%s "
+                    "need=%s remain=%d", state.round, my_eta, need, remain)
+        else:
+            self._s02_farm_only = True
+            self.warden._score_farm_mode = True
+            self.warden._deny_only_mode = False
+            if self.log:
+                self.log.info(
+                    "hybrid: midgame death -> farm-only r=%d myEta=%s "
+                    "need=%s remain=%d", state.round, my_eta, need, remain)
 
     def _should_commit_denial_gate(self, state):
         """拒止局不要求我方还能交付，只证明能先到且来得及落卡。"""

@@ -1891,13 +1891,17 @@ class TaskPlanner:
 
         V3.7 修复：对手在边上时曾把 nextNodeId 当作已到达（ETA=0），
         导致主动设卡的时机判断（教科书场景：我在武关、它在半路）永远不成立。
+        V3.98.27 修复：边上余量必须计对手公开的骑乘增益与库存马——
+        这是全部对手 ETA 里唯一"低估对手速度会把我们送上被冻长边"
+        的乐观方向（陷阱汇聚判定 risk = opp_eta + 4 < our_eta）。
         """
         opp = state.opp
         edge_remain = 0.0
         if opp.get("routeEdgeId") and opp.get("nextNodeId"):
             total = opp.get("edgeTotalMs") or 0
             done = opp.get("edgeProgressMs") or 0
-            edge_remain = max(0, total - done) / 1000.0  # 对手速度按基准估
+            edge_remain = self._opp_edge_frames_boosted(
+                opp, max(0, total - done))
             opp_node = opp.get("nextNodeId")
         else:
             opp_node = opp.get("currentNodeId")
@@ -1905,6 +1909,39 @@ class TaskPlanner:
             return math.inf
         f, path = state.graph.shortest_path(opp_node, node_id)
         return edge_remain + f if path else math.inf
+
+    @staticmethod
+    def _opp_edge_frames_boosted(opp, remain_ms):
+        """对手边上余量帧数：在身增益按剩余帧生效，库存马按可随时
+        上马计入（任务书 3.3.2 当帧生效）。风险判定方向=宁可高估对手。"""
+        speed_map = {P.FAST_HORSE: P.SPEED_FAST_HORSE,
+                     P.SHORT_HORSE: P.SPEED_SHORT_HORSE,
+                     P.RUSH_SPEED: P.SPEED_RUSH}
+        boost_speed, boost_rem = P.BASE_SPEED, 0
+        for b in opp.get("buffs") or []:
+            spd = speed_map.get(b.get("type") or b.get("buffType"))
+            rem = 0
+            for key in ("remainRound", "remainingRound",
+                        "remain", "durationRound"):
+                if b.get(key) is not None:
+                    try:
+                        rem = max(0, int(b[key]))
+                    except (TypeError, ValueError):
+                        rem = 0
+                    break
+            if spd and rem > 0 and spd > boost_speed:
+                boost_speed, boost_rem = spd, rem
+        res = opp.get("resources") or {}
+        if res.get(P.FAST_HORSE, 0) > 0 \
+                and (boost_speed < P.SPEED_FAST_HORSE or boost_rem < 20):
+            boost_speed, boost_rem = P.SPEED_FAST_HORSE, max(boost_rem, 20)
+        elif res.get(P.SHORT_HORSE, 0) > 0 and boost_rem <= 0:
+            boost_speed, boost_rem = P.SPEED_SHORT_HORSE, 14
+        if boost_rem <= 0 or boost_speed <= P.BASE_SPEED:
+            return remain_ms / float(P.BASE_SPEED)
+        boosted_ms = min(remain_ms, boost_speed * boost_rem)
+        return boosted_ms / float(boost_speed) \
+            + max(0.0, remain_ms - boosted_ms) / float(P.BASE_SPEED)
 
     @staticmethod
     def _opp_processing_task(state, task):

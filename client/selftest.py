@@ -4343,9 +4343,21 @@ def test_front_tempo_tail_follow():
     st_corr2 = PlannerStrategy()
     gs = gs_front(tasks=(t_s07_road, t_s06_mtn), opp_cur="S03",
                   opp_next="S06", opp_edge="E18", obstacle=False)
+    # 本钉测走廊纪律而非马竞速：清掉 fixture 底料里对手的骑乘增益，
+    # 否则 V3.98.27 的对手 ETA 建模会让 S06 任务因真实竞速劣势被弃。
+    gs.players[2002].update(buffs=[], resources={})
     plan = st_corr2.planner.plan(gs)
     ok &= check("前段走廊: 对手山路已动身时不反切官道任务",
                 plan.kind == "task" and plan.position == "S06",
+                repr(plan))
+    # V3.98.27 补钉：对手真带活跃快马冲向 S06 时，追这单任务是必输
+    # 竞速——正确行为是弃单，不再按基准速度误判"我们先到"。
+    st_corr2b = PlannerStrategy()
+    gs = gs_front(tasks=(t_s06_mtn,), opp_cur="S03",
+                  opp_next="S06", opp_edge="E18", obstacle=False)
+    plan = st_corr2b.planner.plan(gs)
+    ok &= check("前段走廊: 对手骑马已动身时弃掉必输竞速任务",
+                plan.kind != "task" or plan.position != "S06",
                 repr(plan))
 
     st2 = PlannerStrategy()
@@ -5539,6 +5551,100 @@ def test_warden_strategy():
                 not st._beats_opp_to_task(gs, t_race, opp_eta - 1, 4,
                                           "S02"),
                 f"opp_eta={opp_eta}")
+
+    # ---- V3.98.27 平分决胜银行（任务书 7.3/9.5）----
+    # 未交付任务分封顶 80；触顶后每帧价值在决胜阶梯：鲜度>好果。
+    def bank_st():
+        s = WardenStrategy()
+        s._score_farm_mode = True
+        s.camp_node, s._plans_ready = "S10", True
+        return s
+
+    st = bank_st()
+    gs = gs_at("S07", opp_cur="S03", round_no=470, phase=P.PHASE_RUSH,
+               task_score=80, freshness=88.0)
+    gs.players[1001]["resources"] = {P.ICE_BOX: 1}
+    a = st._farm_endgame(gs, "S07")
+    ok &= check("bank: 任务分触顶后手中冰立即入账鲜度",
+                a and a["action"] == "USE_RESOURCE"
+                and a["resourceType"] == P.ICE_BOX, str(a))
+
+    st = bank_st()
+    gs = gs_at("S07", opp_cur="S03", round_no=470, phase=P.PHASE_RUSH,
+               task_score=80, freshness=96.0)
+    gs.nodes["S07"]["resourceStock"] = {P.ICE_BOX: 1}
+    a = st._farm_endgame(gs, "S07")
+    ok &= check("bank: 触顶后脚下冰领进库存（96鲜度先存不用）",
+                a and a["action"] == "CLAIM_RESOURCE"
+                and a["resourceType"] == P.ICE_BOX, str(a))
+
+    st = bank_st()
+    gs = gs_at("S07", opp_cur="S03", round_no=470, phase=P.PHASE_RUSH,
+               task_score=80, freshness=95.0)
+    gs.nodes["S09"]["resourceStock"] = {P.ICE_BOX: 1}
+    a = st._farm_endgame(gs, "S07")
+    ok &= check("bank: 触顶后可达冰值得专程去取",
+                a and a["action"] == "MOVE", str(a))
+
+    st = bank_st()
+    gs = gs_at("S07", opp_cur="S03", round_no=470, phase=P.PHASE_RUSH,
+               task_score=80, freshness=95.0)
+    a = st._farm_endgame(gs, "S07")
+    ok &= check("bank: 无冰时 RUSH 期急策转护果令",
+                a and a["action"] == "RUSH_PROTECT", str(a))
+
+    st = bank_st()
+    t_dead = {"taskId": "T_DEAD", "taskTemplateId": "T01",
+              "nodeId": "S09", "processRound": 4, "score": 30,
+              "expireRound": 590, "active": True, "completed": False,
+              "failed": False, "ownerPlayerId": 0,
+              "protectionPlayerId": 0}
+    gs = gs_at("S07", opp_cur="S03", round_no=500, phase=P.PHASE_RUSH,
+               task_score=80, freshness=100.0, tasks=(t_dead,))
+    gs.players[1001]["rushTacticUsedCount"] = 1
+    a = st._farm_endgame(gs, "S07")
+    ok &= check("bank: 触顶后不再为 0 分任务移动烧鲜度",
+                a and a["action"] == "WAIT", str(a))
+
+    st = bank_st()
+    gs = gs_at("S07", opp_cur="S03", round_no=470, phase=P.PHASE_RUSH,
+               task_score=75, freshness=88.0)
+    ok &= check("bank: 未触顶不启动银行（继续农任务）",
+                st._farm_ladder_bank_action(gs, "S07") is None, "None")
+
+    st = bank_st()
+    gs = gs_at("S07", opp_cur="S07", round_no=470, phase=P.PHASE_RUSH,
+               task_score=80, freshness=90.0)
+    card = st._defense_card(gs, {"contestType": P.CONTEST_TASK,
+                                 "targetNodeId": "S07"})
+    ok &= check("bank: 触顶后任务窗弃权省好果（第二级决胜资产）",
+                card == P.CARD_ABSTAIN, str(card))
+
+    st = bank_st()
+    gs = gs_at("S02", opp_cur="S02", round_no=200,
+               task_score=80, freshness=90.0)
+    card = st._defense_card(gs, {"contestType": P.CONTEST_DOCK,
+                                 "targetNodeId": "S02"})
+    ok &= check("bank: S02 码头窗不受银行影响仍出鲜供",
+                card == P.CARD_XIAN_GONG, str(card))
+
+    # ---- V3.98.27 强通旁路上界（任务书 6.3.2 + 官方折返机制）----
+    st = WardenStrategy()
+    gs = gs_at("S10", opp_cur="S09", opp_next="S10", opp_edge="E05",
+               round_no=470, phase=P.PHASE_RUSH)
+    ok &= check("拒止证明: 普通防2卡强通税=20",
+                st._hypothetical_forced_tax(gs, "S09", 2) == 20,
+                str(st._hypothetical_forced_tax(gs, "S09", 2)))
+    ok &= check("拒止证明: 武关防4卡强通税=35",
+                st._hypothetical_forced_tax(gs, "S10", 4) == 35,
+                str(st._hypothetical_forced_tax(gs, "S10", 4)))
+    ok &= check("拒止证明: 宫门防4卡强通税=32",
+                st._hypothetical_forced_tax(gs, "S14", 4) == 32,
+                str(st._hypothetical_forced_tax(gs, "S14", 4)))
+    stay = st._mobile_stay_delay(gs, "S10", 1, 20)
+    cap = st._forced_bypass_delay(gs, "S10", 4)
+    ok &= check("拒止证明: RUSH期驻留延误不超过折返强闯上界",
+                stay <= cap, f"stay={stay} cap={cap}")
     return ok
 
 
@@ -6616,9 +6722,11 @@ def test_hybrid_strategy():
                 action and action["action"] != "SET_GUARD",
                 str(action))
 
-    # 第二张宫门卡早几帧生效时，对手可能恰好冻结在剩余 6-7 帧，旧版
-    # 只认 <=5 帧而整张卡都不敢离场。按我方卡龄 + 边余量 + 必验核 +
-    # 最快交付作完整证明：必死就立即走；时间尚足则继续守。
+    # 第二张宫门卡早几帧生效时，对手可能恰好冻结在剩余 6-7 帧。
+    # V3.98.27 起墙的保底延误按 6.3.2 强通旁路取上界（折返+赢窗+税），
+    # 风化寿命账（119 帧）不再构成"必死"证明——r464 剩 136 帧时对手
+    # 折返强闯仍可交付，正确行为是继续驻守（在场才能应 PASS 窗），
+    # 交付由死线离场机制兜底。
     gs = make_state(
         bypass=True, cur="S14", opp_cur="S13", round_no=464,
         phase=P.PHASE_RUSH, task_score=120, verified=True,
@@ -6631,7 +6739,24 @@ def test_hybrid_strategy():
     st.camp_node, st._plans_ready = "S14", True
     st._guard_sent["S14"] = 460
     action = st.main_action(gs)
-    ok &= check("hybrid: S14现墙已证明对手必死则立即交付",
+    ok &= check("hybrid: S14墙杀未证死（强通旁路可活）则继续驻守",
+                not st._active_gate_wall_kills(gs, "S14")
+                and action and action["action"] == "WAIT",
+                f"wall={st._my_guard_remaining(gs, 'S14')} action={action}")
+    # 尾段剩余帧连折返强闯都装不下时，诚实账仍证死 → 立即交付。
+    gs = make_state(
+        bypass=True, cur="S14", opp_cur="S13", round_no=560,
+        phase=P.PHASE_RUSH, task_score=120, verified=True,
+        opp_next="S14", opp_edge="E09", opp_edge_ms=18000,
+        opp_edge_progress=11000)
+    gs.nodes["S14"]["guard"] = {
+        "ownerTeamId": gs.my_team, "defense": 4,
+        "initialDefense": 4, "maxDefense": 4, "active": True}
+    st = WardenStrategy(forced_camp="S14")
+    st.camp_node, st._plans_ready = "S14", True
+    st._guard_sent["S14"] = 556
+    action = st.main_action(gs)
+    ok &= check("hybrid: S14强通旁路也来不及时现墙证死立即交付",
                 st._active_gate_wall_kills(gs, "S14")
                 and action and action["action"] == "MOVE"
                 and action["targetNodeId"] == "S15",
@@ -6653,6 +6778,65 @@ def test_hybrid_strategy():
                 not st._active_gate_wall_kills(gs, "S14")
                 and action and action["action"] == "WAIT",
                 f"wall={st._my_guard_remaining(gs, 'S14')} action={action}")
+
+    # ---- V3.98.27 MOBILE 中局死亡补判 ----
+    # 三态原只在 S02 完成帧锁存；中途被冻/被锁死的局曾永远空跑交付线。
+    hybrid = HybridStrategy()
+    hybrid.mode = HybridStrategy.MODE_SCORE
+    gs = make_state(bypass=True, cur="S03", opp_cur="S03", round_no=100,
+                    task_score=30)
+    hybrid._recheck_midgame_death(gs)
+    ok &= check("hybrid: 中局补判活局不误转",
+                not hybrid._s02_farm_only and not hybrid._s02_deny_only,
+                f"farm={hybrid._s02_farm_only} deny={hybrid._s02_deny_only}")
+
+    hybrid = HybridStrategy()
+    hybrid.mode = HybridStrategy.MODE_SCORE
+    gs = make_state(bypass=True, cur="S03", opp_cur="S13", round_no=560,
+                    task_score=30)
+    hybrid._recheck_midgame_death(gs)
+    ok &= check("hybrid: 中局证死且对手仍活时转拒止",
+                hybrid._s02_deny_only and not hybrid._s02_farm_only,
+                f"farm={hybrid._s02_farm_only} deny={hybrid._s02_deny_only}")
+
+    hybrid = HybridStrategy()
+    hybrid.mode = HybridStrategy.MODE_SCORE
+    gs = make_state(bypass=True, cur="S03", opp_cur="S02", round_no=585,
+                    task_score=30)
+    hybrid._recheck_midgame_death(gs)
+    ok &= check("hybrid: 中局双死时转农（决胜银行入口）",
+                hybrid._s02_farm_only and not hybrid._s02_deny_only,
+                f"farm={hybrid._s02_farm_only} deny={hybrid._s02_deny_only}")
+    return ok
+
+
+def test_platform_points():
+    """任务书 9.2/9.5 平台积分与决胜阶梯（V3.98.27 arena 建模）。"""
+    from arena import Arena, PID_A, PID_B
+    ok = True
+
+    def out(sa, sb, fa=80.0, fb=80.0, ga=50, gb=50, ia=0, ib=0):
+        return {PID_A: {"score": sa, "fresh": fa, "good": ga, "illegal": ia},
+                PID_B: {"score": sb, "fresh": fb, "good": gb, "illegal": ib}}
+
+    pts, lad = Arena._platform_points(out(300, 200))
+    ok &= check("平台积分: 总分高者 3:0", pts == (3, 0), str((pts, lad)))
+    pts, lad = Arena._platform_points(out(0, 0))
+    ok &= check("平台积分: 双 0 → 0:0（唯一真双输）",
+                pts == (0, 0), str((pts, lad)))
+    pts, lad = Arena._platform_points(out(80, 80, fa=66.8, fb=65.7))
+    ok &= check("平台积分: 同分>0 比鲜度 3:1（replay-A 型败局可见）",
+                pts == (3, 1) and lad["level"] == "fresh",
+                str((pts, lad)))
+    pts, lad = Arena._platform_points(out(80, 80, ga=60, gb=40))
+    ok &= check("平台积分: 鲜度平则比好果",
+                pts == (3, 1) and lad["level"] == "good", str((pts, lad)))
+    pts, lad = Arena._platform_points(out(80, 80, ia=2, ib=6))
+    ok &= check("平台积分: 好果平则比惩罚（少者胜）",
+                pts == (3, 1) and lad["level"] == "penalty",
+                str((pts, lad)))
+    pts, lad = Arena._platform_points(out(80, 80))
+    ok &= check("平台积分: 全平 1:1", pts == (1, 1), str((pts, lad)))
     return ok
 
 
@@ -6696,6 +6880,7 @@ def main():
     ok &= test_front_tempo_tail_follow()
     ok &= test_warden_strategy()
     ok &= test_hybrid_strategy()
+    ok &= test_platform_points()
     print()
     print("ALL PASS" if ok else "SOME FAILED")
     sys.exit(0 if ok else 1)

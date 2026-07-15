@@ -40,7 +40,12 @@ RUSH_SPEED_FRAMES = 15
 UNKNOWN_WEATHER_WINDOWS = ((80, 120), (200, 240),
                            (320, 360), (440, 480))
 FARM_TASK_RACE_MARGIN = 2  # S02转农任务必须真实完成领先，不追同帧/贴身局
-FARM_TASK_CAP = 150        # 未交付刷分以任务基础分封顶为一阶目标
+# 任务书 7.3：未交付时任务分 = min(累计任务基础分, 80)，且无里程碑加成。
+# 旧值 150 在规则里没有锚点——80 之后的每一分都是死分，那些帧的真实
+# 价值在 9.5 平分决胜阶梯上（第一级鲜度、第二级好果）。
+FARM_TASK_CAP = 80
+FARM_BANK_ICE_MAX_ETA = 120   # 决胜银行取冰的最远路程（+10 鲜度 vs 路途损耗）
+FARM_BANK_ICE_USE_BELOW = 90  # 鲜度 ≤90 才用冰：+10 恰好不浪费 100 上限
 FARM_CHAIN_DEPTH = 3       # 看完整路线任务链，避免只看最近一项误选低分走廊
 FARM_CONTEST_DISCOUNT = 0.28
 FARM_REFRESH_VALUE = 8     # 无活跃任务时，蹲任务候选点的保底期望
@@ -462,6 +467,13 @@ class WardenStrategy(BaselineStrategy):
                 and not self._opp_can_qiang_xing(state) \
                 and self._xian_gong_available(state):
             return P.CARD_XIAN_GONG
+        # 决胜银行（V3.98.27）：转农世界任务分触顶后，任务窗赢了也是
+        # 0 分，而好果是 9.5 阶梯第二级决胜资产——弃权省果。
+        # S02 码头窗不受此限：那是先手锁，教义优先。
+        if contest.get("contestType") == P.CONTEST_TASK \
+                and self._score_farm_mode \
+                and (me.get("taskScore", 0) or 0) >= FARM_TASK_CAP:
+            return P.CARD_ABSTAIN
         # 码头窗（S02 开局争先手）：双方此时都无马 → 强行不存在 →
         # 鲜供不败（对鲜供平、对其余全胜）。1 好果/拍；若演化成镜像
         # 锁死，未交付世界里好果一文不值，烧果免费。鲜供需要鲜度≥80；
@@ -1262,7 +1274,47 @@ class WardenStrategy(BaselineStrategy):
                 and squads >= dispatches * 2:
             clear_time = 8 + max(0, dispatches - 1) * self.WEAKEN_RESEND_GAP
             stay_delay = min(stay_delay, clear_time)
+        # 任务书 6.3.2 强通旁路（RUSH 期也可用，V3.98.27）：中边冻结的
+        # 对手可按官方机制"退回起点另一邻站→折返→从起点强闯"绕过风化
+        # 寿命账。PASS 窗我方未来未必有弹药应拍，拒止证明只能假设它
+        # 立刻赢窗。上界 = 2×最便宜其他邻边 + 强通税 + 3 帧窗口开销。
+        # RUSH 期禁小分队时风化账（防2卡可达 ~56 帧）曾被当成保底延误
+        # ——对手一套折返强闯就能击穿的伪证明。
+        forced_cap = self._forced_bypass_delay(state, node_id, defense)
+        stay_delay = min(stay_delay, forced_cap)
         return stay_delay
+
+    def _forced_bypass_delay(self, state, node_id, defense):
+        """对手（已踏上入边）经折返强闯绕过我方卡的最快额外代价。"""
+        opp = state.opp
+        origin = opp.get("currentNodeId") if opp else None
+        tax = self._hypothetical_forced_tax(state, node_id, defense)
+        if not origin:
+            return tax + 3      # 位置未知按最不利（它已站在起点）估
+        cheapest = None
+        for neighbor, edge in state.graph.neighbors(origin):
+            if neighbor == node_id:
+                continue
+            frames = state.graph.edge_frames(edge, P.SPEED_RUSH)
+            if cheapest is None or frames < cheapest:
+                cheapest = frames
+        if cheapest is None:
+            return 999          # 起点无其他邻边：冻结无解，只剩风化/小队
+        return 2 * cheapest + tax + 3
+
+    @staticmethod
+    def _hypothetical_forced_tax(state, node_id, defense):
+        """假想我方在 node_id 立防 defense 卡后，对手的强通税（6.3.2）。"""
+        node = state.node(node_id)
+        if node.get("nodeType") == "KEY_PASS":
+            tax = min(50, 15 + defense * 5)
+        elif node_id == state.gate_node:
+            tax = min(32, 12 + defense * 5)
+        elif state.has_obstacle(node_id):
+            tax = min(28, 8 + defense * 5)
+        else:
+            tax = min(40, 10 + defense * 5)
+        return max(tax, 8 if state.has_obstacle(node_id) else 0)
 
     def mobile_intercept_action(self, state, delivery_slack=None,
                                 allow_reserve=False):
@@ -1594,6 +1646,11 @@ class WardenStrategy(BaselineStrategy):
             if proc.get("targetNodeId") == cur:
                 return P.a_wait()
             return P.a_process()
+        # 平分决胜银行（V3.98.27，任务书 9.5）：任务分触及未交付封顶
+        # 后，每一帧的价值都在决胜阶梯上——第一级鲜度、第二级好果。
+        bank = self._farm_ladder_bank_action(state, cur)
+        if bank is not None:
+            return bank
         # 脚下资源：农期马就是任务巡回速度（短马也领）
         stock = state.node(cur).get("resourceStock") or {}
         res2 = state.me.get("resources") or {}
@@ -1696,6 +1753,62 @@ class WardenStrategy(BaselineStrategy):
         if best and best != cur:
             return self._advance(state, cur, best)
         return P.a_wait()   # 已在候选点上：守波次，脚下刷出即被 _farm_here 吃
+
+    def _farm_ladder_bank_action(self, state, cur):
+        """任务分触顶后的 9.5 决胜银行：冰鉴→护果令→停靠保鲜。
+
+        未交付结算 = min(任务,80) + min(悬赏,25)，鲜度/好果不进总分——
+        但双未交付同分是量化碰撞的常态（80 封顶 + 15/30 步进），此时
+        平台按 9.5 阶梯定 3:1：先比鲜度、再比好果、最后比惩罚。历史
+        真实败局：80:80 局站在冰旁边不领，鲜度差 1.11 输 1:3。
+        """
+        me = state.me
+        base = me.get("taskScore", 0) or 0
+        if base < FARM_TASK_CAP:
+            return None
+        res = me.get("resources") or {}
+        fresh = me.get("freshness", 100) or 0
+        # ① 手上有冰且不浪费 100 上限 → 立即入账（+10 鲜度=第一级决胜资产）
+        if res.get(P.ICE_BOX, 0) > 0 and fresh <= FARM_BANK_ICE_USE_BELOW:
+            return P.a_use_resource(P.ICE_BOX)
+        # ② 脚下有冰 → 领进库存（2 帧读条，反正在停靠）
+        stock = state.node(cur).get("resourceStock") or {}
+        if stock.get(P.ICE_BOX, 0) > 0 and res.get(P.ICE_BOX, 0) < 2:
+            return P.a_claim_resource(cur, P.ICE_BOX)
+        # ③ 可达的冰 → 去取（相对停靠的额外损耗 ≤0.02/帧，+10 恒净赚）
+        target = self._farm_bank_ice_target(state, cur)
+        if target and target != cur:
+            self._farm_target = target
+            return self._advance(state, cur, target)
+        # ④ 护果令：死农世界疾行/破关一文不值，急策名额转 ×0.2 保鲜
+        if state.phase == P.PHASE_RUSH \
+                and (me.get("rushTacticUsedCount") or 0) == 0 \
+                and not self._rush_tactic_tried and fresh < 100:
+            self._rush_tactic_tried = True
+            return P.a_rush_protect()
+        # ⑤ 停靠：静止 0.05 是可控的最低损耗，不为 0 分任务移动烧鲜度
+        return P.a_wait()
+
+    def _farm_bank_ice_target(self, state, cur):
+        """最近的可达冰鉴节点；只在 600 帧内取得到且路线无卡无障碍。"""
+        best, best_eta = None, None
+        for nid in state.nodes:
+            if nid == cur:
+                continue
+            stock = state.node(nid).get("resourceStock") or {}
+            if stock.get(P.ICE_BOX, 0) <= 0:
+                continue
+            eta, path = self._shortest(state, cur, nid, state.my_speed())
+            if not path or eta > FARM_BANK_ICE_MAX_ETA:
+                continue
+            if self._farm_path_blocked(state, path) \
+                    or self._farm_route_blocked(state, path):
+                continue
+            if state.round + eta + 2 > state.duration_round:
+                continue
+            if best_eta is None or eta < best_eta:
+                best, best_eta = nid, eta
+        return best
 
     def _farm_backtrack_step(self, state, cur, path):
         """转农后避免 S03->S02 这类向起点折返。"""
@@ -2275,6 +2388,10 @@ class WardenStrategy(BaselineStrategy):
         wall = self._my_guard_remaining(state, cur)
         if wall <= 0:
             return False
+        # V3.98.27：强通旁路对 RUSH 期同样可用——墙的保底延误不能超过
+        # 对手折返强闯（官方机制）+立刻赢窗的上界（我方离场后无人应拍）。
+        defense = self._my_guard_defense(state, cur)
+        wall = min(wall, self._forced_bypass_delay(state, cur, defense))
         edge = self._opp_edge_remaining(state)
         after = self._opp_delivery_lower_bound(state, cur)
         if after >= 999:

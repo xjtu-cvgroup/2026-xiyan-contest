@@ -205,7 +205,10 @@ class PlannerStrategy(BaselineStrategy):
     # 领跑者近乎免费；此前类型门把它整个排除在我们的武器库外）
     GUARD_NODE_TYPES = {"KEY_PASS", "PASS", "MOUNTAIN_PASS", "GATE",
                         "PALACE_STATION"}
-    GUARD_MIN_OPP_ETA = 8       # 对手至少 8 帧后才到（4 帧读条 + 生效余量）
+    # 规则硬下界：提交 T → T+5 起拦，对手 ≥6 帧到即拦得住（1 帧余量）。
+    # 旧值 8 的多出 2 帧是给"未建模的对手骑乘"留的隐性垫；V3.98.27 起
+    # _opp_eta 已显式计入公开增益与库存马，垫改为显式建模。
+    GUARD_MIN_OPP_ETA = 6
     GUARD_MAX_OPP_ETA = 150     # 太远则风化/悬赏先到，白设
     # V3.12：80 → 65。V3.7 修了 ETA 度量后 4 局仍 0 次设卡——replay31 领跑局
     # 仿真：S10/S11 咽喉停靠帧 slack 分布 70~84，全被 80 拦掉（SAFETY_MARGIN
